@@ -1,0 +1,8 @@
+{
+  "[acp:wait]": [
+    {
+      "text": "waiting for cancellation",
+      "wait_for_cancel": { "marker": "waiting.txt", "record": "cancelled.txt" }
+    }
+  ]
+}

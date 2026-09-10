@@ -23,7 +23,9 @@ use ir::{
     eval,
 };
 use smol_str::SmolStr;
-use steps::{Capabilities, Registry, StepCtx};
+use steps::{
+    Capabilities, Progress, ProgressAck, ProgressError, ProgressSender, Registry, StepCtx,
+};
 use tokio::runtime::Handle;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::task::{AbortHandle, JoinHandle, JoinSet};
@@ -37,7 +39,7 @@ use crate::lifecycle::{
     RESULT_PREPARED_KIND, Recorded, ResultOrigin, ResultPreparedNote, RunFinished, ScopeReleased,
     TRANSITION_KIND, Transition, TransitionNote, apply_transition,
 };
-use crate::observe::{EventObserver, ObserveError};
+use crate::observe::{EventObserver, ObserveError, recorded_now};
 use crate::sink::LogSink;
 use crate::view::{BranchMap, live_view, routing_view};
 use crate::{
@@ -370,9 +372,13 @@ enum Signal {
         ctl:    Control,
         ack:    DeliverAck,
     },
+    /// A step's progress event, with the durable acknowledgement its sender
+    /// asked for, if any: answered once the record is appended and every
+    /// observer's durable storage has it.
     Progress {
         firing: FiringId,
         event:  StepEvent,
+        ack:    Option<ProgressAck>,
     },
     Finished {
         firing:  FiringId,
@@ -1142,10 +1148,16 @@ impl Driver {
             }
             Signal::Inject(event) => self.feed(event),
             Signal::Deliver { firing, ctl, ack } => self.on_deliver(firing, ctl, ack),
-            Signal::Progress { firing, event } => {
+            Signal::Progress { firing, event, ack } => {
                 let event = self.mask_progress(firing, event).await;
                 self.note_question(firing, &event);
+                // The External record `feed` appends takes the next seq.
+                let seq = self.engine.log.len() as u64;
+                self.note_expiry(firing, &event);
                 self.feed(Event::StepProgress { firing, ev: event });
+                if let Some(ack) = ack {
+                    self.acknowledge_durable(seq, ack);
+                }
             }
             Signal::Finished {
                 firing,
@@ -1327,6 +1339,8 @@ impl Driver {
 
     /// Hand a finished attempt to the host before its record, when hooks are
     /// installed. `true` when the finish is now the hook task's to complete.
+    /// The outcome is the one [`Self::finish`] finalized, so on the final
+    /// attempt the host prepares the effective result the engine records.
     fn hook_result(
         &mut self,
         firing: FiringId,
@@ -1603,6 +1617,31 @@ impl Driver {
         }
     }
 
+    /// Answer an acknowledged progress send once the record at `seq` is in
+    /// every observer's durable storage. The wait runs off the driver task:
+    /// a store's write latency must not stall the loop. The step awaits the
+    /// answer before it continues, so its later sends and its outcome still
+    /// follow this record.
+    fn acknowledge_durable(&mut self, seq: u64, ack: ProgressAck) {
+        if self.observers.is_empty() {
+            let _ = ack.send(Ok(()));
+            return;
+        }
+        let observers = self.observers.clone();
+        self.background.spawn(async move {
+            let mut result = Ok(());
+            for observer in &observers {
+                if let Err(error) = observer.durable(seq).await {
+                    result = Err(ProgressError::NotDurable {
+                        source: Box::new(error),
+                    });
+                    break;
+                }
+            }
+            let _ = ack.send(result);
+        });
+    }
+
     /// Append-then-apply, then dispatch whatever the core asked for.
     ///
     /// The append happens inside `apply`, which records this event as
@@ -1627,14 +1666,17 @@ impl Driver {
         commands
     }
 
-    /// Hand every record appended since `from` to each observer.
+    /// Hand every record appended since `from` to each observer, stamped
+    /// with one reading of the recording clock: the append is the recording
+    /// boundary, and the clock is read here, outside the state machine.
     fn notify_observers(&self, from: usize) {
         if self.observers.is_empty() {
             return;
         }
+        let recorded_at = recorded_now();
         for record in &self.engine.log.records()[from..] {
             for observer in &self.observers {
-                observer.on_record(record, &self.engine);
+                observer.on_record(record, recorded_at, &self.engine);
             }
         }
     }
@@ -2284,10 +2326,17 @@ impl Driver {
         };
         // One lookup for both: a firing whose node left the graph has no runner
         // either, and fails here rather than carrying a nameless step forward.
-        let Some((name, kind, runner)) = self.engine.graph().node(node).and_then(|n| {
-            let runner = self.runners.get(&n.step.kind)?;
-            Some((n.name.clone(), n.step.kind.clone(), runner))
-        }) else {
+        let Some((name, kind, max_attempts, runner)) =
+            self.engine.graph().node(node).and_then(|n| {
+                let runner = self.runners.get(&n.step.kind)?;
+                Some((
+                    n.name.clone(),
+                    n.step.kind.clone(),
+                    n.retry.max_attempts,
+                    runner,
+                ))
+            })
+        else {
             self.fail_now(firing, attempt, "no runner for this step kind", NO_RUNNER);
             return;
         };
@@ -2303,7 +2352,7 @@ impl Driver {
             step_kind = %kind,
         );
 
-        let (log_tx, mut log_rx) = mpsc::channel::<StepEvent>(256);
+        let (log_tx, mut log_rx) = ProgressSender::channel(256);
         let (control_tx, control_rx) = mpsc::channel::<Control>(CONTROL_CHANNEL_CAPACITY);
 
         // The firing's serialized forwarder: the one place that awaits control
@@ -2344,11 +2393,13 @@ impl Driver {
                         continue;
                     }
                 };
-                let Some(event) = event else {
+                let Some(Progress { event, ack }) = event else {
                     break;
                 };
+                // A driver that is gone drops the acknowledgement with the
+                // signal, and the sender hears `Closed`.
                 if progress_tx
-                    .send(Signal::Progress { firing, event })
+                    .send(Signal::Progress { firing, event, ack })
                     .await
                     .is_err()
                 {
@@ -2361,6 +2412,7 @@ impl Driver {
         let ctx = StepCtx {
             firing,
             attempt,
+            max_attempts,
             scope,
             node: name.clone(),
             config: resolved.config().clone(),
@@ -2546,6 +2598,22 @@ impl Driver {
         let Some(id) = answer.question.as_deref() else {
             return;
         };
+        self.end_wait(firing, id);
+    }
+
+    /// A step reported that one of its questions expired: the wait ends as
+    /// an answer would end it. The step owns the deadline; the driver only
+    /// stops counting the question as pending.
+    fn note_expiry(&mut self, firing: FiringId, event: &StepEvent) {
+        let Some(expired) = steps::QuestionExpired::from_event(event) else {
+            return;
+        };
+        self.end_wait(firing, &expired.question);
+    }
+
+    /// End the interaction wait for question `id` of `firing`, whether an
+    /// answer or the step's own expiry ended it.
+    fn end_wait(&mut self, firing: FiringId, id: &str) {
         let Some(task) = self.tasks.get_mut(&firing) else {
             return;
         };
@@ -2935,6 +3003,20 @@ impl Driver {
                 );
             }
         }
+
+        // The node's exhaustion policy applies here, once, to every returned
+        // attempt (`RetryPolicy::finalize`): before the host prepares the
+        // result and before the record, so what a host is handed on the final
+        // attempt is what the engine records, and a host's change is never
+        // converted again. The engine records what it is given.
+        let mut outcome = match self
+            .engine
+            .firing(firing)
+            .and_then(|live| self.engine.graph().node(live.node))
+        {
+            Some(node) => node.retry.finalize(attempt, outcome),
+            None => outcome,
+        };
 
         // Masking happens before the append, so the persisted log is post-mask.
         outcome.output = self.sink.mask_value(&outcome.output);

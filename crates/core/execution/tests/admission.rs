@@ -199,7 +199,14 @@ impl LiveChildren {
 }
 
 impl ExecutionObserver for LiveChildren {
-    fn on_engine_record(&self, _: ExecutionId, _: &EventRecord, _: &EngineState) {}
+    fn on_engine_record(
+        &self,
+        _: ExecutionId,
+        _: &EventRecord,
+        _recorded_at: u64,
+        _: &EngineState,
+    ) {
+    }
 
     fn on_lifecycle(&self, record: &CoordinatorRecord) {
         let mut seen = self.0.lock().expect("not poisoned");

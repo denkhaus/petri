@@ -15,6 +15,8 @@ use serde_json::json;
 
 /// The key a question rides under in a `StepEvent::Custom` value.
 pub const QUESTION_KEY: &str = "$question";
+/// The key a question's expiry rides under in a `StepEvent::Custom` value.
+pub const EXPIRED_KEY: &str = "$question_expired";
 /// The key an answer rides under in a `Control::Deliver` value.
 pub const ANSWER_KEY: &str = "$answer";
 /// The `$secret` reference prefix for a sensitive answer's value.
@@ -105,6 +107,37 @@ impl Question {
     /// The secret name a sensitive answer to this question registers as.
     pub fn secret_name(&self) -> String {
         format!("{ANSWER_SECRET_PREFIX}{}", self.id)
+    }
+}
+
+/// A question's answer deadline passed with no answer. The step that owns
+/// the deadline emits this as [`StepEvent::Custom`] before it acts on the
+/// expiry (takes its default, fails with its retry outcome), so the host's
+/// interview record and the public event stream carry the timeout as a fact
+/// the step reported, not an inference from the firing's end.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionExpired {
+    /// The id of the question that expired.
+    pub question:  String,
+    /// How long the step waited: its answer deadline.
+    pub waited_ms: u64,
+    /// The option the step took on its own, by key, when it had a default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default:   Option<String>,
+}
+
+impl QuestionExpired {
+    /// The event a step emits to report the expiry.
+    pub fn to_event(&self) -> StepEvent {
+        StepEvent::Custom(json!({ EXPIRED_KEY: self }))
+    }
+
+    /// The expiry a step event carries, if it is one.
+    pub fn from_event(event: &StepEvent) -> Option<Self> {
+        let StepEvent::Custom(value) = event else {
+            return None;
+        };
+        serde_json::from_value(value.get(EXPIRED_KEY)?.clone()).ok()
     }
 }
 
@@ -263,6 +296,30 @@ mod tests {
         assert_eq!(
             Question::from_event(&StepEvent::Custom(json!({"other": 1}))),
             None
+        );
+    }
+
+    #[test]
+    fn an_expiry_round_trips_through_its_event_and_is_not_a_question() {
+        let expired = QuestionExpired {
+            question:  "gate#3".into(),
+            waited_ms: 1000,
+            default:   Some("N".into()),
+        };
+        let event = expired.to_event();
+        assert_eq!(QuestionExpired::from_event(&event), Some(expired));
+        assert_eq!(Question::from_event(&event), None);
+        let without_default = QuestionExpired {
+            question:  "gate#3".into(),
+            waited_ms: 500,
+            default:   None,
+        };
+        let StepEvent::Custom(value) = without_default.to_event() else {
+            panic!("custom");
+        };
+        assert_eq!(
+            value,
+            json!({ EXPIRED_KEY: { "question": "gate#3", "waited_ms": 500 } })
         );
     }
 

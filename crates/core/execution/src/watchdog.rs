@@ -4,7 +4,8 @@
 //! engine or lifecycle record of any execution is activity. A pending human
 //! question parks the clock: while a step of the run waits on a person, the
 //! run is not stalled, it is blocked. When the last pending question is
-//! answered the run gets a full stall budget again.
+//! answered, or expires by the step's own report, the run gets a full stall
+//! budget again.
 //!
 //! This is separate from each attempt's active-work timer
 //! ([`ir::TimeoutPolicy`]): that one bounds one step's own work, this one
@@ -20,7 +21,7 @@ use std::time::Duration;
 
 use engine::{EngineState, Event, EventRecord};
 use serde::{Deserialize, Serialize};
-use steps::{Answer, Question};
+use steps::{Answer, Question, QuestionExpired};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until};
@@ -202,12 +203,20 @@ async fn monitor(inner: Arc<Inner>, stop: CancellationToken, cancel: impl Fn(Sta
 }
 
 impl ExecutionObserver for StallWatchdog {
-    fn on_engine_record(&self, execution: ExecutionId, record: &EventRecord, _: &EngineState) {
+    fn on_engine_record(
+        &self,
+        execution: ExecutionId,
+        record: &EventRecord,
+        _recorded_at: u64,
+        _: &EngineState,
+    ) {
         self.touch();
         match &record.event {
             Event::StepProgress { ev, .. } => {
                 if let Some(question) = Question::from_event(ev) {
                     self.block(execution, question.id);
+                } else if let Some(expired) = QuestionExpired::from_event(ev) {
+                    self.unblock(execution, &expired.question);
                 }
             }
             Event::ControlRequested {

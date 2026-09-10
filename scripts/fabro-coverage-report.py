@@ -4,6 +4,7 @@
     scripts/fabro-coverage-report.py --evidence DIR [--matrix FILE] [--cells DIR]
                                      [--decisions DIR] [--junit FILE]
                                      [--backends host,docker] [--out DIR] [--strict]
+                                     [--readiness]
 
 Inputs:
 
@@ -54,7 +55,9 @@ every required cell passed, blocked cells included. With --strict the exit
 status is 1 when a required cell failed, skipped, or is missing, or when no
 result exists at all (an empty run is not a passing gate); a cell the matrix
 declares blocked with a reason is visible in the report and in `ok`, but
-does not fail the routine run.
+does not fail the routine run. With --readiness the exit status is 1 whenever
+`ok` is false: the final readiness gate, which a blocked required cell fails
+(`mise run check:fabro:readiness`).
 """
 
 from __future__ import annotations
@@ -368,7 +371,12 @@ def main() -> int:
     parser.add_argument("--junit", type=Path)
     parser.add_argument("--backends", help="comma-separated backends required on this runner")
     parser.add_argument("--out", type=Path)
-    parser.add_argument("--strict", action="store_true")
+    parser.add_argument("--strict", action="store_true", help="fail on a failed, skipped, or missing required cell (routine CI)")
+    parser.add_argument(
+        "--readiness",
+        action="store_true",
+        help="fail unless every required cell passed, blocked cells included (the final readiness gate)",
+    )
     args = parser.parse_args()
 
     evidence: Path = args.evidence
@@ -480,8 +488,17 @@ def main() -> int:
     )
     if mixed_pins:
         print(f"coverage: records disagree on pins {sorted(mixed_pins)}", file=sys.stderr)
-    if not ok:
+    if not ok and not args.readiness:
         print("coverage: the readiness gate is not passed", file=sys.stderr)
+    if args.readiness and not ok:
+        if not reported:
+            reason = "no evidence records were written"
+        elif blocked:
+            reason = f"{blocked} required cell(s) are blocked"
+        else:
+            reason = "a required cell did not pass"
+        print(f"coverage: the final readiness gate fails ({reason})", file=sys.stderr)
+        return 1
     if args.strict and not ci_ok:
         reason = "no evidence records were written" if not reported else "a required cell failed, skipped, or is missing"
         print(f"coverage: the run is not clean ({reason})", file=sys.stderr)

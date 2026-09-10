@@ -65,6 +65,20 @@ impl PebbleEnvironment {
         Ok(adapter)
     }
 
+    /// An adapter for file reads alone, with no probe: what a prompt node
+    /// loads its project memory through. `platform` says unknown, and nothing
+    /// that runs a command should be asked of it.
+    pub fn for_files(env: Arc<dyn ExecEnv>) -> Self {
+        Self {
+            env,
+            cancel: CancellationToken::new(),
+            kill: CancellationToken::new(),
+            platform: "unknown".into(),
+            os_version: "unknown".into(),
+            ripgrep: false,
+        }
+    }
+
     fn path(&self, path: &str) -> PathBuf {
         // Path joining is lexical. It does not inspect Petri's host filesystem.
         Path::new(self.env.workspace_path()).join(path)

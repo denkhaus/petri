@@ -15,11 +15,19 @@
 //! calls a hook service for a workflow point, so installing one service
 //! means each hook executes once.
 //!
-//! Tool-boundary points (`BeforeToolUse`, `AfterToolUse`, `AfterToolFailure`)
-//! are not driven by the adapter: the agent backend's tool middleware reaches
-//! the same service through the [`HookServiceHandle`] capability and asks at
-//! the actual tool boundary. The service stays the single owner of the
-//! decision either way.
+//! A few points are not driven by the adapter, because the driver is not
+//! where they happen: the tool-boundary points (`BeforeToolUse`,
+//! `AfterToolUse`, `AfterToolFailure`) are asked by the agent backend's tool
+//! middleware at the actual tool boundary; `ScopeReady` and `RunStarted`, and
+//! the admission points of a node whose frontend marked it
+//! [`ADMISSION_HOOKS_META`]` = "step"`, are asked by the step that runs first
+//! in the scope's environment (the sandbox has to exist before a hook can be
+//! placed in it); `ForkStarted` and `ForkCompleted` are asked by the fork
+//! step and the fan-in step, the two places that run exactly once per fork
+//! visit (a `for_each` fork has one routing group, so the driver cannot see
+//! it at admission). Every one of them reaches the same service through the
+//! [`HookServiceHandle`] capability, so a host that replaces the service
+//! receives every point, and each point is asked exactly once.
 
 use std::sync::Arc;
 
@@ -30,6 +38,7 @@ use driver::lifecycle::{
     TransitionReport,
 };
 use engine::{Admission, RouteDecision};
+pub use ir::placeholder::{ADMISSION_HOOKS_BY_STEP, ADMISSION_HOOKS_META};
 use ir::{EdgeId, Outcome, Status, Value};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
@@ -37,14 +46,23 @@ use smol_str::SmolStr;
 /// The note kind the adapter records for every service report.
 pub const HOOK_NOTE_KIND: &str = "hook";
 
+/// The note kind one record of a hook's own agent activity is recorded
+/// under: the payload is a [`HookActivity`]. The projector derives
+/// `hook_activity` events from it, apart from the stage's own agent activity,
+/// so a consumer never counts a hook's model requests as the stage's.
+pub const HOOK_ACTIVITY_NOTE_KIND: &str = "hook.activity";
+
 /// Where in a run a hook may be configured. Names describe the point, not
 /// any one workflow format's spelling of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookPoint {
-    /// Before the first attempt of a visit is dispatched.
+    /// Before the first attempt of a visit is dispatched. Driven by the
+    /// adapter at admission, or, for a node whose meta says
+    /// [`ADMISSION_HOOKS_META`]` = "step"`, by the node's own step once its
+    /// environment is in place.
     BeforeVisit,
-    /// Before every attempt, retries included.
+    /// Before every attempt, retries included. Driven like `BeforeVisit`.
     BeforeAttempt,
     /// After an attempt returned, before its record; the decision may adjust
     /// the effective result.
@@ -56,10 +74,22 @@ pub enum HookPoint {
     RouteSelected,
     /// Before a retry attempt is scheduled.
     Retrying,
-    /// A fork's branches are about to start.
+    /// A fork's branches are about to start. Asked by the fork node's step,
+    /// once per fork visit; the request carries the fork node's view.
     ForkStarted,
-    /// A fork's branches have all completed.
+    /// A fork's branches have all completed. Asked by the fan-in step, once
+    /// every branch is in and before the results are published; the request
+    /// carries the fan-in's view and a [`ForkCompletedPayload`] naming the
+    /// fork.
     ForkCompleted,
+    /// A scope's environment is in place and seeded (checked out), before
+    /// the first stage runs in it. Asked by that first step, once per run;
+    /// the request carries the step's view and a [`ScopeReadyPayload`].
+    ScopeReady,
+    /// The run's work is about to start: the environment is ready and no
+    /// stage has run. Asked once per run by the same step, after
+    /// `ScopeReady`; the request carries the step's view and no payload.
+    RunStarted,
     /// The run ended: its status is final, no environment is released yet.
     /// A run-level point: the request carries no firing view; its payload is
     /// [`RunFinishedPayload`].
@@ -103,6 +133,29 @@ pub enum HookDecision {
     },
 }
 
+/// What a hook's own model and tool work cost. A prompt hook makes one
+/// request; an agent hook makes one per model turn and runs tools. `tokens`
+/// is the backend's token accounting in the shape the native agent reports
+/// under `pebble.usage` (`input`, `output`, `reasoning`, `cache_read`,
+/// `cache_write`); it is absent when no answer arrived (a timeout, a failed
+/// request).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct HookUsage {
+    /// Model requests the hook made, answered or not.
+    pub requests:        u64,
+    /// Tool calls the hook's agent started; none for a prompt hook.
+    #[serde(default)]
+    pub tool_calls:      u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens:          Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_ms:    Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_ms:         Option<u64>,
+}
+
 /// One hook the service ran, or could not run, for the record.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HookRun {
@@ -113,6 +166,28 @@ pub struct HookRun {
     pub duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message:     Option<String>,
+    /// What the hook's own model and tool work cost, when it did any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage:       Option<HookUsage>,
+}
+
+/// The hook operation an activity record belongs to: the point and the
+/// hook's name. With the firing and attempt the record is attributed to,
+/// this identifies one execution of one hook.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookOperation {
+    pub point: HookPoint,
+    pub hook:  String,
+}
+
+/// One event a hook's own agent produced, for the record. `backend` names
+/// the agent backend and `envelope` is the backend's own event, as the
+/// stage's agent activity carries them; the operation says which hook.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HookActivity {
+    pub hook:     HookOperation,
+    pub backend:  SmolStr,
+    pub envelope: Value,
 }
 
 /// The service's answer for one point.
@@ -125,6 +200,11 @@ pub struct HookReport {
     /// Problems that fail open: recorded, execution continues.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// The activity of the hooks' own agents, in order. Not part of the
+    /// report's own record: the caller records each entry as its own
+    /// [`HOOK_ACTIVITY_NOTE_KIND`] note before the report.
+    #[serde(skip)]
+    pub activity: Vec<HookActivity>,
 }
 
 impl HookReport {
@@ -134,7 +214,30 @@ impl HookReport {
             decision: HookDecision::Proceed,
             hooks: Vec::new(),
             warnings: Vec::new(),
+            activity: Vec::new(),
         }
+    }
+
+    /// The notes that record this report: one per activity entry, then the
+    /// report itself when it says something.
+    pub fn notes(&self) -> Vec<Note> {
+        let mut notes: Vec<Note> = self
+            .activity
+            .iter()
+            .map(|activity| {
+                Note::new(
+                    HOOK_ACTIVITY_NOTE_KIND,
+                    serde_json::to_value(activity).unwrap_or(Value::Null),
+                )
+            })
+            .collect();
+        if !self.is_silent() {
+            notes.push(Note::new(
+                HOOK_NOTE_KIND,
+                serde_json::to_value(self).unwrap_or(Value::Null),
+            ));
+        }
+        notes
     }
 
     /// Whether anything happened worth a record.
@@ -159,11 +262,29 @@ pub struct ScopeReleasedPayload {
     pub outcome: SmolStr,
 }
 
+/// The payload of a [`HookPoint::ScopeReady`] request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeReadyPayload {
+    pub scope:     ir::ScopeId,
+    /// The workspace path inside the environment.
+    pub workspace: String,
+}
+
+/// The payload of a [`HookPoint::ForkCompleted`] request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkCompletedPayload {
+    /// The fork node's instance name: the node whose branches joined.
+    pub fork: SmolStr,
+}
+
 /// What a service is asked about.
 pub struct HookRequest {
     pub point:   HookPoint,
     /// The firing the point belongs to. `None` for the run-level points
-    /// (`RunFinished`, `ScopeReleased`), which have no firing.
+    /// (`RunFinished`, `ScopeReleased`), which have no firing. A point a
+    /// step asks itself carries the view the step built from its context:
+    /// the node, its `meta`, the firing, attempt and scope, and the step's
+    /// resolved config.
     pub view:    Option<Arc<FiringView>>,
     /// The attempt's outcome (`AfterAttempt`, `AfterVisit`, `RouteSelected`).
     pub outcome: Option<Outcome>,
@@ -185,6 +306,16 @@ pub struct HookRequest {
 #[async_trait::async_trait]
 pub trait HookService: Send + Sync {
     async fn run(&self, request: HookRequest) -> HookReport;
+
+    /// The names of the hooks configured for `point`, whatever their
+    /// matcher, for a caller that must warn about a boundary it cannot
+    /// serve (an external agent that exposes no tool boundary for them).
+    /// The default is none: such a caller then warns about nothing, and
+    /// still asks the service at every boundary it does have.
+    fn configured_hooks(&self, point: HookPoint) -> Vec<String> {
+        let _ = point;
+        Vec::new()
+    }
 }
 
 /// The capability type steps and tool middleware look the service up by.
@@ -209,16 +340,6 @@ impl HookAdapter {
     pub fn new(service: Arc<dyn HookService>) -> Self {
         Self { service }
     }
-
-    fn note(report: &HookReport) -> Option<Note> {
-        if report.is_silent() {
-            return None;
-        }
-        Some(Note::new(
-            HOOK_NOTE_KIND,
-            serde_json::to_value(report).unwrap_or(Value::Null),
-        ))
-    }
 }
 
 /// Whether a node is a lowering artifact rather than a stage: the frontend
@@ -229,10 +350,24 @@ fn is_synthetic(view: &FiringView) -> bool {
     view.meta().get("synthetic") == Some(&Value::Bool(true))
 }
 
+/// Whether the node's own step drives its admission points: the frontend
+/// marked it [`ADMISSION_HOOKS_META`]` = "step"`. The driver admits the
+/// first firing of a scope before the scope's environment exists, so a
+/// node that must run its admission hooks with the environment in place (a
+/// hook placed in the sandbox) asks the service from its step instead, in
+/// its own order. The adapter then stays away from those two points, so
+/// each is asked once.
+fn step_admits(view: &FiringView) -> bool {
+    view.meta()
+        .get(ADMISSION_HOOKS_META)
+        .and_then(Value::as_str)
+        == Some(ADMISSION_HOOKS_BY_STEP)
+}
+
 #[async_trait::async_trait]
 impl ExecutionHooks for HookAdapter {
     async fn before_attempt(&self, request: AdmitAttempt) -> AttemptDecision {
-        if is_synthetic(&request.view) {
+        if is_synthetic(&request.view) || step_admits(&request.view) {
             return AttemptDecision::admit();
         }
         let mut notes = Vec::new();
@@ -253,7 +388,7 @@ impl ExecutionHooks for HookAdapter {
                     payload: Value::Null,
                 })
                 .await;
-            notes.extend(Self::note(&report));
+            notes.extend(report.notes());
             match report.decision {
                 HookDecision::Skip { status } => {
                     admission = Admission::Skip {
@@ -290,7 +425,7 @@ impl ExecutionHooks for HookAdapter {
             })
             .await;
         let mut prepared = Prepared::unchanged();
-        prepared.notes.extend(Self::note(&report));
+        prepared.notes.extend(report.notes());
         if let HookDecision::Adjust { status, reason } = report.decision {
             prepared.adjustment.status = Some(status);
             prepared.adjustment.reason = Some(reason);
@@ -312,7 +447,7 @@ impl ExecutionHooks for HookAdapter {
                 payload: Value::Null,
             })
             .await;
-        Self::note(&report).into_iter().collect()
+        report.notes()
     }
 
     async fn transition(
@@ -340,7 +475,7 @@ impl ExecutionHooks for HookAdapter {
             problems: report.warnings.clone(),
             ..TransitionReport::default()
         };
-        out.notes.extend(Self::note(&report));
+        out.notes.extend(report.notes());
         match report.decision {
             HookDecision::Block { reason } => Err(TransitionError::new(reason)),
             HookDecision::Override { group, edge } => {
@@ -359,7 +494,7 @@ impl ExecutionHooks for HookAdapter {
             })
             .await;
         Self::log_run_level(&report);
-        Self::note(&report).into_iter().collect()
+        report.notes()
     }
 
     async fn scope_released(&self, released: ScopeReleased) -> Vec<Note> {
@@ -373,7 +508,7 @@ impl ExecutionHooks for HookAdapter {
             })
             .await;
         Self::log_run_level(&report);
-        Self::note(&report).into_iter().collect()
+        report.notes()
     }
 }
 

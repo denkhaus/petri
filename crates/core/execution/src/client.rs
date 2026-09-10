@@ -123,34 +123,132 @@ impl InvocationHandle {
     }
 
     /// Wait for the child, forwarding a parent cancellation or kill. Steering
-    /// deliveries do not complete the call. `None` means cancellation was
-    /// requested; the coordinator still owns the child's shutdown.
+    /// deliveries do not complete the call. `None` means the parent was told
+    /// to stop; the coordinator still owns the child's shutdown.
     pub async fn result_with_control(
         &mut self,
         control: &mut mpsc::Receiver<Control>,
     ) -> Option<InvocationResult> {
+        self.settled_with_control(control).await.ok()
+    }
+
+    /// Wait for the child's result, forwarding a parent stop. `Err` carries
+    /// the stop the parent was told (`Cancel` or `Kill`), already forwarded
+    /// to the child; the coordinator still owns the child's shutdown, and a
+    /// later wait returns the child's result once it settles. Steering
+    /// deliveries do not end the wait.
+    pub async fn settled_with_control(
+        &mut self,
+        control: &mut mpsc::Receiver<Control>,
+    ) -> Result<InvocationResult, Control> {
         loop {
+            // A child that has finished is finished: its result wins over a
+            // stop that arrived beside it.
             tokio::select! {
-                result = self.result() => return Some(result),
+                biased;
+                result = self.result() => return Ok(result),
                 message = control.recv() => {
-                    if !matches!(message, Some(Control::Deliver(_))) {
-                        self.cancel().await;
-                        return None;
+                    if let Some(stop) = stop_of(message) {
+                        self.forward(&stop).await;
+                        return Err(stop);
                     }
                 },
             }
         }
     }
 
+    /// Wait until the child's engine has started (it holds a slot under its
+    /// gate and its execution is declared) or the child finished, forwarding
+    /// a parent stop as [`Self::settled_with_control`] does. A child whose
+    /// start the parent never saw before a stop never started from the
+    /// parent's point of view, even though the coordinator still runs its
+    /// cancelled execution to record the cancellation.
+    pub async fn started_with_control(
+        &mut self,
+        control: &mut mpsc::Receiver<Control>,
+    ) -> ChildStart {
+        loop {
+            match self.status.borrow().clone() {
+                InvocationStatus::Running { .. } => return ChildStart::Started,
+                InvocationStatus::Finished(result) => return ChildStart::Finished(result),
+                InvocationStatus::Declared => {}
+            }
+            tokio::select! {
+                biased;
+                changed = self.status.changed() => {
+                    changed.expect("the coordinator keeps invocation status open until Finished");
+                }
+                message = control.recv() => {
+                    if let Some(stop) = stop_of(message) {
+                        self.forward(&stop).await;
+                        return ChildStart::Stopped(stop);
+                    }
+                },
+            }
+        }
+    }
+
+    /// Forward a stop the parent was told: a polite cancel as a cancel, a
+    /// kill as an escalation.
+    async fn forward(&self, stop: &Control) {
+        if matches!(stop, Control::Kill) {
+            self.kill().await;
+        } else {
+            self.cancel().await;
+        }
+    }
+
+    /// Politely cancel the child. A child the coordinator has already
+    /// cancelled (its cascade reaches every descendant of a cancelled
+    /// invocation) is left alone, so a parent forwarding its own cancel never
+    /// escalates the child to a kill.
     #[expect(
         clippy::unused_async,
         reason = "the public handle contract keeps cancellation awaitable across implementations"
     )]
     pub async fn cancel(&self) {
+        self.request_stop(false);
+    }
+
+    /// Escalate the child to the kill tier: the request reaches the child's
+    /// driver even when the child is already cancelled, which is what makes
+    /// the driver kill. A child not yet cancelled is cancelled by it.
+    #[expect(
+        clippy::unused_async,
+        reason = "the public handle contract keeps cancellation awaitable across implementations"
+    )]
+    pub async fn kill(&self) {
+        self.request_stop(true);
+    }
+
+    fn request_stop(&self, escalate: bool) {
         let _ = self.cancel.send(CancelRequest {
             invocation: self.id,
-            reason:     None,
+            reason: None,
+            escalate,
         });
+    }
+}
+
+/// How a wait for a child's start ended.
+#[derive(Debug)]
+pub enum ChildStart {
+    /// The child's engine started.
+    Started,
+    /// The child finished before its start was observed.
+    Finished(InvocationResult),
+    /// The parent was told to stop first (`Cancel` or `Kill`); the stop was
+    /// forwarded to the child.
+    Stopped(Control),
+}
+
+/// The stop a control message carries, if any: a steering delivery is not a
+/// stop, and a closed control channel is treated as a polite cancel.
+fn stop_of(message: Option<Control>) -> Option<Control> {
+    match message {
+        Some(Control::Deliver(_)) => None,
+        Some(control) => Some(control),
+        None => Some(Control::Cancel),
     }
 }
 

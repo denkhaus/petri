@@ -56,7 +56,7 @@ let (state, commands) = apply(state, Event::ExecutionStarted(EngineStart::defaul
 | §4 firing rule | `engine::apply::try_fire` |
 | §4 quiescence | `EngineState::is_quiescent`, `apply::finish_if_quiescent` |
 | §5 engine interface | `engine::event` — `Event`, `Command`; `engine::apply::apply` |
-| §5 event log | `engine::log` — v7, with durable admission and routing decisions |
+| §5 event log | `engine::log` — v9, with durable admission and routing decisions and a recording time beside every persisted record |
 | §5 replay | `engine::replay` — `verify_replay` is the determinism canary |
 | §4 retries | `ir::RetryPolicy`, `engine::apply::on_retry_elapsed` |
 | §4 run context | `ir::RunContext`, `engine::state::EngineState::record_outcome` |
@@ -121,6 +121,7 @@ crates/fabro/frontend/tests/fuzz.rs          Fabro plan §7 1: arbitrary text ne
 crates/fabro/acceptance/tests/harness.rs     Fabro plan §7 2: every corpus file lowers or is rejected specifically; REPORT.md
 crates/fabro/acceptance/tests/runs.rs        Fabro plan §7 5: every lowered corpus file runs under stubs; RUNS.md
 crates/fabro/acceptance/tests/routing.rs     Fabro plan §7 3, 5, 7: the scripted battery, checked against the Fabro oracle
+crates/fabro/acceptance/tests/exhaustion.rs  readiness item 4: the failure policy after retries in Fabro's order (explicit routes first under `succeed`, `allow_partial` before any route, an expired human gate), expectations from the pinned source
 crates/fabro/acceptance/tests/workflow.rs    Fabro plan §5.2: nested workflows through the coordinator; one child per manager attempt
 crates/fabro/steps/tests/manager.rs          readiness item 4: the manager loop under a controlled clock (polls, stop condition, exhaustion, defaults, reattach, cancel)
 crates/fabro/steps/tests/parallel.rs         readiness item 3: branches as child invocations; static, mixed and all-failed forks, promotion, duplicate targets, empty `for_each`, item labels, repeated forks, nested forks, cancellation, resume; the fork snapshot offloaded (a 50-item fork's children, resume through the store, two forks in sequence)
@@ -192,8 +193,11 @@ observation, written before the run. `crates/fabro/acceptance/scenarios/matrix.j
 lists every required (scenario, backend, agent) cell with its state, so a
 filtered or skipped case stays visible; `mise run test:fabro:blackbox` runs
 them and reports the coverage, and `mise run test:fabro:blackbox:strict`
-(in `check:nightly`) requires Docker, the vendored bundles, and no skipped
-cell.
+requires Docker, the vendored bundles, and no skipped cell.
+`mise run check:fabro:readiness` is the final readiness gate: the same
+strict run, then a coverage report that fails unless every required cell
+passed, blocked cells included; the nightly workflow runs it on the runners
+that have Docker.
 
 ### The integration handoff
 
@@ -265,7 +269,7 @@ before Petri moves its pin; then the manifests, the contract's pin table, and
 the affected evidence records move together, and the relevant Petri scenarios
 run again through the shipped binary. A library test pass never replaces a
 required Petri scenario. The current pins are in the contract's "Pinned
-revisions" table (Pebble `408638fe`, lithos-llm `4aab27d`, sandbox-driver
+revisions" table (Pebble `6b7d26e0`, lithos-llm `4aab27d`, sandbox-driver
 `5b9f9da`, twins `fedab8e`, Fabro `b648291`, the runner image
 `506a3433f7af`); `mise run check:pins` keeps every citation in agreement.
 The library batch the readiness work asked for landed on
@@ -274,9 +278,9 @@ summary-call usage accounting, `continue_prompt` for a failover with no
 repeated tool effect, child agents inheriting project memory and skill
 directories, skipped-skill reporting, sequential sub-agent tools, a routed
 scripted provider; sandbox-driver's silence-based output drain and the
-preview-URL operation for servers inside containers. Still open in Pebble:
-its project-memory loader is crate-private, so `fabro_steps::memory` mirrors
-it for prompt nodes.
+preview-URL operation for servers inside containers. The later
+`petri-readiness-gaps` revision exports Pebble's project-memory loader, which
+prompt nodes now load through, and the tool-round budget agent hooks enforce.
 
 Host and container scopes use the `sandbox-driver-host` and
 `sandbox-driver-docker` plugins. Petri launches them and communicates over
@@ -483,7 +487,10 @@ with a working execution path.
 12. **`Exhaustion::AcceptPartial` fires whenever a retryable status has no attempts
     left**, including `max_attempts: 1` where no retry was ever possible. Reading it
     the other way would make `allow_partial` silently inert unless retries were also
-    configured.
+    configured. The driver applies it (`RetryPolicy::finalize`) to every returned
+    attempt before a host prepares the result, so the engine records the finish it
+    is given and a host's prepared result is never converted again; the engine
+    applies it only to the `invalid_splice` failure it makes itself.
 
 13. **`base_delay` uses repeated multiplication, not `powi`.** `powi` is not
     guaranteed bit-identical across platforms, and the delay goes into the log.
@@ -1073,8 +1080,9 @@ in order), `default`, `freeform`, `sensitive`, `reference_url_contains` (a
 (`values`, for `multi_select`; Fabro's `multi_selected` `option_keys`), `text`
 (`value`), `negative` (the `N`/`no` option), `invalid` (`value`, sent as a
 choice the step must reject; the re-ask matches `"ask": 2`), `cancel`,
-`withhold` (no reply until the question is cancelled, so a gate with a
-`timeout` expires into its `human.default_choice` or Fabro's retry outcome).
+`withhold` (no reply until the question expires or is cancelled, so a gate
+with a `timeout` expires into its `human.default_choice` or Fabro's retry
+outcome and the receipt records the question as `timed_out`).
 `delay_ms` waits before acting; `required: false` lets an entry go unused.
 
 The terminal shows a `review_target` gate's reference as `review: <label>
@@ -1130,8 +1138,11 @@ edge taken by anything but a transient failure. See `crates/fabro/FORMAT.md`,
 record per question with its invocation, execution, firing, attempt, node,
 occurrence, ask, question id, kind, text, offered option keys, the review
 `reference` and `timeout_ms` when the question had them, the reply
-(`answered` with `choice`/`choices`/`text`, `cancelled`, or `failed`), and
-how it left (`delivered`, `not_live`, `late`, `shutdown`, `withheld`); the
+(`answered` with `choice`/`choices`/`text`, `cancelled`, `failed`, or
+`timed_out` with the `default` the gate took on its own when it had one: the
+gate's own report of its expiry, never inferred from how the firing ended),
+and how it left (`delivered`, `not_live`, `late`, `shutdown`, `withheld`,
+`expired`); the
 `errors` list; and under `script`, a scripted interviewer's per-entry
 `consumed`/`remaining` counts. The records are in the receipt order: by
 invocation path, then invocation, execution, firing, occurrence, and ask
@@ -1207,9 +1218,13 @@ no platform vocabulary in them:
 - **Events.** `execution::events` is the versioned public event contract
   (`crates/core/execution/EVENTS.md`). An `EventProjector` is an
   `ExecutionObserver` that derives `RunEvent`s from every record and hands
-  them to the host's `RunEventSink`, awaited per event so a slow store delays
-  and never drops; `replay_run` rebuilds the same events, with the same
-  identities, from a run dir after the fact, and `EventProjector::primed`
+  them to the host's `RunEventSink`, awaited per event through a bounded
+  queue (`ProjectorOptions`: 1024 events and a 30 second stall budget by
+  default), so a slow store delays delivery but never slows the run or
+  grows memory; what finds the queue full, or follows a failed or stalled
+  sink, is counted in the `ProjectionReceipt` and stays in the durable log.
+  `replay_run` rebuilds the same events, with the same identities, from a
+  run dir after the fact, and `EventProjector::primed`
   attaches at resume. Every event names its run, invocation, execution,
   node (with the frontend's `meta`), firing, visit, attempt and branch role.
 - **Awaited extension points.** `Runtime::hooks` installs

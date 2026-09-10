@@ -214,32 +214,60 @@ fn failure_policies_guard_the_fallback_tier() {
     assert_eq!(node(&graph, "x").retry.on_exhaustion, Exhaustion::Fail);
 }
 
+/// The exhaustion policy rides in the step config beside `on_failure`, and
+/// the engine's own exhaustion stays `Fail`: the step decides what the last
+/// retryable failure becomes, with the explicit routes in hand, as Fabro's
+/// executor applies its failure policy after its retries.
 #[test]
-fn partially_succeed_and_allow_partial_lower_to_accept_partial() {
+fn exhaustion_policies_ride_in_the_step_config_and_the_engine_never_accepts_partial() {
     let graph = lower_ok(&dot(r#"
+        graph [on_failure="succeed"]
         a [prompt="x", allow_partial=true, max_retries=2]
-        b [prompt="x", on_retries_exhausted="partially_succeed"]
+        b [prompt="x", on_retries_exhausted="partially_succeed", on_failure="route"]
         c [prompt="x", on_failure="partially_succeed"]
-        start -> a -> b -> c -> exit
+        d [prompt="x", on_failure="route", on_retries_exhausted="succeed"]
+        e [prompt="x", on_failure="route", max_retries=1]
+        start -> a -> b -> c -> d -> e -> exit
+        e -> a [condition="outcome=failed"]
     "#));
-    assert_eq!(
-        node(&graph, "a").retry.on_exhaustion,
-        Exhaustion::AcceptPartial
-    );
+    for name in ["a", "b", "c", "d", "e"] {
+        assert_eq!(
+            node(&graph, name).retry.on_exhaustion,
+            Exhaustion::Fail,
+            "{name}"
+        );
+    }
+    let config = |name: &str| node(&graph, name).step.config.clone();
     assert_eq!(node(&graph, "a").retry.max_attempts.get(), 3);
+    assert_eq!(config("a")["on_failure"], json!("succeed"));
     assert_eq!(
-        node(&graph, "b").retry.on_exhaustion,
-        Exhaustion::AcceptPartial
-    );
-    assert_eq!(
-        node(&graph, "c").step.config["on_failure"],
+        config("a")["on_retries_exhausted"],
         json!("partially_succeed")
     );
+    assert_eq!(config("b")["on_failure"], json!("route"));
     assert_eq!(
-        node(&graph, "c").retry.on_exhaustion,
-        Exhaustion::AcceptPartial
+        config("b")["on_retries_exhausted"],
+        json!("partially_succeed")
     );
-    assert_eq!(node(&graph, "a").step.config["on_failure"], json!("route"));
+    assert_eq!(config("c")["on_failure"], json!("partially_succeed"));
+    assert_eq!(
+        config("c")["on_retries_exhausted"],
+        json!("partially_succeed"),
+        "the exhaustion policy defaults to `on_failure`"
+    );
+    assert_eq!(config("d")["on_failure"], json!("route"));
+    assert_eq!(config("d")["on_retries_exhausted"], json!("succeed"));
+    assert_eq!(
+        config("d")["routes"]["targets"],
+        json!(["e"]),
+        "a promoting exhaustion policy hands the step the explicit routes"
+    );
+    assert_eq!(config("e")["on_failure"], json!("route"));
+    assert_eq!(config("e")["on_retries_exhausted"], json!("route"));
+    assert!(
+        config("e").get("routes").is_none(),
+        "a routing node needs no promotion check"
+    );
     let retry_on = &node(&graph, "a").retry.retry_on;
     assert!(retry_on.statuses.is_empty());
     assert_eq!(retry_on.failure_classes, vec![ir::FailureClass::new(

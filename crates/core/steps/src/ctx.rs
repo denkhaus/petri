@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use executor::{CONTAINER_RUNTIME_CLASS, ContainerRunner, ExecEnv, SecretProvider};
@@ -25,38 +26,52 @@ use smol_str::SmolStr;
 use tokio::sync::mpsc;
 
 use crate::caps::Capabilities;
+use crate::progress::ProgressSender;
 
 /// The step's config did not deserialize.
 pub(crate) const BAD_CONFIG_CLASS: FailureClass = FailureClass::new_static("bad_config");
 
 /// Everything a step needs to run one attempt.
 pub struct StepCtx {
-    pub firing:  FiringId,
-    pub attempt: Attempt,
+    pub firing:       FiringId,
+    pub attempt:      Attempt,
+    /// How many attempts the node's retry policy allows in all, so a step
+    /// knows when it is on its final one ([`StepCtx::is_final_attempt`]) and
+    /// a result policy that depends on exhaustion can be applied where the
+    /// step classifies its result.
+    pub max_attempts: NonZeroU32,
     /// The resource scope the step runs in.
-    pub scope:   ScopeId,
+    pub scope:        ScopeId,
     /// The node's instance name, for log file naming and messages.
-    pub node:    SmolStr,
+    pub node:         SmolStr,
     /// The resolved config. Free of expression placeholders; may hold `$secret`
     /// references, which are resolved here at spawn time and never written
     /// down.
-    pub config:  Value,
-    pub env:     Arc<dyn ExecEnv>,
+    pub config:       Value,
+    pub env:          Arc<dyn ExecEnv>,
     /// The scope-bound one-shot container runner, when the scope's executor
     /// provided one. Steps reach it through
     /// [`StepCtx::require_container_runner`], never a daemon of their own.
-    pub runner:  Option<Arc<dyn ContainerRunner>>,
-    pub secrets: Arc<dyn SecretProvider>,
+    pub runner:       Option<Arc<dyn ContainerRunner>>,
+    pub secrets:      Arc<dyn SecretProvider>,
     /// Host services, looked up by type ([`StepCtx::capability`]). The core
     /// never names one.
-    pub caps:    Capabilities,
-    /// Progress out: logs and artifacts, in arrival order.
-    pub logs:    mpsc::Sender<StepEvent>,
+    pub caps:         Capabilities,
+    /// Progress out: logs, artifacts and step-defined events, in arrival
+    /// order. `send` queues; `send_acked` resolves once the record is durable
+    /// ([`ProgressSender`]).
+    pub logs:         ProgressSender,
     /// Control in. A `Cancel` starts the ladder.
-    pub control: mpsc::Receiver<Control>,
+    pub control:      mpsc::Receiver<Control>,
 }
 
 impl StepCtx {
+    /// Whether no attempt follows this one: a retryable failure returned now
+    /// is the firing's final outcome.
+    pub fn is_final_attempt(&self) -> bool {
+        self.attempt.raw() >= self.max_attempts.get()
+    }
+
     /// Emit a log line as if the step had printed it.
     pub async fn log(&self, stream: ir::LogStream, line: impl Into<String>) {
         let _ = self

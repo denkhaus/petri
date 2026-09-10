@@ -6,9 +6,11 @@
 //! runs live (as an [`ExecutionObserver`]) and over a finished run dir
 //! ([`replay_run`]), so a host that lost its live subscription rebuilds the
 //! same events, in the same order, with the same identities, from the files
-//! alone. Nothing here reads a clock inside the state machine: `observed_at`
-//! is stamped by the projector when it sees a record live and is absent on
-//! replay.
+//! alone. Nothing here reads a clock inside the state machine: `recorded_at`
+//! is the time the record was appended to its log, read at that boundary and
+//! persisted beside the record, so it is the same live and on replay;
+//! `observed_at` is stamped by the projector when it sees a record live and is
+//! absent on replay.
 //!
 //! # Identity and ordering
 //!
@@ -22,12 +24,22 @@
 //!
 //! # Delivery
 //!
-//! [`EventProjector`] is the lossless path: the observer callback projects
-//! synchronously and queues; a pump task hands each event to the host's
-//! [`RunEventSink`] and awaits it, so a slow sink delays delivery and never
-//! drops. A sink failure stops the pump; every later event is counted as
-//! undelivered and [`EventProjector::shutdown`] reports the failure. A host
-//! that needs completeness after such a failure calls [`replay_run`].
+//! [`EventProjector`] is the live path: the observer callback projects
+//! synchronously and queues without waiting; a pump task hands each event to
+//! the host's [`RunEventSink`] and awaits it, in order. The queue is bounded
+//! ([`ProjectorOptions::capacity`], 1024 events by default), which is the
+//! most the projector holds in memory: a slow sink delays delivery and never
+//! slows the driver, and an event projected while the queue is full is not
+//! queued. It is counted as `overflowed` in the [`ProjectionReceipt`], live
+//! delivery goes on with the next event that finds room (so the sink sees
+//! each source in order, with gaps), and the durable log keeps it. A sink
+//! error stops the pump; every later event is counted as undelivered. A
+//! `deliver` or `finish` that outlasts [`ProjectorOptions::stall_timeout`]
+//! (30 seconds by default) is dropped and counts as a failure that names the
+//! event, so [`EventProjector::shutdown`] completes within about one stall
+//! budget plus the drain of the queue. None of this fails the run. A host
+//! that needs completeness after an overflow, a failure or a stall calls
+//! [`replay_run`] and deduplicates by [`EventId`].
 //!
 //! Across a resume, the driver replays the regenerated suffix to observers
 //! before dispatching pending work, so events for records the crash kept off
@@ -41,10 +53,13 @@
 //! # Durability
 //!
 //! Every event here is derived from a durable record, log lines included:
-//! the engine log persists `StepProgress`. `observed_at` is the one live-only
-//! field. Agent activity ([`EventBody::AgentActivity`]) carries the backend's
-//! own envelope as recorded; a backend's live stream chunks that never
-//! reached the step's progress channel are not in the contract.
+//! the engine log persists `StepProgress`, and every record carries the time
+//! it was recorded, so run, invocation, visit, attempt, interview and command
+//! start and completion times are recovered from the logs as `recorded_at`.
+//! `observed_at` is the one live-only field. Agent activity
+//! ([`EventBody::AgentActivity`]) carries the backend's own envelope as
+//! recorded; a backend's live stream chunks that never reached the step's
+//! progress channel are not in the contract.
 //!
 //! # Secrets
 //!
@@ -64,16 +79,20 @@ use engine::{
     Admission, DecisionId, EngineExit, EngineState, EntryPoint, Event, EventRecord, GroupDecision,
     Intervention, RouteApplied, RouteDecision,
 };
+use ir::placeholder::is_placeholder_item;
 use ir::{
     Attempt, CancelScopeId, Control, EdgeId, EdgeTransition, FiringId, Generation, Graph,
     LogStream, Metrics, NodeId, Outcome, RunStatus, Status, StepEvent, Token, Value,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use smol_str::SmolStr;
-use steps::{ANSWER_KEY, Question};
+use steps::{ANSWER_KEY, Question, QuestionExpired};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
+use crate::hooks::{HOOK_ACTIVITY_NOTE_KIND, HookActivity, HookOperation};
 use crate::host::EVENTS_FILE;
 use crate::store::execution_relative_dir;
 use crate::{
@@ -173,9 +192,19 @@ pub struct RunEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject:     Option<Subject>,
     /// Milliseconds since the Unix epoch when the projector saw the record
-    /// live. Absent on replay: the logs carry no clock.
+    /// live. Absent on replay: a replayed event is not observed again, and
+    /// replay time is never passed off as execution time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_at: Option<u64>,
+    /// Milliseconds since the Unix epoch when the record this event derives
+    /// from was appended to its log: the driver's clock for an engine record,
+    /// the coordinator store's for a coordinator record, read at the append
+    /// and persisted beside the record. The same live and on replay; the
+    /// time an event happened, as opposed to when it was seen. Absent only
+    /// for a record replay regenerated that never reached a log (a crash's
+    /// lost tail, projected before any resume rewrote it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_at: Option<u64>,
     pub body:        EventBody,
 }
 
@@ -209,17 +238,51 @@ pub struct RouteChoice {
     pub weighted: bool,
 }
 
-/// One branch's result as it reached the join.
+/// One branch's result: the record of the last node that ran on the branch.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BranchResult {
     pub branch:  BranchRef,
-    /// The last node on the branch, whose token reached the join.
+    /// The last node on the branch: the one whose token reached the join, or
+    /// the branch's last record when the fork was cancelled or killed.
     pub node:    NodeRef,
     pub firing:  FiringId,
     pub status:  Status,
-    /// The token payload the branch handed to the join.
+    /// The token payload the branch handed to the join. Absent when the join
+    /// never fired (a cancelled or killed fork).
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub payload: Value,
+}
+
+/// One occurrence of a fork: the firing of the fork node that opened it, in
+/// its execution. Every event about the fork's branches carries it, so a
+/// host keys a repeated visit of one fork, a fork inside a branch, or two
+/// branches with the same target on this reference and never on the most
+/// recent fork it saw.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkOccurrence {
+    pub execution:  ExecutionId,
+    pub fork:       NodeId,
+    pub firing:     FiringId,
+    /// Which firing of the fork node this is within the execution, 1-based.
+    pub visit:      u32,
+    pub generation: Generation,
+}
+
+/// How a fork's branches were closed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkDisposition {
+    /// Every branch's token reached the join and the join fired.
+    #[default]
+    Joined,
+    /// The join completed without running: its scope was cancelled, or every
+    /// branch reached it cancelled. The results are the branches' last
+    /// records.
+    Cancelled,
+    /// The fork's scope was killed and the join never fired. The results are
+    /// the branches' last records; a branch that never recorded one is
+    /// absent.
+    Killed,
 }
 
 /// A backend's own event, attributed. `envelope` is the backend's envelope
@@ -369,16 +432,23 @@ pub enum EventBody {
     },
     /// The routes of a fork node applied: its branches are starting.
     ForkStarted {
-        branches: Vec<BranchRef>,
+        occurrence: ForkOccurrence,
+        branches:   Vec<BranchRef>,
     },
-    /// A branch's final token reached the join.
+    /// A branch reached its end: its final token reached the join, or the
+    /// fork was cancelled or killed and this is the branch's last record.
     BranchCompleted {
-        result: BranchResult,
+        occurrence: ForkOccurrence,
+        result:     BranchResult,
     },
-    /// The join fired: every branch is in, in branch order.
+    /// The fork's branches are all accounted for, in branch order:
+    /// `disposition` says whether the join fired or the fork was stopped.
     ForkCompleted {
-        fork:    NodeRef,
-        results: Vec<BranchResult>,
+        occurrence:  ForkOccurrence,
+        fork:        NodeRef,
+        results:     Vec<BranchResult>,
+        #[serde(default)]
+        disposition: ForkDisposition,
     },
     /// A `for_each` expansion spliced clones in.
     NodeExpanded {
@@ -389,6 +459,17 @@ pub enum EventBody {
     /// A firing asked the host a question.
     QuestionAsked {
         question: Question,
+    },
+    /// A firing's question expired: the step's own answer deadline passed
+    /// with no answer, as the step reported it (`steps::QuestionExpired`).
+    /// `default` is the option the step took on its own, by key, when it had
+    /// one. The attempt's outcome follows as `attempt_finished`; expiry is
+    /// never inferred from that outcome.
+    QuestionExpired {
+        question:  String,
+        waited_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default:   Option<String>,
     },
     /// The host delivered a control into a firing. `deliverable` is whether
     /// the firing could receive it; a late answer is recorded but not
@@ -421,9 +502,18 @@ pub enum EventBody {
         uri:  String,
     },
     AgentActivity(AgentActivity),
+    /// A hook's own agent did something: the backend envelope a hook's agent
+    /// produced, attributed to the firing whose hook ran it and to the hook
+    /// operation, apart from the stage's own `agent_activity`. From a
+    /// `hook.activity` note.
+    HookActivity {
+        hook:     HookOperation,
+        activity: AgentActivity,
+    },
     /// A host extension recorded a fact (`driver::lifecycle::Note`). Kinds
     /// the driver writes: `result_prepared`, `transition`. Kinds the hook
-    /// adapter writes: `hook`.
+    /// adapter writes: `hook` (a hook service report, with each hook's
+    /// usage); its `hook.activity` notes project to `hook_activity`.
     HostNote {
         kind:    SmolStr,
         payload: Value,
@@ -487,7 +577,45 @@ struct ExecutionTrack {
     history:    usize,
     branches:   BranchMap,
     /// Fork firings whose `ForkStarted` was emitted.
-    forks:      BTreeSet<FiringId>,
+    announced:  BTreeSet<FiringId>,
+    /// Forks whose `ForkCompleted` is still to come, by the fork's firing.
+    open:       BTreeMap<FiringId, OpenFork>,
+}
+
+/// A fork between its `ForkStarted` and its `ForkCompleted`. The generation
+/// ties the branches and the join to this occurrence of the fork: the engine
+/// fires one `(node, generation)` at most once, and the tokens a fork routes
+/// to its branches and on to the join keep the fork firing's generation.
+struct OpenFork {
+    occurrence: ForkOccurrence,
+    branches:   Vec<BranchRef>,
+}
+
+impl OpenFork {
+    fn covers(&self, fork: NodeId, generation: Generation) -> bool {
+        self.occurrence.fork == fork && self.occurrence.generation == generation
+    }
+}
+
+impl ExecutionTrack {
+    /// Remember an announced fork until its join closes it.
+    fn open_fork(&mut self, occurrence: ForkOccurrence, branches: &[BranchRef]) {
+        self.open.insert(occurrence.firing, OpenFork {
+            occurrence,
+            branches: branches.to_vec(),
+        });
+    }
+
+    /// Take the open fork a join of `fork` in `generation` closes, if any.
+    fn close_fork(&mut self, fork: NodeId, generation: Option<Generation>) -> Option<OpenFork> {
+        let generation = generation?;
+        let firing = self
+            .open
+            .iter()
+            .find(|(_, open)| open.covers(fork, generation))
+            .map(|(firing, _)| *firing)?;
+        self.open.remove(&firing)
+    }
 }
 
 /// The stateless-by-record derivation, with the little state it needs across
@@ -586,6 +714,7 @@ impl Projection {
                     parent: self.invocations.get(invocation).cloned().flatten(),
                     subject: None,
                     observed_at: None,
+                    recorded_at: Some(record.recorded_at),
                     body: EventBody::InvocationCancelRequested {
                         invocation: *invocation,
                         reason:     reason.clone(),
@@ -603,6 +732,7 @@ impl Projection {
                         parent:      None,
                         subject:     None,
                         observed_at: None,
+                        recorded_at: Some(record.recorded_at),
                         body:        EventBody::StallTimeout {
                             stall_timeout_ms: *stall_timeout_ms,
                             idle_ms:          *idle_ms,
@@ -614,15 +744,17 @@ impl Projection {
             CoordinatorEvent::RunPaused => (None, None, EventBody::RunPaused),
             CoordinatorEvent::RunUnpaused => (None, None, EventBody::RunUnpaused),
             // A run-level hook report: the same `host_note` a firing's hook
-            // report is, with no subject, since no firing owns it.
+            // report is (and a hook's agent activity the same
+            // `hook_activity`), with no subject, since no firing owns it.
             CoordinatorEvent::RunNote {
                 execution,
                 kind,
                 payload,
-            } => (None, *execution, EventBody::HostNote {
-                kind:    kind.clone(),
-                payload: payload.clone(),
-            }),
+            } => (
+                None,
+                *execution,
+                note_body(Note::new(kind.clone(), payload.clone())),
+            ),
             CoordinatorEvent::RunFinished { status } => {
                 (None, None, EventBody::RunFinished { status: *status })
             }
@@ -637,15 +769,19 @@ impl Projection {
             parent,
             subject: None,
             observed_at: None,
+            recorded_at: Some(record.recorded_at),
             body,
         }]
     }
 
-    /// Derive the events of one engine record, given the post-apply state.
+    /// Derive the events of one engine record, given its recording time (when
+    /// the record reached a log; `None` for a regenerated record that never
+    /// did) and the post-apply state.
     pub fn engine(
         &mut self,
         execution: ExecutionId,
         record: &EventRecord,
+        recorded_at: Option<u64>,
         state: &EngineState,
     ) -> Vec<RunEvent> {
         let track = self.executions.entry(execution).or_default();
@@ -694,6 +830,20 @@ impl Projection {
                             emit(subject, EventBody::WaitStateChanged {
                                 state: WaitState::AwaitingAnswer,
                             });
+                        } else if let Some(expired) = QuestionExpired::from_event(ev) {
+                            // The step ended its own wait: the question is
+                            // no longer out, as after an answer.
+                            let was_asking = track.asking.remove(firing);
+                            emit(subject.clone(), EventBody::QuestionExpired {
+                                question:  expired.question,
+                                waited_ms: expired.waited_ms,
+                                default:   expired.default,
+                            });
+                            if was_asking {
+                                emit(subject, EventBody::WaitStateChanged {
+                                    state: WaitState::Running,
+                                });
+                            }
                         } else if let Some(note) = Note::from_step_event(ev) {
                             emit(subject, note_body(note));
                         } else if let Some(activity) = agent_activity(value) {
@@ -785,16 +935,21 @@ impl Projection {
                 emit(subject.clone(), EventBody::RouteApplied { route });
                 if let (Some(subject), RouteApplied::Edge { .. }) = (&subject, applied)
                     && let BranchRole::Fork { branches } = subject.branch
-                    && track.forks.insert(firing)
+                    && track.announced.insert(firing)
                 {
                     // The fork's routing applies group by group; the first
                     // applied route announces the fork once.
                     let fork = subject.node.id;
-                    emit(Some(subject.clone()), EventBody::ForkStarted {
-                        branches: (0..branches)
-                            .map(|index| BranchRef { fork, index })
-                            .collect(),
-                    });
+                    let branches: Vec<BranchRef> = (0..branches)
+                        .map(|index| BranchRef { fork, index })
+                        .collect();
+                    if let Some(occurrence) = occurrence_of(execution, subject) {
+                        track.open_fork(occurrence.clone(), &branches);
+                        emit(Some(subject.clone()), EventBody::ForkStarted {
+                            occurrence,
+                            branches,
+                        });
+                    }
                 }
             }
             Event::RetryElapsed {
@@ -845,27 +1000,40 @@ impl Projection {
                 // `branch_completed` and `fork_completed` from the same roles
                 // the static path uses.
                 if let Some(fork) = track.branches.expansion_fork(*node) {
+                    // The fork's own firing: the record of the fork node in
+                    // the expansion's generation, which the template's token
+                    // carried from it.
                     let firing = state
                         .history()
                         .iter()
                         .rev()
-                        .find(|record| record.node == fork)
+                        .find(|record| {
+                            record.node == fork && record.generation == splice.generation
+                        })
                         .map(|record| record.firing);
-                    let announced = firing.is_some_and(|firing| !track.forks.insert(firing));
-                    let subject = firing
-                        .and_then(|firing| subject_of(state, track, firing))
-                        .or_else(|| node_subject(state, track, fork));
+                    let announced = firing.is_some_and(|firing| !track.announced.insert(firing));
+                    let subject = firing.and_then(|firing| subject_of(state, track, firing));
+                    // The placeholder clone an empty list expands to is no
+                    // branch: the fork starts and closes with none.
                     let mut branches: Vec<BranchRef> = splice
                         .clones
                         .iter()
+                        .filter(|clone| !is_placeholder_item(&clone.item))
                         .map(|clone| BranchRef {
                             fork,
                             index: clone.index,
                         })
                         .collect();
                     branches.sort_by_key(|branch| branch.index);
-                    if !announced {
-                        emit(subject, EventBody::ForkStarted { branches });
+                    if !announced
+                        && let Some(subject) = subject
+                        && let Some(occurrence) = occurrence_of(execution, &subject)
+                    {
+                        track.open_fork(occurrence.clone(), &branches);
+                        emit(Some(subject), EventBody::ForkStarted {
+                            occurrence,
+                            branches,
+                        });
                     }
                 }
             }
@@ -930,27 +1098,25 @@ impl Projection {
                 if let Some(subject) = &subject
                     && let BranchRole::Join { fork } = subject.branch
                 {
+                    // The join fired: every branch is in, and its inputs are
+                    // the branches' final tokens.
                     let results = branch_results(state, track, fork, &inputs);
-                    for result in &results {
-                        emit(
-                            Some(Subject {
-                                node:       result.node.clone(),
-                                firing:     Some(result.firing),
-                                visit:      None,
-                                attempt:    None,
-                                generation: None,
-                                branch:     BranchRole::Member(result.branch),
-                            }),
-                            EventBody::BranchCompleted {
-                                result: result.clone(),
-                            },
-                        );
-                    }
-                    if let Some(fork_node) = state.graph().node(fork).map(node_ref) {
-                        emit(Some(subject.clone()), EventBody::ForkCompleted {
-                            fork: fork_node,
-                            results,
+                    let occurrence = track
+                        .close_fork(fork, subject.generation)
+                        .map(|open| open.occurrence)
+                        .or_else(|| {
+                            recover_occurrence(state, track, execution, fork, subject.generation)
                         });
+                    if let Some(occurrence) = occurrence {
+                        close_fork(
+                            &mut emit,
+                            state,
+                            track,
+                            subject,
+                            occurrence,
+                            results,
+                            ForkDisposition::Joined,
+                        );
                     }
                 }
                 emit(subject.clone(), EventBody::VisitStarted { inputs });
@@ -992,6 +1158,31 @@ impl Projection {
                     generation: Some(entry.generation),
                     branch:     track.branches.role(entry.node),
                 });
+                // A join that completed without ever being live was
+                // synthesized: the fork's scope was cancelled, or every
+                // branch reached it cancelled. Its record closes the fork
+                // from the branches' own final records.
+                if let Some(subject) = &subject
+                    && let BranchRole::Join { fork } = subject.branch
+                    && !track.firings.contains(&entry.firing)
+                    && let Some(open) = track.close_fork(fork, Some(entry.generation))
+                {
+                    let results = member_results(state, track, &open);
+                    let disposition = if matches!(entry.outcome.status, Status::Cancelled) {
+                        ForkDisposition::Cancelled
+                    } else {
+                        ForkDisposition::Joined
+                    };
+                    close_fork(
+                        &mut emit,
+                        state,
+                        track,
+                        subject,
+                        open.occurrence,
+                        results,
+                        disposition,
+                    );
+                }
                 emit(subject, EventBody::VisitCompleted {
                     outcome: entry.outcome.clone(),
                     executed,
@@ -999,6 +1190,42 @@ impl Projection {
                 });
             }
             track.history = history.len();
+        }
+        // A killed fork's join never fires: its tokens were dropped. Once no
+        // branch of the fork has a live firing left, the fork is closed from
+        // the branches' final records.
+        let killed: Vec<FiringId> = track
+            .open
+            .iter()
+            .filter(|(_, open)| {
+                state.is_node_killed(open.occurrence.fork)
+                    && !state.live_firings().any(|firing| {
+                        firing.generation == open.occurrence.generation
+                            && matches!(
+                                track.branches.role(firing.node),
+                                BranchRole::Member(branch) if branch.fork == open.occurrence.fork
+                            )
+                    })
+            })
+            .map(|(firing, _)| *firing)
+            .collect();
+        for firing in killed {
+            let Some(open) = track.open.remove(&firing) else {
+                continue;
+            };
+            let Some(subject) = subject_of(state, track, firing) else {
+                continue;
+            };
+            let results = member_results(state, track, &open);
+            close_fork(
+                &mut emit,
+                state,
+                track,
+                &subject,
+                open.occurrence,
+                results,
+                ForkDisposition::Killed,
+            );
         }
 
         let invocation = track.invocation;
@@ -1016,6 +1243,7 @@ impl Projection {
                 parent: parent.clone(),
                 subject,
                 observed_at: None,
+                recorded_at,
                 body,
             })
             .collect()
@@ -1156,6 +1384,99 @@ fn branch_results(
     results
 }
 
+/// The occurrence a fork firing's subject names.
+fn occurrence_of(execution: ExecutionId, subject: &Subject) -> Option<ForkOccurrence> {
+    Some(ForkOccurrence {
+        execution,
+        fork: subject.node.id,
+        firing: subject.firing?,
+        visit: subject.visit?,
+        generation: subject.generation?,
+    })
+}
+
+/// The occurrence of `fork` in `generation` from the fork's own record, for
+/// a join whose fork this projection never saw announced (it attached after
+/// the fork fired without being primed).
+fn recover_occurrence(
+    state: &EngineState,
+    track: &ExecutionTrack,
+    execution: ExecutionId,
+    fork: NodeId,
+    generation: Option<Generation>,
+) -> Option<ForkOccurrence> {
+    let record = state.history().iter().rev().find(|record| {
+        record.node == fork && generation.is_none_or(|generation| record.generation == generation)
+    })?;
+    let subject = subject_of(state, track, record.firing)?;
+    occurrence_of(execution, &subject)
+}
+
+/// Emit `branch_completed` per result, each on its branch's last firing,
+/// then `fork_completed` on `subject` (the join's firing when there is one,
+/// else the fork's own).
+fn close_fork(
+    emit: &mut impl FnMut(Option<Subject>, EventBody),
+    state: &EngineState,
+    track: &ExecutionTrack,
+    subject: &Subject,
+    occurrence: ForkOccurrence,
+    results: Vec<BranchResult>,
+    disposition: ForkDisposition,
+) {
+    for result in &results {
+        emit(
+            subject_of(state, track, result.firing),
+            EventBody::BranchCompleted {
+                occurrence: occurrence.clone(),
+                result:     result.clone(),
+            },
+        );
+    }
+    if let Some(fork_node) = state.graph().node(occurrence.fork).map(node_ref) {
+        emit(Some(subject.clone()), EventBody::ForkCompleted {
+            occurrence,
+            fork: fork_node,
+            results,
+            disposition,
+        });
+    }
+}
+
+/// The branches' final records for a fork that was cancelled or killed: the
+/// latest record of a member of each branch in the fork's generation, in
+/// branch order. A branch with no record yet is absent. The token payloads
+/// are gone with the join that never ran, so none is carried.
+fn member_results(
+    state: &EngineState,
+    track: &ExecutionTrack,
+    open: &OpenFork,
+) -> Vec<BranchResult> {
+    let mut results: BTreeMap<u32, BranchResult> = BTreeMap::new();
+    for record in state.history().iter().rev() {
+        if record.generation != open.occurrence.generation {
+            continue;
+        }
+        let BranchRole::Member(branch) = track.branches.role(record.node) else {
+            continue;
+        };
+        if !open.branches.contains(&branch) || results.contains_key(&branch.index) {
+            continue;
+        }
+        let Some(node) = state.graph().node(record.node) else {
+            continue;
+        };
+        results.insert(branch.index, BranchResult {
+            branch,
+            node: node_ref(node),
+            firing: record.firing,
+            status: record.outcome.status.clone(),
+            payload: Value::Null,
+        });
+    }
+    results.into_values().collect()
+}
+
 /// Read a backend's envelope out of a `StepEvent::Custom` value: an object
 /// with a string `kind` and an `event` object is a backend event; its
 /// identities are read from the conventional envelope fields when present.
@@ -1177,11 +1498,24 @@ fn agent_activity(value: &Value) -> Option<AgentActivity> {
     })
 }
 
+/// A `hook.activity` note's payload as the operation and the backend
+/// activity it carries, read the way a stage's own envelope is.
+fn hook_activity(payload: &Value) -> Option<(HookOperation, AgentActivity)> {
+    let record: HookActivity = serde_json::from_value(payload.clone()).ok()?;
+    let activity = agent_activity(&json!({
+        BACKEND_EVENT_KIND_KEY: record.backend,
+        "event": record.envelope,
+    }))?;
+    Some((record.hook, activity))
+}
+
 // ── Live delivery ──────────────────────────────────────────────────────────
 
 /// Where projected events go. `deliver` is awaited per event, in order: a
-/// slow sink applies backpressure to the queue behind it, never to the
-/// driver. An error stops the pump.
+/// slow sink applies backpressure to the bounded queue behind it, never to
+/// the driver. An error stops the pump. A call that outlasts the projector's
+/// stall budget ([`ProjectorOptions::stall_timeout`]) is dropped and counts
+/// as a failure, so an implementation tolerates a cancelled `deliver`.
 #[async_trait::async_trait]
 pub trait RunEventSink: Send + Sync {
     async fn deliver(&self, event: RunEvent) -> Result<(), SinkError>;
@@ -1189,6 +1523,38 @@ pub trait RunEventSink: Send + Sync {
     /// Called once after the last event, before the receipt.
     async fn finish(&self) -> Result<(), SinkError> {
         Ok(())
+    }
+}
+
+/// The queue capacity of an [`EventProjector`] unless [`ProjectorOptions`]
+/// says otherwise.
+pub const DEFAULT_QUEUE_CAPACITY: usize = 1024;
+
+/// How long an [`EventProjector`] waits for one sink call unless
+/// [`ProjectorOptions`] says otherwise.
+pub const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How an [`EventProjector`] bounds the memory and the time a host's sink can
+/// cost it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProjectorOptions {
+    /// Events the queue holds between the observer callback and the pump:
+    /// the most the projector keeps in memory. The callback never waits for
+    /// room; an event projected while the queue is full is left to the
+    /// durable log and counted as `overflowed` in the receipt.
+    pub capacity:      usize,
+    /// How long one `deliver` (or `finish`) may take. A call that outlasts it
+    /// is dropped, the sink counts as failed from then on, and the receipt
+    /// names the event it stalled on.
+    pub stall_timeout: Duration,
+}
+
+impl Default for ProjectorOptions {
+    fn default() -> Self {
+        Self {
+            capacity:      DEFAULT_QUEUE_CAPACITY,
+            stall_timeout: DEFAULT_STALL_TIMEOUT,
+        }
     }
 }
 
@@ -1207,14 +1573,24 @@ impl SinkError {
     }
 }
 
-/// What the projector did over a run.
+/// What the projector did over a run. `projected` is every event derived;
+/// `delivered + undelivered` equals it. A receipt that is not clean means
+/// the sink does not hold the whole stream and `replay_run` completes it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectionReceipt {
     pub version:     u32,
     pub projected:   u64,
     pub delivered:   u64,
-    /// Events the sink never received because it had failed.
+    /// Events the sink never received: they found the queue full, or the
+    /// sink had failed or stalled before their turn.
     pub undelivered: u64,
+    /// Of `undelivered`, the events that found the queue full and were left
+    /// to the durable log. Live delivery went on with the next event that
+    /// found room, so the sink saw each source in order, with gaps.
+    #[serde(default)]
+    pub overflowed:  u64,
+    /// Why delivery stopped, when it did: the sink's error, or the stall the
+    /// pump gave up on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure:     Option<String>,
 }
@@ -1225,29 +1601,39 @@ impl ProjectionReceipt {
     }
 }
 
-enum PumpMessage {
-    Event(Box<RunEvent>),
-    Finish,
+/// The sender side of the pump's queue and what never got onto it.
+struct Queue {
+    /// `None` once `shutdown` closed the stream.
+    tx:          Option<mpsc::Sender<Box<RunEvent>>>,
+    /// Events that found the queue full.
+    overflowed:  u64,
+    /// Events projected after the stream was closed.
+    after_close: u64,
 }
 
-struct PumpState {
-    projected: u64,
-}
-
-/// The live, lossless consumption path: an [`ExecutionObserver`] that
-/// projects each record and queues the result for a pump task, which awaits
-/// the sink per event.
+/// The live consumption path: an [`ExecutionObserver`] that projects each
+/// record and queues the result, without waiting, for a pump task that
+/// awaits the sink per event. The queue is bounded ([`ProjectorOptions`]),
+/// so the projector holds at most `capacity` events in memory and the run
+/// keeps its pace whatever the sink does; an event that finds no room, and
+/// every event after the sink fails or stalls, stays in the durable log for
+/// [`replay_run`]. The receipt says exactly what the sink did not get.
 pub struct EventProjector {
     projection: Mutex<Projection>,
-    tx:         mpsc::UnboundedSender<PumpMessage>,
+    queue:      Mutex<Queue>,
     pump:       Mutex<Option<JoinHandle<ProjectionReceipt>>>,
-    counts:     Mutex<PumpState>,
 }
 
 impl EventProjector {
-    /// A projector for a fresh run.
+    /// A projector for a fresh run, with the default options.
     pub fn new(sink: Arc<dyn RunEventSink>) -> Arc<Self> {
-        Self::with_projection(sink, Projection::new())
+        Self::with_options(sink, ProjectorOptions::default())
+    }
+
+    /// A projector for a fresh run, with the given queue capacity and stall
+    /// budget.
+    pub fn with_options(sink: Arc<dyn RunEventSink>, options: ProjectorOptions) -> Arc<Self> {
+        Self::with_projection(sink, Projection::new(), options)
     }
 
     /// A projector for a run being resumed from `run_dir`: the records on
@@ -1260,49 +1646,39 @@ impl EventProjector {
     ///
     /// The run dir's logs do not decode or replay.
     pub fn primed(sink: Arc<dyn RunEventSink>, run_dir: &Path) -> Result<Arc<Self>, ReplayError> {
-        let mut projection = Projection::new();
-        project_run(run_dir, &mut projection)?;
-        Ok(Self::with_projection(sink, projection))
+        Self::primed_with_options(sink, run_dir, ProjectorOptions::default())
     }
 
-    fn with_projection(sink: Arc<dyn RunEventSink>, projection: Projection) -> Arc<Self> {
-        let (tx, mut rx) = mpsc::unbounded_channel::<PumpMessage>();
-        let pump = tokio::spawn(async move {
-            let mut receipt = ProjectionReceipt {
-                version: EVENT_CONTRACT_VERSION,
-                ..ProjectionReceipt::default()
-            };
-            while let Some(message) = rx.recv().await {
-                match message {
-                    PumpMessage::Event(event) => {
-                        receipt.projected += 1;
-                        if receipt.failure.is_some() {
-                            receipt.undelivered += 1;
-                            continue;
-                        }
-                        match sink.deliver(*event).await {
-                            Ok(()) => receipt.delivered += 1,
-                            Err(error) => {
-                                receipt.undelivered += 1;
-                                receipt.failure = Some(error.message);
-                            }
-                        }
-                    }
-                    PumpMessage::Finish => break,
-                }
-            }
-            if receipt.failure.is_none()
-                && let Err(error) = sink.finish().await
-            {
-                receipt.failure = Some(error.message);
-            }
-            receipt
-        });
+    /// [`Self::primed`] with the given queue capacity and stall budget.
+    ///
+    /// # Errors
+    ///
+    /// The run dir's logs do not decode or replay.
+    pub fn primed_with_options(
+        sink: Arc<dyn RunEventSink>,
+        run_dir: &Path,
+        options: ProjectorOptions,
+    ) -> Result<Arc<Self>, ReplayError> {
+        let mut projection = Projection::new();
+        project_run(run_dir, &mut projection)?;
+        Ok(Self::with_projection(sink, projection, options))
+    }
+
+    fn with_projection(
+        sink: Arc<dyn RunEventSink>,
+        projection: Projection,
+        options: ProjectorOptions,
+    ) -> Arc<Self> {
+        let (tx, rx) = mpsc::channel::<Box<RunEvent>>(options.capacity.max(1));
+        let pump = tokio::spawn(pump(sink, rx, options.stall_timeout));
         Arc::new(Self {
             projection: Mutex::new(projection),
-            tx,
-            pump: Mutex::new(Some(pump)),
-            counts: Mutex::new(PumpState { projected: 0 }),
+            queue:      Mutex::new(Queue {
+                tx:          Some(tx),
+                overflowed:  0,
+                after_close: 0,
+            }),
+            pump:       Mutex::new(Some(pump)),
         })
     }
 
@@ -1312,46 +1688,155 @@ impl EventProjector {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn queue(&self) -> MutexGuard<'_, Queue> {
+        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Queue what one record derived. Never waits: an event that finds the
+    /// queue full is left to the durable log and counted.
     fn push(&self, events: Vec<RunEvent>) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()
             .and_then(|d| u64::try_from(d.as_millis()).ok());
-        let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut queue = self.queue();
         for mut event in events {
             event.observed_at = now;
-            counts.projected += 1;
-            let _ = self.tx.send(PumpMessage::Event(Box::new(event)));
+            let Some(tx) = queue.tx.as_ref() else {
+                queue.after_close += 1;
+                continue;
+            };
+            match tx.try_send(Box::new(event)) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(event)) => {
+                    queue.overflowed += 1;
+                    if queue.overflowed == 1 {
+                        tracing::warn!(
+                            event = %event_label(&event.id),
+                            "the event sink fell behind; events that find the queue full are left to the log for replay"
+                        );
+                    }
+                }
+                // The pump is gone (it panicked); the receipt says so.
+                Err(mpsc::error::TrySendError::Closed(_)) => queue.after_close += 1,
+            }
         }
     }
 
-    /// End the stream, await the sink's last delivery and `finish`, and
-    /// report. Call once, after the run.
+    /// End the stream, await the sink's remaining deliveries and `finish`,
+    /// and report. Call once, after the run. Bounded: the pump waits at most
+    /// one stall budget for any sink call, and delivers nothing more once a
+    /// call stalled or failed.
     pub async fn shutdown(&self) -> ProjectionReceipt {
-        let _ = self.tx.send(PumpMessage::Finish);
+        // Closing the stream: the pump drains what is queued, then finishes.
+        let tx = self.queue().tx.take();
+        drop(tx);
         let pump = self
             .pump
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        match pump {
+        let mut receipt = match pump {
             Some(pump) => pump.await.unwrap_or_else(|error| ProjectionReceipt {
                 version: EVENT_CONTRACT_VERSION,
                 failure: Some(format!("the event pump failed: {error}")),
                 ..ProjectionReceipt::default()
             }),
-            None => ProjectionReceipt {
-                version: EVENT_CONTRACT_VERSION,
-                failure: Some("shutdown was called twice".to_owned()),
-                ..ProjectionReceipt::default()
-            },
+            None => {
+                return ProjectionReceipt {
+                    version: EVENT_CONTRACT_VERSION,
+                    failure: Some("shutdown was called twice".to_owned()),
+                    ..ProjectionReceipt::default()
+                };
+            }
+        };
+        let (overflowed, after_close) = {
+            let queue = self.queue();
+            (queue.overflowed, queue.after_close)
+        };
+        receipt.projected += overflowed + after_close;
+        receipt.undelivered += overflowed + after_close;
+        receipt.overflowed = overflowed;
+        receipt
+    }
+}
+
+/// The pump: deliver each queued event to the sink, in order, each call
+/// bounded by `stall`; after a failure or a stall, count the rest as
+/// undelivered; once the queue closes, `finish` the sink.
+async fn pump(
+    sink: Arc<dyn RunEventSink>,
+    mut rx: mpsc::Receiver<Box<RunEvent>>,
+    stall: Duration,
+) -> ProjectionReceipt {
+    let mut receipt = ProjectionReceipt {
+        version: EVENT_CONTRACT_VERSION,
+        ..ProjectionReceipt::default()
+    };
+    while let Some(event) = rx.recv().await {
+        receipt.projected += 1;
+        if receipt.failure.is_some() {
+            receipt.undelivered += 1;
+            continue;
         }
+        let id = event.id;
+        match timeout(stall, sink.deliver(*event)).await {
+            Ok(Ok(())) => receipt.delivered += 1,
+            Ok(Err(error)) => {
+                receipt.undelivered += 1;
+                receipt.failure = Some(error.message);
+            }
+            Err(_) => {
+                receipt.undelivered += 1;
+                let message = format!(
+                    "the sink stalled: {} was not accepted within {}ms, and delivery stopped there",
+                    event_label(&id),
+                    stall.as_millis()
+                );
+                tracing::warn!("{message}");
+                receipt.failure = Some(message);
+            }
+        }
+    }
+    if receipt.failure.is_none() {
+        match timeout(stall, sink.finish()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => receipt.failure = Some(error.message),
+            Err(_) => {
+                receipt.failure = Some(format!(
+                    "the sink stalled: `finish` did not return within {}ms",
+                    stall.as_millis()
+                ));
+            }
+        }
+    }
+    receipt
+}
+
+/// An event identity as a receipt or a log line names it.
+fn event_label(id: &EventId) -> String {
+    match id.source {
+        EventSource::Coordinator => format!("coordinator record {} event {}", id.seq, id.index),
+        EventSource::Execution { execution } => format!(
+            "execution {} record {} event {}",
+            execution.raw(),
+            id.seq,
+            id.index
+        ),
     }
 }
 
 impl ExecutionObserver for EventProjector {
-    fn on_engine_record(&self, execution: ExecutionId, record: &EventRecord, state: &EngineState) {
-        let events = self.projection().engine(execution, record, state);
+    fn on_engine_record(
+        &self,
+        execution: ExecutionId,
+        record: &EventRecord,
+        recorded_at: u64,
+        state: &EngineState,
+    ) {
+        let events = self
+            .projection()
+            .engine(execution, record, Some(recorded_at), state);
         self.push(events);
     }
 
@@ -1366,6 +1851,13 @@ impl ExecutionObserver for EventProjector {
 fn note_body(note: Note) -> EventBody {
     let budget = || serde_json::from_value::<BudgetNote>(note.payload.clone()).ok();
     match note.kind.as_str() {
+        HOOK_ACTIVITY_NOTE_KIND => match hook_activity(&note.payload) {
+            Some((hook, activity)) => EventBody::HookActivity { hook, activity },
+            None => EventBody::HostNote {
+                kind:    note.kind,
+                payload: note.payload,
+            },
+        },
         BUDGET_PAUSED_KIND => match budget() {
             Some(budget) => EventBody::BudgetPaused {
                 remaining_ms:      budget.remaining_ms,
@@ -1484,19 +1976,27 @@ fn project_run(run_dir: &Path, projection: &mut Projection) -> Result<Vec<RunEve
         if !log_path.exists() {
             continue;
         }
-        let log = read_engine_log(&log_path)?.log;
-        events.extend(replay_execution(projection, *execution, graph, &log));
+        let decoded = read_engine_log(&log_path)?;
+        events.extend(replay_execution(
+            projection,
+            *execution,
+            graph,
+            &decoded.log,
+            &decoded.recorded_at,
+        ));
     }
     Ok(events)
 }
 
 /// Project one execution's log through `projection`, external event by
-/// external event.
+/// external event. `recorded_at` is the log's recording time per seq; a
+/// regenerated record past its end (a lost tail) carries none.
 pub fn replay_execution(
     projection: &mut Projection,
     execution: ExecutionId,
     graph: Graph,
     log: &engine::EventLog,
+    recorded_at: &[u64],
 ) -> Vec<RunEvent> {
     let mut state = EngineState::new(graph);
     let mut events = Vec::new();
@@ -1505,7 +2005,10 @@ pub fn replay_execution(
         let (next, _) = engine::apply(state, event.clone());
         state = next;
         for record in &state.log.records()[before..] {
-            events.extend(projection.engine(execution, record, &state));
+            let at = usize::try_from(record.seq)
+                .ok()
+                .and_then(|seq| recorded_at.get(seq).copied());
+            events.extend(projection.engine(execution, record, at, &state));
         }
     }
     events

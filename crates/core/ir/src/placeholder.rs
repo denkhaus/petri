@@ -22,6 +22,41 @@ pub const EXPR_PLACEHOLDER_KEY: &str = "$expr";
 /// placeholder keys.
 pub const BRANCH_ROLE_META: &str = "branch_role";
 
+/// The marker of an expansion item that stands for no item:
+/// `{"$placeholder": true}`.
+///
+/// A `for_each` fan-out whose collector must fire even over an empty list
+/// expands the list to this one item, so the template fires once and its
+/// token reaches the collector. The clone it produces is a lowering
+/// artifact, not a branch: a branch map gives its nodes no member role and
+/// counts it in no fork, the event stream announces and closes the fork
+/// with zero branches, and the step that receives the item does no work.
+pub const PLACEHOLDER_ITEM_KEY: &str = "$placeholder";
+
+/// The one expansion item an empty list expands to.
+pub fn placeholder_item() -> Value {
+    serde_json::json!({ PLACEHOLDER_ITEM_KEY: true })
+}
+
+/// Whether an expansion item is the placeholder for no item.
+pub fn is_placeholder_item(item: &Value) -> bool {
+    item.get(PLACEHOLDER_ITEM_KEY) == Some(&Value::Bool(true))
+}
+
+/// The `Node::meta` key a frontend sets when the node's own step, not the
+/// driver, drives the node's admission hook points: the value is
+/// [`ADMISSION_HOOKS_BY_STEP`]. The driver admits the first firing of a scope
+/// before the scope's environment exists; a node whose admission hooks must
+/// run with the environment in place (a Fabro `start` stage, whose hooks may
+/// be placed in the sandbox) asks the hook service from its step, once the
+/// environment is there, and the driver's adapter stays away from those two
+/// points so each is asked once. Shared by frontends and the execution
+/// layer, like the branch-role key.
+pub const ADMISSION_HOOKS_META: &str = "admission_hooks";
+
+/// The one value of [`ADMISSION_HOOKS_META`]: the step drives admission.
+pub const ADMISSION_HOOKS_BY_STEP: &str = "step";
+
 /// The marker for a secret reference: `{"$secret": "NAME"}`.
 ///
 /// Unlike an expression placeholder, this one **survives** into a

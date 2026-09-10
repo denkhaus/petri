@@ -280,10 +280,13 @@ pub(crate) fn project_petri(
     let root_history = histories(root_id);
     let path = stages_of(&root_history);
 
-    // Forks: child invocations whose slot is `branch:<fork>:<index>:<node>`,
-    // grouped by fork in declaration order; each fork's envelopes come from
-    // the join's `parallel.results` update, matched by order of joins.
-    let mut fork_order: Vec<String> = Vec::new();
+    // Forks: child invocations whose slot is
+    // `branch:<fork>@<firing>:<index>:<node>`, grouped by fork occurrence
+    // (the fork node and the fork step's firing) in declaration order; each
+    // occurrence's envelopes come from the join's `parallel.results` update,
+    // matched by order of joins. The fork is reported by its node name, as
+    // Fabro names it.
+    let mut fork_order: Vec<(String, String)> = Vec::new();
     let mut branch_stages: BTreeMap<String, Vec<(u64, String, Vec<Stage>)>> = BTreeMap::new();
     for invocation in &invocations {
         let Some(slot) = invocation["parent"]["slot"].as_str() else {
@@ -296,20 +299,21 @@ pub(crate) fn project_petri(
         if parts.next() != Some("branch") {
             continue;
         }
-        let (Some(fork), Some(index), Some(node)) = (parts.next(), parts.next(), parts.next())
+        let (Some(occurrence), Some(index), Some(node)) =
+            (parts.next(), parts.next(), parts.next())
         else {
             continue;
         };
+        let fork = occurrence.split('@').next().unwrap_or(occurrence);
         let index: u64 = index.parse().unwrap_or(0);
         let id = invocation["invocation"].as_u64().unwrap_or(0);
-        if !fork_order.iter().any(|f| f == fork) {
-            fork_order.push(fork.to_owned());
+        if !fork_order.iter().any(|(key, _)| key == occurrence) {
+            fork_order.push((occurrence.to_owned(), fork.to_owned()));
         }
-        branch_stages.entry(fork.to_owned()).or_default().push((
-            index,
-            node.to_owned(),
-            stages_of(&histories(id)),
-        ));
+        branch_stages
+            .entry(occurrence.to_owned())
+            .or_default()
+            .push((index, node.to_owned(), stages_of(&histories(id))));
     }
     // A joined list above Petri's fan-out threshold is published as a
     // reference; the comparison is of the logical list.
@@ -319,8 +323,8 @@ pub(crate) fn project_petri(
         .map(|value| inspect::resolve_reference(value, &finished.run_dir))
         .collect();
     let mut forks = Vec::new();
-    for (position, fork) in fork_order.iter().enumerate() {
-        let mut stages = branch_stages.remove(fork).unwrap_or_default();
+    for (position, (occurrence, fork)) in fork_order.iter().enumerate() {
+        let mut stages = branch_stages.remove(occurrence).unwrap_or_default();
         stages.sort_by_key(|(index, _, _)| *index);
         let results = joins
             .get(position)

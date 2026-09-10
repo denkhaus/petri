@@ -71,7 +71,10 @@ pub const BLOBS_DIR: &str = "blobs";
 ///
 /// A host that supplies its own `HookService` registers a `HookServiceHandle`
 /// capability and its own `Runtime::hooks` before calling this; the local
-/// service then steps aside, so no hook runs twice.
+/// service then steps aside, so no hook runs twice. A host that wants the
+/// local service under its own `ExecutionHooks` calls this first and wraps
+/// [`Runtime::installed_hooks`] (the `EmbeddingHost` of
+/// `crates/petri/lib/tests/embedding_readiness.rs` is the pattern).
 pub fn register(runtime: Runtime) -> Runtime {
     services(
         runtime
@@ -91,18 +94,27 @@ pub fn register(runtime: Runtime) -> Runtime {
 /// The run services alone, for a host or a test that registers its own mix
 /// of real and simulated Fabro steps: the local hook service, the output
 /// store, the retained sessions, and the run identity.
+///
+/// The local service reaches the steps only as the `HookServiceHandle`
+/// capability, the same handle a host's replacement would be: every point a
+/// step asks itself (`fabro/stage` at `start`, the fork and fan-in steps,
+/// the agent backends' tool boundaries) goes through it. What the local
+/// service needs from the runtime — the scope environments steps record
+/// ([`stage::ScopeEnvironments`]), the run identity, the model client — is
+/// bound here, never through the dispatch paths.
 pub fn services(runtime: Runtime) -> Runtime {
-    let runtime = if runtime.installed_hooks().is_some() {
-        runtime
+    let (runtime, local) = if runtime.installed_hooks().is_some() {
+        (runtime, None)
     } else {
         let local = Arc::new(hooks::LocalHooks::default());
         let service: Arc<dyn HookService> = local.clone();
-        runtime
+        let runtime = runtime
             .hooks(Arc::new(HookAdapter::new(service.clone())))
             .capability(HookServiceHandle(service))
-            .capability(LocalHooksHandle(local))
+            .capability(local.environments());
+        (runtime, Some(local))
     };
-    runtime.run_services(|run_dir, caps| {
+    runtime.run_services(move |run_dir, caps| {
         let mut caps = caps;
         if !caps.has::<OutputStore>() {
             let store = LocalBlobStore::new(run_dir.join(BLOBS_DIR));
@@ -114,11 +126,9 @@ pub fn services(runtime: Runtime) -> Runtime {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default(),
         };
-        if let Some(local) = caps.get::<LocalHooksHandle>() {
-            local.0.set_run(run.clone());
-            local
-                .0
-                .set_client(caps.get::<pebble::PebbleClient>().map(|c| (*c).clone()));
+        if let Some(local) = &local {
+            local.set_run(run.clone());
+            local.set_client(caps.get::<pebble::PebbleClient>().map(|c| (*c).clone()));
         }
         (
             caps.provide(run)
@@ -128,7 +138,3 @@ pub fn services(runtime: Runtime) -> Runtime {
         )
     })
 }
-
-/// The local hook service, registered so steps that drive their own points
-/// (`fabro/stage`, the ACP client) can reach its configuration.
-pub struct LocalHooksHandle(pub Arc<hooks::LocalHooks>);

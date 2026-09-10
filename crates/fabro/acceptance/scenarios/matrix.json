@@ -3,6 +3,56 @@
   "description": "Every required (scenario, backend, agent) cell of black box phase 4. `status` is `planned` (a test runs it), `blocked` (a required feature or fixture is missing; `reason` says which), or `excluded` (not required; `reason` says why). The coverage report lists every cell here, so a filtered or skipped case stays visible: a planned cell no test reported counts as missing, and missing counts as failed. A cell whose `test` is `<package>::<binary>::<test>` is satisfied by that suite: the readiness suite's cells write per-cell results, and the differential matrix's cells (`fabro_differential`) are taken from the engine records both engines leave.",
   "cells": [
     {
+      "cell": "acp/cancel-during-turn@host/acp",
+      "scenario": "acp/cancel-during-turn",
+      "backend": "host",
+      "agent": "acp",
+      "required": true,
+      "status": "planned",
+      "reason": null,
+      "test": "acp_cancel_during_turn"
+    },
+    {
+      "cell": "acp/exit-before-answer-is-retried@host/acp",
+      "scenario": "acp/exit-before-answer-is-retried",
+      "backend": "host",
+      "agent": "acp",
+      "required": true,
+      "status": "planned",
+      "reason": null,
+      "test": "acp_exit_before_answer_is_retried"
+    },
+    {
+      "cell": "acp/permission-request-and-hook@host/acp",
+      "scenario": "acp/permission-request-and-hook",
+      "backend": "host",
+      "agent": "acp",
+      "required": true,
+      "status": "planned",
+      "reason": null,
+      "test": "acp_permission_request_and_hook"
+    },
+    {
+      "cell": "acp/turn-and-directive@docker/acp",
+      "scenario": "acp/turn-and-directive",
+      "backend": "docker",
+      "agent": "acp",
+      "required": true,
+      "status": "planned",
+      "reason": null,
+      "test": "acp_turn_and_directive_docker"
+    },
+    {
+      "cell": "acp/turn-and-directive@host/acp",
+      "scenario": "acp/turn-and-directive",
+      "backend": "host",
+      "agent": "acp",
+      "required": true,
+      "status": "planned",
+      "reason": null,
+      "test": "acp_turn_and_directive"
+    },
+    {
       "cell": "backend/dynamic-parallelism@docker/openai",
       "scenario": "backend/dynamic-parallelism",
       "backend": "docker",
@@ -228,9 +278,9 @@
       "backend": "docker",
       "agent": "api:openrouter",
       "required": true,
-      "status": "blocked",
-      "reason": "the pinned implement-plan child's verify script needs the Fabro repository's own toolchain (cargo, nightly clippy, bun); the inline migration covers the manager loop on the host, and a container adds no manager-loop behavior",
-      "test": null
+      "status": "planned",
+      "reason": null,
+      "test": "implement_child_runs_successfully_docker"
     },
     {
       "cell": "implement/child-runs-successfully@host/openrouter",

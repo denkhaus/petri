@@ -20,7 +20,7 @@ struct WedgedStarted(Notify);
 
 #[async_trait::async_trait]
 impl EventObserver for WedgedStarted {
-    fn on_record(&self, record: &EventRecord, _state: &EngineState) {
+    fn on_record(&self, record: &EventRecord, _recorded_at: u64, _state: &EngineState) {
         if matches!(record.event, Event::StepProgress { .. }) {
             self.0.notify_one();
         }

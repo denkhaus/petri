@@ -1,0 +1,13 @@
+{
+  "[acp:review]": [
+    {
+      "write": { "path": "verdict.txt", "text": "approved\n" },
+      "text": ["Reviewed ", "the notes: one line, no problems."],
+      "directive": {
+        "outcome": "succeeded",
+        "preferred_next_label": "Approve",
+        "context_updates": { "verdict": "approved", "notes_lines": 1 }
+      }
+    }
+  ]
+}

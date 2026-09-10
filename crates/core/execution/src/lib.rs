@@ -22,7 +22,8 @@ mod store;
 pub mod watchdog;
 
 pub use client::{
-    CoordinatorInvocationClient, InvocationClient, InvocationHandle, InvocationRequest, InvokeError,
+    ChildStart, CoordinatorInvocationClient, InvocationClient, InvocationHandle, InvocationRequest,
+    InvokeError,
 };
 pub use coordinator::{
     Coordinator, CoordinatorError, CoordinatorHandle, CoordinatorOptions, DEFAULT_MAX_INVOCATIONS,

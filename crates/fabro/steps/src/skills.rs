@@ -36,8 +36,7 @@ use pebble_coding_agent::events::{CodingAgentEvent, CodingEvent, SkippedSkillRea
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use smol_str::SmolStr;
-use steps::StepCtx;
-use tokio::sync::mpsc;
+use steps::{ProgressSender, StepCtx};
 
 use crate::agent::AgentConfig;
 use crate::memory;
@@ -295,7 +294,7 @@ impl Attribution {
 
 /// Record one [`WARNING_EVENT`] and one stderr line per problem, so a
 /// skipped skill reaches the event log and the terminal.
-pub async fn report(logs: &mpsc::Sender<StepEvent>, at: &Attribution, problems: &[Problem]) {
+pub async fn report(logs: &ProgressSender, at: &Attribution, problems: &[Problem]) {
     for problem in problems {
         tracing::warn!(
             node = %at.node,

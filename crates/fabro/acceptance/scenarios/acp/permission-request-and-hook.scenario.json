@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "id": "acp/permission-request-and-hook",
+  "family": "acp",
+  "title": "A scripted ACP agent asks permission for a shell call under a configured pre_tool_use command hook that blocks: the client answers with the rejecting option, the agent records that answer and skips the effect, the run warns once per configured tool hook about the boundary ACP does not offer, the post_tool_use hook never runs, and the run succeeds.",
+  "obligation": null,
+  "bundle": {
+    "inline": "graphs/permission-request-and-hook.fabro"
+  },
+  "inputs": {},
+  "fixture": {
+    "commits": [
+      {
+        "message": "fixture",
+        "write": {
+          "README.md": {
+            "text": "fixture\n"
+          },
+          "workflow.toml": {
+            "file": "fixtures/permission-hooks.workflow.toml"
+          },
+          ".fabro/scripted_acp_agent.py": {
+            "file": "fixtures/scripted_acp_agent.py",
+            "mode": "0755"
+          },
+          ".fabro/acp-script.json": {
+            "file": "fixtures/permission-request-and-hook-script.json"
+          }
+        }
+      }
+    ]
+  },
+  "modes": {
+    "backend": "host",
+    "agent": "acp"
+  },
+  "services": {},
+  "interviews": [],
+  "controls": {},
+  "bounds": {
+    "deadline_ms": 120000
+  },
+  "expect": {
+    "process": {
+      "exit_code": 0,
+      "status": "success",
+      "required_nodes": [
+        "agent",
+        "verify"
+      ],
+      "forbidden_nodes": [],
+      "visits": {
+        "agent": 1,
+        "verify": 1
+      },
+      "attempts": {
+        "agent": 1
+      },
+      "stderr_contains": [
+        "hook warning (acp): hook `deny-shell` on `pre_tool_use`: the ACP agent decides which tool calls ask for permission; this hook runs only for those, and a tool call the agent does not ask about is not intercepted",
+        "hook warning (acp): hook `log-tools` on `post_tool_use`: ACP exposes no post-tool result boundary; this hook does not run for this node",
+        "pre_tool_use hook blocked a permission request: shell is not allowed here"
+      ]
+    },
+    "context": {
+      "exact": {
+        "asked": true,
+        "last_response": {
+          "$contains": "Asked before running the shell."
+        },
+        "command.output": {
+          "$contains": "BLOCKED"
+        }
+      },
+      "absent": [],
+      "extra_allowed": [],
+      "complete": false
+    },
+    "files": [
+      {
+        "path": "permission.json",
+        "json": {
+          "outcome": "selected",
+          "optionId": "reject"
+        }
+      },
+      {
+        "path": "build-removed.txt",
+        "absent": true
+      },
+      {
+        "path": "tool-hooks.log",
+        "absent": true
+      }
+    ],
+    "side_effects": {
+      "git": [],
+      "http": []
+    },
+    "providers": {},
+    "interviews": {
+      "questions": [],
+      "errors": [],
+      "consumed": {},
+      "no_plaintext": []
+    },
+    "lifecycle": {
+      "no_leaked_processes": true,
+      "retained_workspace": true
+    }
+  }
+}

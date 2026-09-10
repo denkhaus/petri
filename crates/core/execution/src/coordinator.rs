@@ -281,11 +281,14 @@ pub struct CoordinatorHandle {
 }
 
 impl CoordinatorHandle {
-    /// Politely cancel an invocation and every active descendant.
+    /// Politely cancel an invocation and every active descendant. A second
+    /// request on an invocation that is already cancelled reaches its
+    /// drivers again, which escalates them to the kill tier.
     pub fn cancel(&self, invocation: InvocationId) {
         let _ = self.cancel.send(CancelRequest {
             invocation,
             reason: None,
+            escalate: true,
         });
     }
 
@@ -300,6 +303,7 @@ impl CoordinatorHandle {
         let _ = self.cancel.send(CancelRequest {
             invocation: InvocationId::ROOT,
             reason:     Some(reason),
+            escalate:   true,
         });
     }
 
@@ -887,7 +891,7 @@ impl Coordinator {
             .copied()
             .filter(|(_, cancelled)| !cancelled)
             .collect();
-        self.cancel_invocations(uncancelled, InvocationId::ROOT, None)
+        self.cancel_invocations(uncancelled, InvocationId::ROOT, None, false)
             .await?;
         for (descendant, _) in descendants {
             self.start_invocation(descendant, running)?;
@@ -1408,7 +1412,7 @@ impl Coordinator {
                     && !self.store.state().invocations[&invocation].cancelled
                     && (!reply_delivered || self.store.state().invocations[&parent].cancelled)
                 {
-                    self.cancel_invocations(vec![(invocation, false)], invocation, None)
+                    self.cancel_invocations(vec![(invocation, false)], invocation, None, false)
                         .await?;
                 }
                 Ok((incomplete
@@ -1479,6 +1483,7 @@ impl Coordinator {
                 self.handle_cancel(CancelRequest {
                     invocation: previous,
                     reason:     None,
+                    escalate:   false,
                 })
                 .await
                 .map_err(invoke_error)?;
@@ -1546,6 +1551,7 @@ impl Coordinator {
         let CancelRequest {
             invocation: cancelled,
             reason,
+            escalate,
         } = request;
         if !self.store.state().invocations.contains_key(&cancelled) {
             return Ok(());
@@ -1561,16 +1567,21 @@ impl Coordinator {
                     .then_some((*candidate, state.cancelled))
             })
             .collect();
-        self.cancel_invocations(affected, cancelled, reason).await
+        self.cancel_invocations(affected, cancelled, reason, escalate)
+            .await
     }
 
     /// Record the cancel of every affected invocation; the reason goes on
-    /// the one the requester named, the descendants follow from it.
+    /// the one the requester named, the descendants follow from it. The
+    /// drivers of the newly cancelled invocations are told to cancel; a
+    /// driver that was already cancelled is told again only when the request
+    /// escalates, which is what reaches its kill tier.
     async fn cancel_invocations(
         &mut self,
         affected: Vec<(InvocationId, bool)>,
         requested: InvocationId,
         reason: Option<CancelReason>,
+        escalate: bool,
     ) -> Result<(), CoordinatorError> {
         for (invocation, already_cancelled) in &affected {
             if !already_cancelled {
@@ -1583,6 +1594,7 @@ impl Coordinator {
 
         let affected: BTreeSet<_> = affected
             .into_iter()
+            .filter(|(_, already_cancelled)| escalate || !already_cancelled)
             .map(|(invocation, _)| invocation)
             .collect();
         let handles: Vec<_> = self
@@ -1836,6 +1848,7 @@ fn project_result(
                 ToString::to_string,
             )));
     }
+    let mut updates = BTreeMap::new();
     let output = match graph.result {
         ResultProjection::None => Value::Null,
         ResultProjection::NodeOutput(node) => graph
@@ -1852,7 +1865,20 @@ fn project_result(
                     }
                     Value::Null
                 },
-                |record| record.output.clone(),
+                |record| {
+                    // The result node's own writes, from its final record:
+                    // the node record keeps the output, the history the
+                    // outcome.
+                    if let Some(final_record) = state
+                        .history()
+                        .iter()
+                        .rev()
+                        .find(|final_record| final_record.node == node)
+                    {
+                        updates = final_record.outcome.context_updates.clone();
+                    }
+                    record.output.clone()
+                },
             ),
     };
     InvocationResult {
@@ -1861,6 +1887,7 @@ fn project_result(
         final_execution: execution,
         output,
         context: (*state.run_context().kv).clone(),
+        updates,
     }
 }
 

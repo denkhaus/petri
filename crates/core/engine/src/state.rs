@@ -1036,6 +1036,12 @@ impl EngineState {
             .and_then(|index| u32::try_from(index).ok())
     }
 
+    /// The `for_each` item a node was cloned for, when it is an expansion
+    /// clone: the `item` bound inside the clone. `None` for every other node.
+    pub fn clone_item(&self, node: NodeId) -> Option<&Value> {
+        self.clone_bindings_for(node)?.get("item")
+    }
+
     pub(crate) fn supersede(&mut self, node: NodeId) {
         if let Some(runtime) = self.node_runtime.get_mut(node.index()) {
             runtime.superseded = true;

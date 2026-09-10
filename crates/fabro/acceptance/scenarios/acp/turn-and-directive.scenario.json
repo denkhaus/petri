@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "id": "acp/turn-and-directive",
+  "family": "acp",
+  "title": "A scripted ACP agent takes one turn through the shipped binary: a command node prepares a file, the agent writes a second file and ends its text with a routing directive whose preferred label picks the second of two edges and whose context updates land in the run context, and a command node reads both files back.",
+  "obligation": null,
+  "bundle": {
+    "inline": "graphs/turn-and-directive.fabro"
+  },
+  "inputs": {},
+  "fixture": {
+    "commits": [
+      {
+        "message": "fixture",
+        "write": {
+          "README.md": {
+            "text": "fixture\n"
+          },
+          ".fabro/scripted_acp_agent.py": {
+            "file": "fixtures/scripted_acp_agent.py",
+            "mode": "0755"
+          },
+          ".fabro/acp-script.json": {
+            "file": "fixtures/turn-and-directive-script.json"
+          }
+        }
+      }
+    ]
+  },
+  "modes": {
+    "backend": "host",
+    "agent": "acp"
+  },
+  "services": {},
+  "interviews": [],
+  "controls": {},
+  "bounds": {
+    "deadline_ms": 120000
+  },
+  "expect": {
+    "process": {
+      "exit_code": 0,
+      "status": "success",
+      "required_nodes": [
+        "prepare",
+        "agent",
+        "approve"
+      ],
+      "forbidden_nodes": [
+        "revise"
+      ],
+      "visits": {
+        "prepare": 1,
+        "agent": 1,
+        "approve": 1
+      },
+      "attempts": {
+        "agent": 1
+      }
+    },
+    "context": {
+      "exact": {
+        "verdict": "approved",
+        "notes_lines": 1,
+        "last_response": {
+          "$contains": "Reviewed the notes: one line, no problems."
+        },
+        "response.agent": {
+          "$contains": "\"preferred_next_label\": \"Approve\""
+        },
+        "command.output": "draft\napproved\nAPPROVED\n"
+      },
+      "absent": [],
+      "extra_allowed": [],
+      "complete": false
+    },
+    "files": [
+      {
+        "path": "notes.txt",
+        "text": "draft\n"
+      },
+      {
+        "path": "verdict.txt",
+        "text": "approved\n"
+      },
+      {
+        "path": "wrong-route.txt",
+        "absent": true
+      },
+      {
+        "path": ".fabro/acp-state/acp_review.calls",
+        "text": "1"
+      }
+    ],
+    "side_effects": {
+      "git": [],
+      "http": []
+    },
+    "providers": {},
+    "interviews": {
+      "questions": [],
+      "errors": [],
+      "consumed": {},
+      "no_plaintext": []
+    },
+    "lifecycle": {
+      "no_leaked_processes": true,
+      "retained_workspace": true
+    }
+  }
+}

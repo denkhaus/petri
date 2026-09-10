@@ -32,12 +32,12 @@ use runtime::driver::FiringView;
 use serde::Deserialize;
 use serde_json::json;
 use smol_str::SmolStr;
-use steps::{Answer, Steer};
+use steps::{Answer, ProgressSender, Steer};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc;
 use tokio::time;
 
-use crate::hooks::{ToolPayload, WARNING_EVENT, report_event, warning_event};
+use crate::hooks::{ToolPayload, WARNING_EVENT, record_report, warning_event};
 
 /// The backend name in hook warnings.
 pub const BACKEND: &str = "acp";
@@ -79,11 +79,6 @@ impl AcpHooks {
         }
     }
 
-    /// Whether any tool hook is configured.
-    pub fn has_tool_hooks(&self) -> bool {
-        !self.pre.is_empty() || !self.post.is_empty()
-    }
-
     /// The warnings to emit before the agent starts: what this backend
     /// cannot enforce for each configured tool hook.
     pub fn known_gaps(&self) -> Vec<StepEvent> {
@@ -118,7 +113,7 @@ impl AcpHooks {
 
     /// Ask the `pre_tool_use` hooks about a permission request.
     /// `Some(reason)` blocks.
-    async fn pre_tool(&self, params: &Value, logs: &mpsc::Sender<StepEvent>) -> Option<String> {
+    async fn pre_tool(&self, params: &Value, logs: &ProgressSender) -> Option<String> {
         let call = params.get("toolCall").cloned().unwrap_or(Value::Null);
         let tool_name = call
             .get("title")
@@ -145,17 +140,15 @@ impl AcpHooks {
                 payload: serde_json::to_value(&payload).unwrap_or(Value::Null),
             })
             .await;
-        if !report.is_silent() {
-            let _ = logs
-                .send(report_event(
-                    &self.node,
-                    self.firing,
-                    self.attempt,
-                    HookEvent::PreToolUse,
-                    &report,
-                ))
-                .await;
-        }
+        record_report(
+            logs,
+            &self.node,
+            self.firing,
+            self.attempt,
+            HookEvent::PreToolUse,
+            &report,
+        )
+        .await;
         match report.decision {
             HookDecision::Block { reason } => Some(reason),
             _ => None,
@@ -165,7 +158,7 @@ impl AcpHooks {
     /// A tool call the agent reported without asking permission: the
     /// configured `pre_tool_use` hooks could not run for it. Warn once per
     /// hook and tool.
-    async fn unintercepted(&self, tool: &str, logs: &mpsc::Sender<StepEvent>) {
+    async fn unintercepted(&self, tool: &str, logs: &ProgressSender) {
         for hook in &self.pre {
             let key = format!("{hook}:{tool}");
             let first = self
@@ -303,7 +296,7 @@ pub struct Client {
     handle:     Box<dyn ProcessHandle>,
     stdin:      StdinWriter,
     lines:      LineStream,
-    logs:       mpsc::Sender<StepEvent>,
+    logs:       ProgressSender,
     next_id:    u64,
     session_id: Option<String>,
     exited:     bool,
@@ -333,7 +326,7 @@ impl Client {
     pub async fn spawn(
         env: &dyn executor::ExecEnv,
         command: &AgentCommand,
-        logs: mpsc::Sender<StepEvent>,
+        logs: ProgressSender,
     ) -> Result<Self, AcpError> {
         let mut handle = env.spawn(command.spec()).await.map_err(|e| {
             AcpError::ProcessExited(format!(": could not start `{}`: {e}", command.program))

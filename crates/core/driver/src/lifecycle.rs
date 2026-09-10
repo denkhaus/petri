@@ -7,10 +7,18 @@
 //! 1. [`ExecutionHooks::before_attempt`], before every attempt is dispatched
 //!    (retries included). A paused firing keeps its identity, starts no
 //!    attempt, and a cancel settles it as `Cancelled`.
-//! 2. The attempt runs; the step's own result policy applies inside the step.
-//! 3. [`ExecutionHooks::prepare_result`], after the step returned and before
-//!    the `StepFinished` record is appended. The host may adjust the effective
-//!    result; the original is recorded first as a [`Note`].
+//! 2. The attempt runs; the step's own result policy applies inside the step (a
+//!    Fabro stage finalizes an exhausted retry there, explicit routes first),
+//!    and the driver applies the node's exhaustion policy
+//!    ([`RetryPolicy::finalize`](ir::RetryPolicy::finalize)) to the returned
+//!    outcome, once. The engine records the finish it is given.
+//! 3. [`ExecutionHooks::prepare_result`], once per attempt, after that and
+//!    before the `StepFinished` record is appended. On an attempt the engine
+//!    will retry (`will_retry`) it is an interception point; on the final
+//!    attempt it is the completion preparation: the outcome is the effective
+//!    one the engine will record, the host may change it, and routing is
+//!    resolved afterwards from the record, so a change here is what the routes
+//!    see. The original is recorded first as a [`Note`].
 //! 4. The canonical `StepFinished` record.
 //! 5. [`ExecutionHooks::after_record`], once per final outcome, before the
 //!    routing decision is asked for.
@@ -124,7 +132,8 @@ impl Note {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResultPreparedNote {
     pub attempt:   Attempt,
-    /// The status the step reported.
+    /// The status the host was handed: the step's, with the node's
+    /// exhaustion policy applied.
     pub original:  Status,
     /// The status the host made effective.
     pub effective: Status,
@@ -191,11 +200,17 @@ pub enum ResultOrigin {
 /// An attempt's result, before it is recorded.
 pub struct PrepareResult {
     pub view:       Arc<FiringView>,
-    /// The outcome as the step reported it, already masked.
+    /// The outcome as the engine will record it if the host leaves it alone,
+    /// already masked: the step's result with the node's exhaustion policy
+    /// applied, so an exhausted retry under `Exhaustion::AcceptPartial`
+    /// arrives as the `PartialSuccess` it becomes, its failure in
+    /// `underlying`.
     pub outcome:    Outcome,
     pub origin:     ResultOrigin,
     /// Whether the engine will schedule another attempt if this outcome is
     /// recorded unchanged: the node's retry policy applied to the status.
+    /// `false` on the attempt whose outcome is the firing's, which is the
+    /// one to prepare.
     pub will_retry: bool,
     /// Whether this is the last attempt the policy allows.
     pub exhausted:  bool,
@@ -377,7 +392,10 @@ pub trait ExecutionHooks: Send + Sync {
         AttemptDecision::admit()
     }
 
-    /// After an attempt returned and before its record is appended.
+    /// After an attempt returned, with the step's result policy and the
+    /// node's exhaustion policy applied, and before its record is appended.
+    /// Once per attempt; the one with `will_retry == false` is the final
+    /// completion, and what it returns is what routing sees.
     async fn prepare_result(&self, request: PrepareResult) -> Result<Prepared, PrepareError> {
         let _ = request;
         Ok(Prepared::unchanged())

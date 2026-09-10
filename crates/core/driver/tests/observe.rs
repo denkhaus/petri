@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use driver::{EventObserver, ObserveError};
+use driver::{EventObserver, ObserveError, recorded_now};
 use engine::{EngineState, EventRecord, EventSource};
 use ir::{GraphBuilder, RunStatus, ScopeId, Value};
 use serde_json::json;
@@ -21,6 +21,8 @@ type ResolvedFinish = (u64, Option<(String, Value)>);
 #[derive(Default)]
 struct Recording {
     records:  Mutex<Vec<EventRecord>>,
+    /// The recording time handed over with each record, in order.
+    times:    Mutex<Vec<u64>>,
     /// For each `StepFinished` record: seq, and the `(name, meta)` the state
     /// resolved the firing to — at the moment of the record, when the firing is
     /// already retired.
@@ -31,7 +33,8 @@ struct Recording {
 
 #[async_trait::async_trait]
 impl EventObserver for Recording {
-    fn on_record(&self, record: &EventRecord, state: &EngineState) {
+    fn on_record(&self, record: &EventRecord, recorded_at: u64, state: &EngineState) {
+        self.times.lock().expect("not poisoned").push(recorded_at);
         if let Some(delay) = self.delay {
             thread::sleep(delay);
         }
@@ -57,7 +60,7 @@ struct BrokenSink;
 
 #[async_trait::async_trait]
 impl EventObserver for BrokenSink {
-    fn on_record(&self, _record: &EventRecord, _state: &EngineState) {}
+    fn on_record(&self, _record: &EventRecord, _recorded_at: u64, _state: &EngineState) {}
 
     async fn finish(&self) -> Result<(), ObserveError> {
         Err(ObserveError::new("broken-sink", "the flush failed"))
@@ -84,11 +87,13 @@ async fn every_observer_sees_every_record_in_seq_order() {
         delay: Some(Duration::from_millis(2)),
         ..Recording::default()
     });
+    let before = recorded_now();
     let report = host_driver(two_step_graph(), &dir)
         .observe(fast.clone() as Arc<dyn EventObserver>)
         .observe(slow.clone() as Arc<dyn EventObserver>)
         .await_run()
         .await;
+    let after = recorded_now();
     assert_eq!(
         report.status,
         RunStatus::Success,
@@ -103,6 +108,18 @@ async fn every_observer_sees_every_record_in_seq_order() {
             seen.as_slice(),
             report.state.log.records(),
             "an observer saw exactly the log, in order"
+        );
+        // The recording time rides with each record: the driver's clock at
+        // the append, read once per apply, never running backwards.
+        let times = observer.times.lock().expect("not poisoned");
+        assert_eq!(times.len(), seen.len(), "one recording time per record");
+        assert!(
+            times.iter().all(|at| (before..=after).contains(at)),
+            "recording times are the run's wall clock: {times:?}"
+        );
+        assert!(
+            times.windows(2).all(|pair| pair[0] <= pair[1]),
+            "recording times never decrease along the log: {times:?}"
         );
         assert!(seen.iter().any(|r| r.source == EventSource::External));
         assert!(

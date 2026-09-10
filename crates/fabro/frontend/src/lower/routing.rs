@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use frontend::Diagnostics;
 use ir::{
-    Backoff, BinOp, Candidate, Edge, EdgeTransition, Exhaustion, ExprId, GraphBuilder, Guard,
-    NodeId, PickPolicy, RetryOn, RetryPolicy, RoutingGroup, SelectionPolicy, Tier, UnOp,
+    Backoff, BinOp, Candidate, Edge, EdgeTransition, ExprId, GraphBuilder, Guard, NodeId,
+    PickPolicy, RetryOn, RetryPolicy, RoutingGroup, SelectionPolicy, Tier, UnOp,
 };
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
@@ -25,15 +25,19 @@ pub enum Policy {
     /// ends unless a conditional edge or a retry target applies.
     Exit,
     /// The failure becomes a `PartialSuccess` that keeps the failure on the
-    /// record, and routes as a success.
+    /// record, and routes as a success. As `on_retries_exhausted` (Fabro's
+    /// `allow_partial=true`) it applies to the last retryable failure with no
+    /// explicit-route check, as Fabro finalizes an exhausted retry; as
+    /// `on_failure` it is a Petri extension with `succeed`'s route check.
     PartiallySucceed,
     /// Fabro's `succeed`: a failure that no explicit route matches is
     /// promoted. The step keeps the failure on its record as a partial
     /// status and reports `succeeded` to its edge conditions and to later
     /// stages, as Fabro shows them. A failure an explicit route matches (a
     /// condition, a preferred label, or a suggested target) stays failed and
-    /// takes that route, as Fabro's executor orders it. `auto_status=true` is
-    /// the deprecated spelling.
+    /// takes that route, as Fabro's executor orders it. The same check and
+    /// promotion apply to a retryable failure once its attempts ran out.
+    /// `auto_status=true` is the deprecated spelling.
     Succeed,
 }
 
@@ -66,16 +70,20 @@ impl Policy {
         matches!(self, Self::Route | Self::PartiallySucceed | Self::Succeed)
     }
 
-    /// Whether running out of retries turns the last failure into a partial
-    /// success (`Exhaustion::AcceptPartial`).
-    fn accepts_partial(self) -> bool {
+    /// Whether this policy can turn a failure into a partial success, so the
+    /// step applies it where it classifies its result.
+    fn promotes(self) -> bool {
         matches!(self, Self::PartiallySucceed | Self::Succeed)
     }
 }
 
 /// The two policies of one node: what a non-retryable failure does, and what
 /// running out of retries does. `allow_partial=true` is Fabro's spelling of
-/// `on_retries_exhausted="partially_succeed"`.
+/// `on_retries_exhausted="partially_succeed"`. Both ride in the step config
+/// (`on_failure`, `on_retries_exhausted`): the step applies the one that
+/// decides its result, since Fabro's executor applies its failure policy to
+/// the exhausted retry the same way as to an ordinary failure, and the
+/// engine's own `Exhaustion` stays `Fail` for every Fabro node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FailurePolicy {
     pub on_failure:           Policy,
@@ -126,6 +134,12 @@ impl FailurePolicy {
     /// reads as `succeeded` to its edge conditions.
     pub fn succeeds(self) -> bool {
         self.on_failure == Policy::Succeed || self.on_retries_exhausted == Policy::Succeed
+    }
+
+    /// Whether either policy can promote a failure, so the step needs the
+    /// node's explicit routes to make Fabro's precheck.
+    pub fn promotes(self) -> bool {
+        self.on_failure.promotes() || self.on_retries_exhausted.promotes()
     }
 }
 
@@ -324,14 +338,15 @@ const DEFAULT_BACKOFF: Backoff = Backoff {
 };
 
 /// Fabro's retry policy for a node: a `retry_policy` preset, else
-/// `max_retries` (default the graph's `default_max_retries`, default 0), and
-/// `allow_partial` / `on_retries_exhausted="partially_succeed"` as
-/// `Exhaustion::AcceptPartial`. Only a `retry_requested` failure is retried:
-/// Fabro's retry intent is a flag on the outcome, never a status.
+/// `max_retries` (default the graph's `default_max_retries`, default 0). Only
+/// a `retry_requested` failure is retried: Fabro's retry intent is a flag on
+/// the outcome, never a status. Exhaustion is the engine's `Fail`: what the
+/// last retryable failure becomes is the step's decision under
+/// `on_retries_exhausted`, made with the routes in hand, so the engine never
+/// converts a failure an explicit route should have caught.
 pub(super) fn retry_policy(
     node: &NodeDecl,
     workflow: &Workflow,
-    policy: FailurePolicy,
     diags: &mut Diagnostics,
 ) -> RetryPolicy {
     let preset = node.attrs.text("retry_policy");
@@ -376,12 +391,7 @@ pub(super) fn retry_policy(
             )
         }
     };
-    let retry = RetryPolicy::attempts(attempts)
+    RetryPolicy::attempts(attempts)
         .with_backoff(backoff)
-        .with_retry_on(RetryOn::classes(&[RETRY_REQUESTED_CLASS]));
-    if policy.on_retries_exhausted.accepts_partial() {
-        return retry.accepting_partial();
-    }
-    debug_assert_eq!(retry.on_exhaustion, Exhaustion::Fail);
-    retry
+        .with_retry_on(RetryOn::classes(&[RETRY_REQUESTED_CLASS]))
 }

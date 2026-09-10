@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use executor::Masker;
 use ir::{LogStream, StepEvent, Value};
 use serde_json::Map;
+use steps::{Progress, ProgressAck, ProgressSender};
 use tokio::sync::mpsc;
 
 use crate::session::set_env_blocked;
@@ -101,7 +102,7 @@ pub(crate) const COMMAND_SINK_CAPACITY: usize = 64;
 
 /// The sink one step's log events pass through.
 pub(crate) struct CommandSink {
-    out:            mpsc::Sender<StepEvent>,
+    out:            ProgressSender,
     masker:         Masker,
     /// `ACTIONS_ALLOW_UNSECURE_COMMANDS`: whether `set-env` and `add-path`
     /// apply.
@@ -114,7 +115,7 @@ pub(crate) struct CommandSink {
 }
 
 impl CommandSink {
-    pub(crate) fn new(out: mpsc::Sender<StepEvent>, masker: Masker, allow_unsecure: bool) -> Self {
+    pub(crate) fn new(out: ProgressSender, masker: Masker, allow_unsecure: bool) -> Self {
         Self {
             out,
             masker,
@@ -132,23 +133,34 @@ impl CommandSink {
         self.effects.clone()
     }
 
-    /// Consume events until the sender side is gone.
-    pub(crate) async fn run(mut self, mut rx: mpsc::Receiver<StepEvent>) {
-        while let Some(event) = rx.recv().await {
+    /// Consume events until the sender side is gone. An event that is not a
+    /// log line passes through as it is, its acknowledgement included.
+    pub(crate) async fn run(mut self, mut rx: mpsc::Receiver<Progress>) {
+        while let Some(Progress { event, ack }) = rx.recv().await {
             match event {
-                StepEvent::Log { stream, line } => self.on_line(stream, line).await,
+                StepEvent::Log { stream, line } => self.on_line(stream, line, ack).await,
                 other => {
-                    let _ = self.out.send(other).await;
+                    let _ = self.out.forward(Progress { event: other, ack }).await;
                 }
             }
         }
     }
 
-    async fn forward(&self, stream: LogStream, line: String) {
-        let _ = self.out.send(StepEvent::Log { stream, line }).await;
+    async fn forward(&self, stream: LogStream, line: String, ack: Option<ProgressAck>) {
+        let _ = self
+            .out
+            .forward(Progress {
+                event: StepEvent::Log { stream, line },
+                ack,
+            })
+            .await;
     }
 
-    async fn on_line(&mut self, stream: LogStream, line: String) {
+    /// A line's acknowledgement, when it asked for one, rides the last line
+    /// forwarded for it. A command that forwards nothing leaves no record to
+    /// wait for — its effect rides the outcome — so the acknowledgement is
+    /// answered at once.
+    async fn on_line(&mut self, stream: LogStream, line: String, ack: Option<ProgressAck>) {
         if let Some(token) = &self.stopped {
             let resume = line
                 .trim()
@@ -159,10 +171,10 @@ impl CommandSink {
             }
             // The resume line itself is output — the runner's
             // `TryProcessCommand` writes it before resuming.
-            return self.forward(stream, line).await;
+            return self.forward(stream, line, ack).await;
         }
         let Some(cmd) = parse(&line) else {
-            return self.forward(stream, line).await;
+            return self.forward(stream, line, ack).await;
         };
         // The runner's `OmitEcho` set: the value-bearing mask, and the commands
         // that already render into the log.
@@ -171,7 +183,7 @@ impl CommandSink {
             "add-mask" | "debug" | "notice" | "warning" | "error"
         );
         if self.echo && !omit_echo {
-            self.forward(stream, line.clone()).await;
+            self.forward(stream, line.clone(), None).await;
         }
         let name_prop = cmd.properties.get("name").cloned();
         // Apply under the lock, forward after it: the guard must not live across
@@ -263,8 +275,18 @@ impl CommandSink {
                 _ => vec![line],
             }
         };
-        for text in forward {
-            self.forward(stream, text).await;
+        let mut ack = ack;
+        let last = forward.len().checked_sub(1);
+        for (index, text) in forward.into_iter().enumerate() {
+            let ack = if Some(index) == last {
+                ack.take()
+            } else {
+                None
+            };
+            self.forward(stream, text, ack).await;
+        }
+        if let Some(ack) = ack {
+            let _ = ack.send(Ok(()));
         }
     }
 }
@@ -310,8 +332,8 @@ mod tests {
         allow_unsecure: bool,
         lines: &[(LogStream, &str)],
     ) -> (Vec<(LogStream, String)>, Arc<Mutex<CommandEffects>>, Masker) {
-        let (out_tx, mut out_rx) = mpsc::channel(64);
-        let (tx, rx) = mpsc::channel(64);
+        let (out_tx, mut out_rx) = ProgressSender::channel(64);
+        let (tx, rx) = ProgressSender::channel(64);
         let masker = Masker::new();
         let sink = CommandSink::new(out_tx, masker.clone(), allow_unsecure);
         let effects = sink.effects();
@@ -328,7 +350,7 @@ mod tests {
         task.await.unwrap();
         let mut out = Vec::new();
         while let Ok(ev) = out_rx.try_recv() {
-            if let StepEvent::Log { stream, line } = ev {
+            if let StepEvent::Log { stream, line } = ev.event {
                 out.push((stream, line));
             }
         }
@@ -412,8 +434,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_sink_applies_commands_and_forwards_the_rest() {
-        let (out_tx, mut out_rx) = mpsc::channel(16);
-        let (tx, rx) = mpsc::channel(16);
+        let (out_tx, mut out_rx) = ProgressSender::channel(16);
+        let (tx, rx) = ProgressSender::channel(16);
         let masker = Masker::new();
         let sink = CommandSink::new(out_tx, masker.clone(), false);
         let effects = sink.effects();
@@ -444,7 +466,7 @@ mod tests {
 
         let mut lines = Vec::new();
         while let Ok(ev) = out_rx.try_recv() {
-            if let StepEvent::Log { line, .. } = ev {
+            if let StepEvent::Log { line, .. } = ev.event {
                 lines.push(line);
             }
         }

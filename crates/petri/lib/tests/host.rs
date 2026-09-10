@@ -101,7 +101,8 @@ async fn the_byte_codec_round_trips_without_a_filesystem() {
     let rt = test_runtime(&dir);
     let report = host::run(&rt, two_step_graph()).await.expect("runs");
 
-    let bytes = host::encode_events(&report.state.log);
+    let times = fabricated_times(&report.state.log);
+    let bytes = host::encode_events(&report.state.log, &times);
     let decoded = host::decode_events(&bytes).expect("decodes");
     assert!(!decoded.torn);
     assert_eq!(decoded.clean_len, bytes.len());
@@ -109,6 +110,16 @@ async fn the_byte_codec_round_trips_without_a_filesystem() {
         serde_json::to_vec(&decoded.log).expect("encodes"),
         serde_json::to_vec(&report.state.log).expect("encodes"),
     );
+    assert_eq!(
+        decoded.recorded_at, times,
+        "each record's recording time rides beside it"
+    );
+}
+
+/// One distinct recording time per record, for codec tests that need the
+/// framing but not a clock.
+fn fabricated_times(log: &engine::EventLog) -> Vec<u64> {
+    (0..log.len() as u64).map(|seq| 1_000 + seq).collect()
 }
 
 /// A header from another version is a clean rejection — the standing
@@ -127,12 +138,15 @@ fn a_header_version_mismatch_is_rejected() {
 /// Records whose seqs are not contiguous from 0 cannot become a log.
 #[test]
 fn out_of_sequence_records_are_rejected() {
-    let mut bytes = host::encode_events(&engine::EventLog::new());
+    let mut bytes = host::encode_events(&engine::EventLog::new(), &[]);
     let event = serde_json::to_string(&engine::Event::ExecutionStarted(
         engine::EngineStart::default(),
     ))
     .expect("an event serializes");
-    bytes.extend(format!("{{\"seq\":3,\"source\":\"External\",\"event\":{event}}}\n").as_bytes());
+    bytes.extend(
+        format!("{{\"seq\":3,\"source\":\"External\",\"event\":{event},\"recorded_at\":1}}\n")
+            .as_bytes(),
+    );
     match host::decode_events(&bytes) {
         Err(EventsDecodeError::Invalid(InvalidRecords::SeqMismatch { index, found })) => {
             assert_eq!((index, found), (0, 3));
@@ -149,7 +163,7 @@ async fn an_eof_torn_final_line_drops_to_the_prefix() {
     let rt = test_runtime(&dir);
     let report = host::run(&rt, two_step_graph()).await.expect("runs");
 
-    let bytes = host::encode_events(&report.state.log);
+    let bytes = host::encode_events(&report.state.log, &fabricated_times(&report.state.log));
     let torn = &bytes[..bytes.len() - 10];
     let decoded = host::decode_events(torn).expect("the prefix loads");
     assert!(decoded.torn);
@@ -169,7 +183,7 @@ async fn a_terminated_undecodable_line_refuses_the_load() {
     let rt = test_runtime(&dir);
     let report = host::run(&rt, two_step_graph()).await.expect("runs");
 
-    let mut bytes = host::encode_events(&report.state.log);
+    let mut bytes = host::encode_events(&report.state.log, &fabricated_times(&report.state.log));
     bytes.extend(b"not a record\n");
     match host::decode_events(&bytes) {
         Err(EventsDecodeError::BadRecord { line, .. }) => {
@@ -432,7 +446,7 @@ struct Counting {
 
 #[async_trait::async_trait]
 impl EventObserver for Counting {
-    fn on_record(&self, record: &EventRecord, _state: &EngineState) {
+    fn on_record(&self, record: &EventRecord, _recorded_at: u64, _state: &EngineState) {
         self.seen.lock().expect("not poisoned").push(record.seq);
     }
 }

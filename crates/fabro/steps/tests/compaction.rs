@@ -53,7 +53,7 @@ const THRESHOLD: u64 = WINDOW * 80 / 100;
 struct Customs(Mutex<Vec<(String, Value)>>);
 
 impl EventObserver for Customs {
-    fn on_record(&self, record: &EventRecord, state: &EngineState) {
+    fn on_record(&self, record: &EventRecord, _recorded_at: u64, state: &EngineState) {
         if let Event::StepProgress {
             firing,
             ev: StepEvent::Custom(value),
@@ -121,7 +121,7 @@ impl Customs {
 /// Wake a waiter when Pebble reports that a compaction started.
 struct CompactionStarted(mpsc::Sender<()>);
 impl EventObserver for CompactionStarted {
-    fn on_record(&self, record: &EventRecord, _: &EngineState) {
+    fn on_record(&self, record: &EventRecord, _recorded_at: u64, _: &EngineState) {
         if let Event::StepProgress {
             ev: StepEvent::Custom(value),
             ..

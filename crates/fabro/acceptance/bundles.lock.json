@@ -1310,9 +1310,9 @@
       ],
       "entry_point": ".fabro/workflows/implement-issue/workflow.fabro",
       "workflow_config": ".fabro/workflows/implement-issue/workflow.toml",
-      "status": "required-blocked",
+      "status": "required",
       "classification": "valid-fabro",
-      "classification_reason": "Fabro repository workflows at the pin: the manager loop (house) parent and its child. The child's verify node hard-codes the Fabro repository's own toolchain.",
+      "classification_reason": "Fabro repository workflows at the pin: the manager loop (house) parent and its child. The child's verify node hard-codes the Fabro repository's own toolchain, so the scenarios run inline graphs of the bundle's shape on the host and in a container (an accepted migration, task 17).",
       "file_count": 6,
       "bundle_hash": "fec86b59733ac4612cb3cd1e405444a7fa34f3002e8453b0136e2db19fb9d04e",
       "files": [

@@ -30,7 +30,7 @@
       "id": "a-late",
       "match": {
         "node": "a",
-        "invocation_path": "/branch:fan:0:a"
+        "invocation_path": "/branch:fan@2:0:a"
       },
       "delay_ms": 600,
       "action": {
@@ -41,7 +41,7 @@
       "id": "b-now",
       "match": {
         "node": "b",
-        "invocation_path": "/branch:fan:1:b"
+        "invocation_path": "/branch:fan@2:1:b"
       },
       "action": {
         "kind": "choice",
@@ -171,12 +171,12 @@
         },
         {
           "node": "a",
-          "invocation_path": "/branch:fan:0:a",
+          "invocation_path": "/branch:fan@2:0:a",
           "delivery": "delivered"
         },
         {
           "node": "b",
-          "invocation_path": "/branch:fan:1:b",
+          "invocation_path": "/branch:fan@2:1:b",
           "delivery": "delivered"
         }
       ],

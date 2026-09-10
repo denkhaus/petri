@@ -536,6 +536,25 @@ async fn expect(ran: &Ran, requests_at_interrupt: Option<usize>) {
             .count() as u64;
         assert_eq!(seen, *count, "visits of `{node}`; finished: {visited:?}");
     }
+    if !expect.process.attempts.is_empty() {
+        let nodes = inspect::root_nodes(&document);
+        for (node, count) in &expect.process.attempts {
+            assert_eq!(
+                nodes[node.as_str()]["attempts"].as_u64(),
+                Some(*count),
+                "attempts of `{node}`: {:#}",
+                nodes[node.as_str()]
+            );
+        }
+    }
+    for text in &expect.process.stderr_contains {
+        let text = bindings.text(text);
+        assert!(
+            finished.stderr.contains(&text),
+            "stderr does not contain `{text}`\n{}",
+            context_for_errors()
+        );
+    }
 
     // Final context.
     let context = inspect::root_context(&document)

@@ -137,9 +137,12 @@ is the failure circuit breaker's limit. Both lower to the graph's
 Retries: `max_retries` (default `default_max_retries`, default 0) or a
 `retry_policy` preset (`none`, `standard`, `aggressive`, `linear`, `patient`)
 becomes `RetryPolicy`. Only a failure the step classed `retry_requested` is
-retried: Fabro's retry intent is a flag on the outcome, never a status.
-`allow_partial=true` — Fabro's spelling of `on_retries_exhausted="partially_succeed"` —
-is `Exhaustion::AcceptPartial`.
+retried: Fabro's retry intent is a flag on the outcome, never a status. The
+engine's exhaustion stays `Fail` for every Fabro node: what the last retryable
+failure becomes is the step's decision under `on_retries_exhausted` (see
+"Failure policy"), made on the final attempt with the node's explicit routes
+in hand. `allow_partial=true` is Fabro's spelling of
+`on_retries_exhausted="partially_succeed"`.
 
 ## Routing
 
@@ -213,9 +216,20 @@ Petri's `partially_succeed` — and the specific one wins:
   `partially_succeed_policy_classifies_before_routing` records that
   rejection beside Petri's result, and `crates/fabro/acceptance/CONTRACT.md`
   lists the spelling under accepted differences.
-- A retryable failure is never promoted by the step: the engine retries it,
-  and `allow_partial` / `on_retries_exhausted="partially_succeed"` accept the
-  last failure as a partial success on exhaustion (`Exhaustion::AcceptPartial`).
+- A retryable failure with an attempt left is returned failed for the engine
+  to retry. On the final attempt (`StepCtx::is_final_attempt`) it is the
+  stage's outcome and `on_retries_exhausted` decides it, in Fabro's order
+  (`finalize_retries_exhausted`, then `apply_succeed_policy`):
+  `partially_succeed` (`allow_partial`) accepts it as a `PartialSuccess` with
+  no route check, reporting `partially_succeeded`; `succeed` checks the
+  explicit routes against the failed outcome first and promotes only an
+  unmatched failure, reporting `succeeded`, so an `outcome=failed` edge still
+  recovers from an exhausted gate and an `outcome=succeeded` edge matches a
+  promoted one; `route` and `exit` leave it failed. The step's config carries
+  both policies and the routes; the failure's `retry_requested` class stays on
+  the record, which is how the fallback tier knows which policy governs it
+  (acceptance `exhaustion.rs`, black box
+  `an_expired_gate_under_succeed_takes_its_explicit_failure_edge`).
 - A human gate never falls through on failure, whatever the policy.
 
 ### Goal gates and loops
@@ -311,10 +325,12 @@ The item reaches the model after the prompt as fenced untrusted data: a
 notice, then the item's JSON inside `<untrusted-<16 hex>>` tags whose tag is
 derived from the item and never appears in it. `item_label` is the item's
 `name`, else `label`, else its index, sanitized to 80 characters. An empty
-list fires the template once with the placeholder item
-`petri.parallel.empty`; the fan-in strips placeholders and joins zero
-results, so no model call happens. `for_each` inside a `for_each` branch is
-`fabro.for_each.nested`.
+list fires the template once with the IR's placeholder item
+(`{"$placeholder": true}`, `ir::placeholder::PLACEHOLDER_ITEM_KEY`); the
+fan-in strips placeholders and joins zero results, so no model call happens,
+and the placeholder clone is no branch in the public event stream (the fork
+starts and closes with zero branches). `for_each` inside a `for_each` branch
+is `fabro.for_each.nested`.
 
 `max_parallel` bounds the fork's live children per fork occurrence: a
 missing, non-integer or negative value is 4 (`fabro.max_parallel.normalized`),
@@ -328,9 +344,18 @@ branches between attempts. A branch cancelled while it waits still starts,
 under the bound, and finishes as cancelled. The slots are one gate per parent
 execution and fork visit (`AttemptAdmission` on the child invocation). On
 resume the gate is rebuilt from the coordinator log, and every declared but
-unfinished branch queues again under the same bound. Branch steps report
-`fabro.parallel.branch.started` and `fabro.parallel.branch.completed`, the
-fan-in `fabro.parallel.completed`, as `StepEvent::Custom`.
+unfinished branch queues again under the same bound. The fork step's output
+names the fork occurrence (`occurrence = { fork, firing }`, this visit of the
+parallel node); every branch child's call slot is
+`branch:<fork>@<firing>:<index>:<target>`. Branch steps report
+`fabro.parallel.branch.started` once the child's engine has started and
+`fabro.parallel.branch.completed` on every path a branch ends (with the
+envelope's `status`, a `disposition` of `completed`, `cancelled`, `killed` or
+`failed_to_start`, and whether the child ever `started`); the fan-in reports
+`fabro.parallel.completed` when it runs. All three carry the occurrence and
+are `StepEvent::Custom`; `crates/core/execution/EVENTS.md` ("Fork closure")
+maps them to Fabro's `parallel.*` events beside the typed `fork_completed`
+that closes a cancelled or killed fork.
 
 Every Fabro run has a hard ceiling of 10,000 invocations, root and all
 children counted, finished ones included (`RunPolicy.max_invocations`, set by
@@ -420,7 +445,13 @@ the coordinator registers `fabro_steps::workflow::ChildInvoker`.
   model selector, and `reasoning_effort` configures the actual model request.
   The node's backend overrides the graph's backend; model stylesheets can also
   select it. Graph ACP configuration applies only to ACP nodes. Setting ACP
-  options directly on an API node is an error.
+  options directly on an API node is an error. An ACP turn that fails after
+  the agent started (the process exits before the protocol completes, a
+  protocol error, a rejected request, a stop reason other than `end_turn` or
+  `refusal`, or a turn that outlives the node's `timeout`) is classed
+  `retry_requested`, as Fabro's retryable handler error
+  is, so `max_retries` and `retry_policy` apply to it; a node with no attempts
+  left fails and routes on `outcome=failed` as before.
 - **`fabro/human`** asks through the core `Question` event and routes on the
   delivered answer. The host's interviewer answers: `petri run --interactive`
   from the terminal, `--auto-approve` with the first choice,
@@ -436,10 +467,13 @@ the coordinator registers `fabro_steps::workflow::ChildInvoker`.
   delivered steer (`{"$steer": ...}`) is not an answer: the gate ignores it
   and keeps its question open.
   - `timeout` is the answer deadline. An unanswered question expires in the
-    step: with `human.default_choice="<target or key>"` the gate takes that
-    choice and records `timeout` as the answer; without one it fails with
-    Fabro's retry outcome (class `retry_requested`), so `max_retries` asks
-    again and `on_retries_exhausted` decides after that. The question carries
+    step, which reports the expiry on its progress channel first
+    (`question_expired` in the public stream, `timed_out` with the default
+    taken in the interview receipt, as Fabro emits `InterviewTimeout`): with
+    `human.default_choice="<target or key>"` the gate takes that choice and
+    records `timeout` as the answer; without one it fails with Fabro's retry
+    outcome (class `retry_requested`), so `max_retries` asks again and
+    `on_retries_exhausted` decides after that. The question carries
     `timeout_ms` so a host can show the deadline.
   - `review_target=true` reads `review_target` from the run context
     (`{"label", "url", "kind"}`, as an earlier stage's `context_updates`
@@ -539,28 +573,41 @@ as Fabro does. ACP never reuses a session. Each resolution is a
 `[[run.hooks]]` entries run in the standalone runner through
 `fabro_steps::hooks::LocalHooks`, the `execution::hooks::HookService` the
 Fabro component installs (`crates/core/execution/HOOKS.md`). One service
-serves every point, so a hook runs once whoever drives it: the engine's
-`HookAdapter` at the per-firing points, the native agent's Pebble
-`ToolMiddleware` at the tool boundary, the ACP client's permission requests,
-and the `fabro/stage` step for the run-level events. A host that installs its
-own service before `fabro_steps::register` runs keeps it; the local one is
-then not installed.
+serves every point, and every caller reaches it as the `HookServiceHandle`
+capability, so a hook runs once whoever drives it and a replacement service
+receives every point: the engine's `HookAdapter` at the per-firing points,
+the `fabro/stage` step at the root `start` for `sandbox_ready`, `run_start`
+and the start stage's own `stage_start` (the driver admits `start` before
+its sandbox exists, so the step asks once the sandbox is there), the fork
+and fan-in steps for `parallel_start` and `parallel_complete`, the native
+agent's Pebble `ToolMiddleware` at the tool boundary, and the ACP client's
+permission requests. A host that installs its own `Runtime::hooks` and
+`HookServiceHandle` before `fabro_steps::register` runs keeps them; the local
+service is then not installed.
 
 Fields: `id` (merge identity), `name`, `event`, `matcher`, `blocking`,
 `timeout` (`60s` default; `30s` for prompt hooks), `sandbox` (default
 `true`), and one transport: `script` or `command` (a command hook), `url`
 with `headers` and `tls = "no_verify"` (an HTTP hook), `prompt` with `model`
 (a prompt hook, default model `haiku`), or `agent = "enabled"` with `prompt`,
-`model` and `max_tool_rounds` (an agent hook, default 50 rounds). Events, as
+`model` and `max_tool_rounds` (an agent hook, default 50 rounds). The rounds
+are a hard bound, as in Fabro's loop, not advice to the model: the hook's
+agent may ask for tools in at most that many model turns (Pebble's
+`with_max_tool_rounds`, set one below, so the turn Fabro would run and then
+discard is refused without running its tools), and a turn past the bound that
+asks for tools again ends the hook, which fails open with the reference's
+warning `agent hook exhausted max tool rounds, proceeding` and its usage and
+events on the record; `max_tool_rounds = 0` proceeds without a model call, as
+Fabro's empty loop does. Events, as
 Fabro names them: `run_start`, `run_complete`, `run_failed`, `stage_start`,
 `stage_complete`, `stage_failed`, `stage_retrying`, `edge_selected`,
 `parallel_start`, `parallel_complete`, `sandbox_ready`, `sandbox_cleanup`,
 `checkpoint_saved`, `pre_tool_use`, `post_tool_use`,
 `post_tool_use_failure`. Every event is validated, merged and dispatched at
 its reference phase: `parallel_start` fires once per fork visit before the
-branches (the parallel node's own kind says so, so a `for_each` fork counts),
-`parallel_complete` once every branch is in, from the fan-in itself, both
-naming the parallel node; `run_complete`/`run_failed` at the run's end by its
+branches, from the fork step (the parallel node itself, so a `for_each` fork
+counts), `parallel_complete` once every branch is in, from the fan-in itself,
+both naming the parallel node; `run_complete`/`run_failed` at the run's end by its
 status and `sandbox_cleanup` at the scope's release, both with the sandbox
 still there. `checkpoint_saved` warns `fabro.hooks.checkpoint_saved` at
 load and never runs (the standalone runner makes no checkpoints). Fabro's rules apply: `matcher` is
@@ -587,11 +634,21 @@ HTTP hook posts the context and reads the same JSON from a `2xx` body. A
 prompt hook asks the model for `{"ok", "reason"}` and blocks on `false`; an
 agent hook does the same with tools in the sandbox. HTTP, prompt and agent
 hooks fail open on errors and timeouts; a command that times out is killed
-and, when blocking, blocks. A hook whose placement is unavailable (a sandbox
+and, when blocking, blocks. An agent hook that runs out of time while a tool
+is running stops that tool (TERM, the scope's grace, then KILL) and joins its
+agent before it fails open, so the stage it guarded starts with nothing of
+the hook still running. A hook whose placement is unavailable (a sandbox
 hook before any scope exists, a model hook with no client) is recorded as
-`unsupported` and proceeds. Cancelling the firing cancels the hook. Hook
-output reaches the run log through the same event pipeline as every other
-step output, so Petri's secret masking applies to it.
+`unsupported` and proceeds. Cancelling the firing cancels the hook; an agent
+hook's tool and agent are stopped and joined the same way, even though the
+cancelled firing no longer waits for them. Hook output reaches the run log
+through the same event pipeline as every other step output, so Petri's
+secret masking applies to it. What a prompt or agent hook spent is on its
+record (`usage` on the hook's entry of the `hook` note or `fabro.hook`
+event: requests, tool calls, tokens, cost, timings), and every event an
+agent hook's agent produced is recorded under the hook's identity as
+`hook_activity`, apart from the stage's own agent activity and usage
+(`crates/core/execution/HOOKS.md`, "Recording").
 
 What a decision does: `stage_start` `skip` skips the node, `block` fails it
 with class `hook_blocked`; `edge_selected` `override` routes to `edge_to`
@@ -645,7 +702,10 @@ metadata): `AGENTS.md` and `CLAUDE.md` for Anthropic models, `AGENTS.md` and
 `AGENTS.md` alone otherwise; from the Git root down to the working directory,
 root first, when the working directory is inside a repository. Petri selects
 the paths that exist in the scope (`fabro_steps::memory::select`) and Pebble's
-loader owns the 32 KiB budget, deduplication and truncation. The backend
+loader owns the 32 KiB budget, deduplication and truncation; a prompt node
+reads the working directory's files through the same loader
+(`ProjectMemory::load`), so its system prompt is the text a session would
+load, the crossing file cut with Pebble's marker. The backend
 searches Fabro's skill directories (below, "Skills"). Every
 session carries the run's tool hooks as Pebble middleware (`pre_tool_use`
 denies before the tool runs; `post_tool_use` observes the outcome), and the

@@ -1,0 +1,14 @@
+{
+  "[acp:flaky]": [
+    {
+      "write": { "path": "attempts.log", "text": "attempt 1 exited\n", "append": true },
+      "text": "Starting up",
+      "exit": 3
+    },
+    {
+      "write": { "path": "attempts.log", "text": "attempt 2 answered\n", "append": true },
+      "text": "Stable now.",
+      "directive": { "outcome": "succeeded", "context_updates": { "stable": true } }
+    }
+  ]
+}

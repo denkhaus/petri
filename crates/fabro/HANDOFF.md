@@ -26,7 +26,7 @@ subset; the unconfigured path stays the standalone runner.
 | Build a runtime with the Fabro step kinds | `petri::fabro::register(Runtime::standard().frontend(Fabro::new()))` and the `PebbleClient` capability (`petri::build_llm_client` with the host's `CredentialProvider` and catalog layers) | `crates/petri/lib/src/lib.rs`, `crates/fabro/steps/src/lib.rs` |
 | Load and run one workflow | `Runtime::check` (lowering with diagnostics), `execution::host::HostRun`, `host::run_configured` | `crates/core/execution/src/host.rs` |
 | Awaited extension points: admission, result preparation, transition, run end, scope release | `driver::lifecycle::ExecutionHooks`, installed with `Runtime::hooks`; `AdmitAttempt` (`Admit`, `Skip`, `Block`), `PrepareResult` (`Prepared` adjustments with the original evidence kept), `Transition` (`RouteOverride`, best-effort `problems`, a fatal `TransitionError`), `RunFinished`, `ScopeReleased`; notes returned at each point are durable records | `crates/core/driver/src/lifecycle.rs`; proven by `crates/petri/lib/tests/embedding.rs` and `embedding_readiness.rs` |
-| The local hook system, or a replacement | `execution::hooks::HookService` behind `HookAdapter` and the `HookServiceHandle` capability; the standalone service is `fabro_steps::hooks::LocalHooks`. A host that installs its own `ExecutionHooks` and still wants `[[run.hooks]]` wraps `HookAdapter` and forwards every point, `run_finished` and `scope_released` included (the `EmbeddingHost` in `embedding_readiness.rs` is the pattern) | `crates/core/execution/HOOKS.md` |
+| The local hook system, or a replacement | `execution::hooks::HookService` behind `HookAdapter` and the `HookServiceHandle` capability; the standalone service is `fabro_steps::hooks::LocalHooks`. Every point, the ones steps ask themselves included (`ScopeReady`, `RunStarted`, the start stage's admission, `ForkStarted`, `ForkCompleted`, the tool boundary of both agent backends), reaches the one service through that handle, so a replacement receives each exactly once (`embedding::a_hook_service_runs_each_hook_once_at_its_point`). A host that installs its own `ExecutionHooks` and still wants `[[run.hooks]]` calls `register` first and wraps `Runtime::installed_hooks()`, forwarding every point, `run_finished` and `scope_released` included (the `EmbeddingHost` in `embedding_readiness.rs` is the pattern) | `crates/core/execution/HOOKS.md` |
 | Questions and answers | `execution::interview::{Interviewer, InterviewDispatcher}`; `InterviewRequest` carries the interaction identity (node, firing, occurrence, invocation path), the question type and choices; `InterviewReply::Answered(Answer)`, expiry, cancellation | `crates/core/execution/src/interview.rs` |
 | Pause, unpause, steer, cancel | `execution::controls` (the control service; `petri run --control <FILE>` is the terminal transport), `RunHandle` for cancel and kill | `crates/core/execution/src/controls.rs` |
 | The public event stream | `execution::events::{EventProjector, RunEventSink, replay_run}`; `EVENT_CONTRACT_VERSION` | `crates/core/execution/EVENTS.md` |
@@ -60,12 +60,18 @@ subset; the unconfigured path stays the standalone runner.
   `for_each`: the parallel node is the fork, each branch node or clone a
   member of its index, the fan-in the join. `fork_started`,
   `branch_completed` and `fork_completed` carry the same `BranchRef {fork,
-  index}` for both; the `fabro.parallel.*` payloads carry the index as well.
+  index}` for both and one `ForkOccurrence {execution, fork, firing, visit,
+  generation}` per fork visit; the `fabro.parallel.*` payloads carry the
+  index and the same occurrence (`{fork, firing}`), and a branch child's call
+  slot is `branch:<fork>@<firing>:<index>:<target>`. A host keys every
+  branch fact on the occurrence, never on the fork it saw last.
 - **Interactions.** A question's identity is the node, the firing, its
   occurrence within the run, and the invocation path; `InterviewRequest` and
-  `question_asked` carry it, `control_delivered {Answer}` closes it, and the
-  interview receipt (`<run_dir>/interviews.json`) keeps every question and
-  reply.
+  `question_asked` carry it, `control_delivered {Answer}` closes it with an
+  answer, `question_expired` closes it when the gate's own deadline passes
+  (with the default the gate took, when it had one), and the interview
+  receipt (`<run_dir>/interviews.json`) keeps every question and its
+  disposition (`answered`, `cancelled`, `failed`, `timed_out`).
 - **Agent sessions.** Pebble's session id, parent session id, stream id and
   sequence, and tool call id are read out of every `agent_activity` envelope
   and never rewritten. A retained thread keeps one session across the nodes
@@ -90,9 +96,12 @@ annotate). Across executions the `parent` link and
 the last `EventId` it has applied per source; on resume the driver
 redelivers the regenerated suffix with the same identities, at least once,
 and the host deduplicates by `EventId`. `replay_run` over the run directory
-yields the same stream, event for event, floats included; `observed_at` is
-the one live-only field. `run_paused` and `run_unpaused` are the two
-live-only notices.
+yields the same stream, event for event, floats included; `recorded_at` —
+when each record was appended, read at the recording boundary and persisted
+with it — is the same live and on replay, so run, stage, attempt and
+interview times come from the logs, never from the time of a replay.
+`observed_at` is the one live-only field. `run_paused` and `run_unpaused`
+are the two live-only notices.
 
 ## Lifecycle acknowledgements
 
@@ -104,8 +113,11 @@ acknowledgement gates the next step of the run:
   starts. Holding it pauses admission (the control service's pause is built
   on it).
 - `prepare_result` runs after an attempt returned and before its record is
-  appended; an adjustment keeps the original evidence beside the effective
-  record (`host_note {kind: result_prepared}`).
+  appended, once per attempt. It is handed the effective outcome: the
+  stage's failure policy, exhaustion included, has already run, so the
+  final attempt (`will_retry == false`) is the completion to prepare, and
+  routing follows the record it produces. An adjustment keeps the original
+  evidence beside the effective record (`host_note {kind: result_prepared}`).
 - `after_record` runs after the final outcome is recorded and before routing
   is resolved; its notes precede the routing record.
 - `transition` runs after routes are selected and before they are recorded
@@ -117,9 +129,23 @@ acknowledgement gates the next step of the run:
   released; `scope_released` runs before each scope's own environment is
   released. Fabro's `run_complete`/`run_failed` (by final status, neither on a
   cancelled run) and `sandbox_cleanup` map onto them.
-- `RunEventSink::deliver` is awaited per event; a slow sink delays and never
-  drops, a failing sink stops the pump and the `ProjectionReceipt` counts the
-  undelivered events; recovery is `replay_run`.
+- `RunEventSink::deliver` is awaited per event behind a bounded queue
+  (`ProjectorOptions::capacity`, 1024 by default); a slow sink delays
+  delivery and never slows the run, an event that finds the queue full is
+  counted as `overflowed` and left to the log, a failing sink stops the pump,
+  and a `deliver` that outlasts `ProjectorOptions::stall_timeout` (30 seconds
+  by default) is dropped and named in the receipt's `failure`, so shutdown is
+  bounded. The `ProjectionReceipt` counts every undelivered event; recovery
+  is `replay_run`, deduplicated by `EventId`.
+- A step's progress is queued or acknowledged. `StepCtx::logs.send` orders
+  the event ahead of the attempt's outcome (the driver's completion fence
+  drains the queue before it records the outcome) without making it durable
+  on its own; `send_acked` returns only once the record is appended and every
+  observer's durable storage confirmed it (`EventObserver::durable`). The
+  native agent backend records every Pebble event acknowledged, so Pebble's
+  acknowledgement means the event is in Petri's log and a store that cannot
+  write stops the prompt. The at-least-once limit is the attempt: one whose
+  finish never landed is re-dispatched on resume and emits its events again.
 
 ## Compatibility versions
 
@@ -127,8 +153,8 @@ acknowledgement gates the next step of the run:
 |---|---|---|
 | `EVENT_CONTRACT_VERSION` (1) | `execution::events` | additive within a version; a host checks it before projecting |
 | `INSPECT_FORMAT_VERSION` (1) | `execution::inspect` | the `petri inspect` document's field contract |
-| the run-directory format (`run.json`) and the coordinator record version | `execution::store` | a run written by a newer or older format is refused, never migrated |
-| the engine log version (`Log` records, v8) | `engine::log` | a log whose version the runner does not speak is refused; replay must reproduce the log byte for byte or inspection reports corruption |
+| the run-directory format (`run.json`) and the coordinator record version (3, with `recorded_at` on every record) | `execution::store` | a run written by a newer or older format is refused, never migrated |
+| the engine log version (`Log` records, v9, with `recorded_at` beside every persisted record) | `engine::log` | a log whose version the runner does not speak is refused; replay must reproduce the log byte for byte or inspection reports corruption |
 | `inspect_format_version`, `event_contract_version` | in the documents themselves | |
 | Library pins (Pebble, lithos-llm, sandbox-driver, twins, the Fabro reference, the runner image) | `CONTRACT.md` "Pinned revisions", `scripts/check-pins.py` | moved together with the manifests and the evidence records |
 
@@ -191,6 +217,8 @@ against.
    retention policy requires.
 6. **Roll out new runs.** Start new runs on the Petri runner with the
    readiness suites as the acceptance gate (`mise run test:fabro:blackbox`,
-   `mise run test:fabro:differential`), then widen. ACP clients, Daytona and
-   crash-resume across runner versions have their own gates and are not part
-   of the initial readiness claim.
+   `mise run test:fabro:differential`), then widen. The ACP backend is
+   covered by the `acp` scenario family through a scripted agent on the host
+   and in a container; real ACP client products (Claude Code, Gemini CLI),
+   Daytona and crash-resume across runner versions have their own gates and
+   are not part of the initial readiness claim.

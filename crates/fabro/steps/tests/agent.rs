@@ -12,7 +12,7 @@ use frontend_fabro::load;
 use runtime::driver::ExecutionReport;
 use runtime::executor::Retention;
 use runtime::frontend::{CompileInputs, NoFiles};
-use runtime::ir::{CancelScopeId, ExprOrValue, Graph, RunStatus, TimeoutPolicy};
+use runtime::ir::{Attempt, CancelScopeId, ExprOrValue, Graph, RunStatus, TimeoutPolicy};
 use runtime::{RunOptions, Runtime};
 use serde_json::json;
 use testkit::{RunDir, output_of, status_of};
@@ -149,7 +149,7 @@ async fn an_agent_that_exits_early_fails_the_stage_routably() {
     let agent = fake_agent(&dir);
     let graph = lower(&dot(&format!(
         r#"
-        graph [goal="G", acp.command="python3 {}"]
+        graph [goal="G", backend="acp", acp.command="python3 {}"]
         a [prompt="Say hello"]
         recover [shape=parallelogram, script="true"]
         start -> a
@@ -168,7 +168,83 @@ async fn an_agent_that_exits_early_fails_the_stage_routably() {
         report.state.errors()
     );
     assert_eq!(status_of(&report, "a").as_deref(), Some("failure"));
+    // The dead agent asked for a retry, as Fabro's handler error is
+    // retryable; with no attempts left the failure stands and routes.
+    assert_eq!(
+        output_of(&report, "a")["failure_class"],
+        json!("retry_requested")
+    );
     assert_eq!(status_of(&report, "recover").as_deref(), Some("success"));
+}
+
+/// An ACP agent that exits on its first prompt and answers on its second,
+/// counting prompts in a file so the second process knows it is second.
+fn flaky_agent(dir: &RunDir) -> PathBuf {
+    let counter = dir.path().join("prompts.count");
+    let script = format!(
+        r#"import json, os, sys
+counter = r"{}"
+def send(m):
+    sys.stdout.write(json.dumps(m) + "\n"); sys.stdout.flush()
+for line in sys.stdin:
+    m = json.loads(line)
+    method = m.get("method")
+    if method == "initialize":
+        send({{"jsonrpc": "2.0", "id": m["id"], "result": {{"protocolVersion": 1, "agentCapabilities": {{}}}}}})
+    elif method == "session/new":
+        send({{"jsonrpc": "2.0", "id": m["id"], "result": {{"sessionId": "s"}}}})
+    elif method == "session/prompt":
+        n = int(open(counter).read()) if os.path.exists(counter) else 0
+        open(counter, "w").write(str(n + 1))
+        if n == 0:
+            sys.exit(3)
+        send({{"jsonrpc": "2.0", "method": "session/update", "params": {{"sessionId": "s", "update": {{"sessionUpdate": "agent_message_chunk", "content": {{"type": "text", "text": "answered on attempt " + str(n + 1)}}}}}}}})
+        send({{"jsonrpc": "2.0", "id": m["id"], "result": {{"stopReason": "end_turn"}}}})
+"#,
+        counter.display()
+    );
+    let path = dir.path().join("flaky_acp_agent.py");
+    fs::write(&path, script).expect("write the flaky agent");
+    path
+}
+
+/// An agent that dies before answering asks for a retry, as Fabro's
+/// retryable handler error does: `max_retries=1` starts a second process,
+/// and the node succeeds on that process's answer.
+#[tokio::test]
+async fn an_agent_that_exits_before_answering_is_retried_while_attempts_remain() {
+    let dir = RunDir::new("fabro-agent-exit-retried");
+    let agent = flaky_agent(&dir);
+    let graph = lower(&dot(&format!(
+        r#"
+        graph [goal="G", backend="acp", acp.command="python3 {}"]
+        a [prompt="Say hello", max_retries=1, on_failure="exit"]
+        start -> a -> exit
+    "#,
+        agent.display()
+    )));
+    let report = run(&dir, graph).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert_eq!(
+        output_of(&report, "a")["text"],
+        json!("answered on attempt 2")
+    );
+    let record = report
+        .state
+        .history()
+        .iter()
+        .find(|record| record.name == "a")
+        .expect("`a` finished");
+    assert_eq!(
+        record.attempt,
+        Attempt::FIRST.next(),
+        "the answer came from the second attempt"
+    );
 }
 
 #[tokio::test]
@@ -218,16 +294,18 @@ async fn cancelling_a_turn_sends_session_cancel_and_stops_the_agent() {
 }
 
 /// An ACP node's `timeout` is handed to the turn (`HandlerManaged`): a turn
-/// that outlives it is terminated and the stage fails with class `timeout`,
-/// well before the driver's structural budget.
+/// that outlives it is terminated well before the driver's structural budget
+/// and asks for a retry, as Fabro's timed-out turn is a retryable handler
+/// error; the node retries while attempts remain and fails when none are
+/// left.
 #[tokio::test]
-async fn an_acp_turn_that_outlives_the_node_timeout_fails_with_class_timeout() {
+async fn an_acp_turn_that_outlives_the_node_timeout_is_retried_then_fails() {
     let dir = RunDir::new("fabro-agent-timeout");
     let agent = fake_agent(&dir);
     let graph = with_env(
         lower(&agent_dot(
             &agent,
-            r#", timeout="500ms", on_failure="exit""#,
+            r#", timeout="500ms", max_retries=1, on_failure="exit""#,
         )),
         &[("ACP_MODE", "timeout")],
     );
@@ -254,9 +332,20 @@ async fn an_acp_turn_that_outlives_the_node_timeout_fails_with_class_timeout() {
     assert_eq!(report.status, RunStatus::Failed);
     assert_eq!(status_of(&report, "a").as_deref(), Some("failure"));
     let output = output_of(&report, "a");
-    assert_eq!(output["failure_class"], json!("timeout"));
+    assert_eq!(output["failure_class"], json!("retry_requested"));
     assert_eq!(
         output["failure_reason"],
         json!("the agent turn timed out after 500ms")
+    );
+    let record = report
+        .state
+        .history()
+        .iter()
+        .find(|record| record.name == "a")
+        .expect("`a` finished");
+    assert_eq!(
+        record.attempt,
+        Attempt::FIRST.next(),
+        "the timeout was retried once before the node failed"
     );
 }

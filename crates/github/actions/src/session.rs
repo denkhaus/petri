@@ -38,8 +38,7 @@ use ir::{FailureClass, LogStream, Outcome, StepEvent, Value};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, json};
 use smol_str::SmolStr;
-use steps::{Shell, SoftFail, StepCtx, StepFailure, ValueOrSecretRef};
-use tokio::sync::mpsc;
+use steps::{ProgressSender, Shell, SoftFail, StepCtx, StepFailure, ValueOrSecretRef};
 use tokio::task::JoinHandle;
 use tokio::time;
 use tracing::{Instrument as _, Span};
@@ -695,6 +694,7 @@ impl Session {
         let StepCtx {
             firing,
             attempt,
+            max_attempts,
             scope,
             node,
             config: _,
@@ -719,13 +719,14 @@ impl Session {
             Ok(staged) => staged,
             Err(failure) => return (failure.into(), Effects::default()),
         };
-        let (tx, rx) = mpsc::channel(COMMAND_SINK_CAPACITY);
+        let (tx, rx) = ProgressSender::channel(COMMAND_SINK_CAPACITY);
         let sink = CommandSink::new(logs.clone(), secrets.masker(), allow_unsecure);
         let collected = sink.effects();
         let sink_task = tokio::spawn(sink.run(rx).instrument(Span::current()));
         let delegate = StepCtx {
             firing,
             attempt,
+            max_attempts,
             scope,
             node,
             config: Value::Null,
@@ -761,7 +762,7 @@ impl Session {
         outcome: Outcome,
         soft_fail: &steps::SoftFail,
         commands: CommandEffects,
-        logs: &mpsc::Sender<StepEvent>,
+        logs: &ProgressSender,
     ) -> (Outcome, Effects) {
         // A refusal outlives a read-back failure: the verdict came from the
         // command stream, not the files, and the fold reports it in its own
@@ -963,7 +964,7 @@ fn job_environment_file(key: Option<&str>, name: &str) -> PathBuf {
 /// ends with the stream — or as soon as the receiver is gone.
 pub(crate) fn forward_lines(
     lines: Option<executor::LineStream>,
-    sink: mpsc::Sender<StepEvent>,
+    sink: ProgressSender,
 ) -> Option<JoinHandle<()>> {
     let mut lines = lines?;
     Some(tokio::spawn(async move {

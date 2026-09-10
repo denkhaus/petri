@@ -29,7 +29,7 @@ fn scope_identity_schema_rejects_version_one_run_directories() {
         CoordinatorStore::resume(directory.path()),
         Err(StoreError::UnsupportedFormat {
             found:    1,
-            expected: 2,
+            expected: 3,
         })
     ));
 }

@@ -23,13 +23,19 @@
 //! itself. The observer callback never blocks: it records the question and
 //! spawns.
 //!
-//! # Cancellation
+//! # Cancellation and expiry
 //!
-//! The `cancel` token an interviewer receives fires when the question's
-//! firing finishes without the answer (the step timed out, the run was
+//! The `cancel` token an interviewer receives fires when the step reports
+//! that the question expired ([`QuestionExpired`] on its progress channel),
+//! when the question's firing finishes without the answer (the run was
 //! cancelled, a sibling failed the branch) and when the dispatcher shuts
 //! down. An interviewer returns promptly once it fires; a reply that arrives
 //! anyway is recorded as late and not delivered.
+//!
+//! An expiry is the step's own disposition, not the interviewer's: the record
+//! says [`ReplyRecord::TimedOut`] with the default the step took, if it had
+//! one, and [`Delivery::Expired`]. The dispatcher never infers a timeout from
+//! the firing's end, and an expiry is not an interview error.
 //!
 //! # Late and duplicate answers
 //!
@@ -50,8 +56,9 @@
 //! ([`ir::TimeoutPolicy`]). The watchdog
 //! ([`StallWatchdog`](crate::watchdog::StallWatchdog)) parks on the same
 //! facts. A `HandlerManaged` step (a human gate) owns its own answer deadline
-//! and expires the question itself; the dispatcher then sees the firing
-//! finish and ends the interviewer's wait as cancelled.
+//! and expires the question itself, reporting the expiry before it acts on
+//! it; the driver, the watchdog and this dispatcher all end the wait on that
+//! report, with the question and attempt identity it names.
 //!
 //! # Answer shapes
 //!
@@ -78,8 +85,8 @@
 //! dispatcher orders the receipt's `questions` itself when it produces the
 //! receipt: by invocation path, then invocation, execution, firing,
 //! occurrence, and ask. The root invocation's questions (`/`) come first
-//! and each nested invocation's follow in path order (`/branch:fan:0:a`
-//! before `/branch:fan:1:b`); the path leads because invocation ids are
+//! and each nested invocation's follow in path order (`/branch:fan@2:0:a`
+//! before `/branch:fan@2:1:b`); the path leads because invocation ids are
 //! allocated in declaration order, which two parallel branches decide by
 //! timing, while the path is the same on every run. The id then orders
 //! re-invocations of one slot, and within one invocation the key is the
@@ -102,7 +109,7 @@ use ir::{Attempt, Control, FiringId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use smol_str::SmolStr;
-use steps::{Answer, Question};
+use steps::{Answer, Question, QuestionExpired};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -244,10 +251,14 @@ pub enum Delivery {
     /// A sensitive answer could not be registered as a secret; its plaintext
     /// was withheld and the gate cancelled instead.
     Withheld,
+    /// The step's answer deadline passed before the interviewer replied;
+    /// nothing was sent.
+    Expired,
 }
 
-/// What the interviewer replied, as the receipt records it. A sensitive text
-/// answer appears only as its `$secret` reference.
+/// How the question was resolved, as the receipt records it: what the
+/// interviewer replied, or the step's own timeout. A sensitive text answer
+/// appears only as its `$secret` reference.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ReplyRecord {
@@ -259,9 +270,18 @@ pub enum ReplyRecord {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text:    Option<Value>,
     },
+    /// The interviewer stopped without an answer: it was told to (the run
+    /// was cancelled, the dispatcher shut down) or a script said to cancel.
     Cancelled,
     Failed {
         error: String,
+    },
+    /// The step's answer deadline passed with no answer, as the step itself
+    /// reported. `default` is the option the step took on its own, by key,
+    /// when it had one; without one the step failed with its own outcome.
+    TimedOut {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<String>,
     },
 }
 
@@ -346,8 +366,11 @@ struct Wiring {
 }
 
 struct LiveQuestion {
-    firing: FiringId,
-    cancel: CancellationToken,
+    firing:  FiringId,
+    cancel:  CancellationToken,
+    /// Set when the step reported the question expired, before `cancel`
+    /// fired for it.
+    expired: Option<QuestionExpired>,
 }
 
 #[derive(Default)]
@@ -523,6 +546,7 @@ impl Inner {
             state.live.insert(key, LiveQuestion {
                 firing,
                 cancel: cancel.clone(),
+                expired: None,
             });
             (
                 InterviewRequest {
@@ -546,6 +570,20 @@ impl Inner {
             this.serve(request, cancel, handle, secrets).await;
         });
         self.state().tasks.push(task);
+    }
+
+    /// The step reported that a question expired: keep the report for the
+    /// record and end the interviewer's wait. A question that is not pending
+    /// (already answered and delivered, or never asked here) has nothing to
+    /// expire.
+    fn expire(&self, execution: ExecutionId, expired: QuestionExpired) {
+        let mut state = self.state();
+        if let Some(live) = state.live.get_mut(&(execution, expired.question.clone())) {
+            let cancel = live.cancel.clone();
+            live.expired = Some(expired);
+            drop(state);
+            cancel.cancel();
+        }
     }
 
     async fn serve(
@@ -587,9 +625,32 @@ impl Inner {
             () = cancel.cancelled() => None,
         };
         // Whatever the reply, this question is no longer pending. Whether it
-        // is still deliverable depends on whether the token fired: the
-        // firing finished, or the dispatcher shut down.
-        let was_live = self.state().live.remove(&key).is_some();
+        // is still deliverable depends on whether the token fired: the step
+        // expired the question, the firing finished, or the dispatcher shut
+        // down.
+        let live = self.state().live.remove(&key);
+        let was_live = live.is_some();
+        if let Some(expired) = live.and_then(|live| live.expired) {
+            // The step's own disposition: it reported the expiry and acted
+            // on it. An answer or a failure that raced in beside it was not
+            // delivered and is worth a line in the receipt's errors; a
+            // cancelled reply is the interviewer stopping when told to.
+            record.reply = ReplyRecord::TimedOut {
+                default: expired.default,
+            };
+            record.delivery = Delivery::Expired;
+            if matches!(
+                reply,
+                Some(InterviewReply::Answered(_) | InterviewReply::Failed(_))
+            ) {
+                self.state().errors.push(format!(
+                    "a reply to `{}` arrived after the question expired",
+                    key.1
+                ));
+            }
+            self.state().records.push(record);
+            return;
+        }
         let closed = self.shutdown.is_cancelled();
         if cancel.is_cancelled() || !was_live || closed {
             record.delivery = if closed {
@@ -713,11 +774,19 @@ fn chain(error: &dyn StdError) -> String {
 }
 
 impl ExecutionObserver for InterviewDispatcher {
-    fn on_engine_record(&self, execution: ExecutionId, record: &EventRecord, state: &EngineState) {
+    fn on_engine_record(
+        &self,
+        execution: ExecutionId,
+        record: &EventRecord,
+        _recorded_at: u64,
+        state: &EngineState,
+    ) {
         match &record.event {
             Event::StepProgress { firing, ev } => {
                 if let Some(question) = Question::from_event(ev) {
                     self.inner.ask(execution, *firing, question, state);
+                } else if let Some(expired) = QuestionExpired::from_event(ev) {
+                    self.inner.expire(execution, expired);
                 }
             }
             Event::StepFinished { firing, .. } => {
@@ -875,8 +944,8 @@ mod tests {
         let mut receipt = InterviewReceipt {
             version:   RECEIPT_VERSION,
             questions: vec![
-                record_at("/branch:fan:1:b", 1, 1, 1, 1, 1),
-                record_at("/branch:fan:0:a", 2, 2, 1, 1, 1),
+                record_at("/branch:fan@2:1:b", 1, 1, 1, 1, 1),
+                record_at("/branch:fan@2:0:a", 2, 2, 1, 1, 1),
                 record(0, 0, 7, 2, 1),
             ],
             errors:    Vec::new(),
@@ -888,7 +957,7 @@ mod tests {
             .iter()
             .map(|record| record.invocation_path.as_str())
             .collect();
-        assert_eq!(paths, vec!["/", "/branch:fan:0:a", "/branch:fan:1:b"]);
+        assert_eq!(paths, vec!["/", "/branch:fan@2:0:a", "/branch:fan@2:1:b"]);
     }
 
     /// Sorting an ordered receipt changes nothing.

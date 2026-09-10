@@ -176,7 +176,13 @@ fn assemble(
 }
 
 impl ExecutionObserver for PathObserver {
-    fn on_engine_record(&self, execution: ExecutionId, _record: &EventRecord, state: &EngineState) {
+    fn on_engine_record(
+        &self,
+        execution: ExecutionId,
+        _record: &EventRecord,
+        _recorded_at: u64,
+        state: &EngineState,
+    ) {
         let history = state.history();
         let mut seen = self.seen.lock().expect("not poisoned");
         let seen = seen.entry(execution).or_insert(0);

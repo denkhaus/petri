@@ -1761,8 +1761,8 @@ const TIMED_GATE: &str = r#"digraph Gate {
 }"#;
 
 /// A withheld reply lets the gate's answer deadline expire; the gate takes
-/// `human.default_choice`, and the receipt records the withheld question as
-/// cancelled and not delivered.
+/// `human.default_choice`, and the receipt records the question as timed
+/// out with the default the gate took, nothing delivered.
 #[tokio::test]
 async fn a_withheld_reply_expires_into_the_default_choice() {
     let case = Case::new("withheld-default");
@@ -1794,8 +1794,12 @@ async fn a_withheld_reply_expires_into_the_default_choice() {
     assert!(!nodes.contains(&"ship".to_owned()), "{nodes:?}");
     let receipt = finished.receipt();
     assert_eq!(receipt["errors"], json!([]), "{receipt}");
-    assert_eq!(receipt["questions"][0]["reply"]["kind"], json!("cancelled"));
-    assert_ne!(receipt["questions"][0]["delivery"], json!("delivered"));
+    assert_eq!(
+        receipt["questions"][0]["reply"],
+        json!({ "kind": "timed_out", "default": "N" }),
+        "{receipt}"
+    );
+    assert_eq!(receipt["questions"][0]["delivery"], json!("expired"));
     assert_eq!(receipt["questions"][0]["timeout_ms"], json!(1000));
     let context = finished.final_context();
     assert_eq!(context["human.gate.selected"], json!("N"));
@@ -1812,7 +1816,8 @@ async fn a_withheld_reply_expires_into_the_default_choice() {
 }
 
 /// Without a default, an expired gate fails with Fabro's retry outcome and
-/// the run ends failed; the withheld reply is not an interview error.
+/// the run ends failed; the receipt records the question as timed out with
+/// no default, and the withheld reply is not an interview error.
 #[tokio::test]
 async fn a_withheld_reply_without_a_default_fails_with_the_retry_outcome() {
     let case = Case::new("withheld-retry");
@@ -1848,6 +1853,12 @@ async fn a_withheld_reply_without_a_default_fails_with_the_retry_outcome() {
     );
     let receipt = finished.receipt();
     assert_eq!(receipt["errors"], json!([]), "{receipt}");
+    assert_eq!(
+        receipt["questions"][0]["reply"],
+        json!({ "kind": "timed_out" }),
+        "{receipt}"
+    );
+    assert_eq!(receipt["questions"][0]["delivery"], json!("expired"));
     let document = finished.inspect();
     let gate = &document["executions"][0]["engine"]["context"]["nodes"]["gate"];
     assert_eq!(
@@ -1855,6 +1866,80 @@ async fn a_withheld_reply_without_a_default_fails_with_the_retry_outcome() {
         json!("retry_requested"),
         "{document}"
     );
+    finished.assert_no_leaked_processes().await;
+}
+
+/// The probe of review finding G05: a gate whose question expires with no
+/// default fails with Fabro's retry outcome; with `max_retries=0` that is
+/// the exhausted retry. Under `on_failure="succeed"` the explicit
+/// `outcome=failed` edge is checked first, as Fabro's executor checks it,
+/// so the run recovers instead of promoting the gate past that edge.
+#[tokio::test]
+async fn an_expired_gate_under_succeed_takes_its_explicit_failure_edge() {
+    let case = Case::new("expired-gate-succeed");
+    let workflow = case.workflow(
+        r#"digraph Probe {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    gate [shape=hexagon, label="Continue?", timeout="200ms", max_retries=0, on_failure="succeed"]
+    recover [shape=parallelogram, script="echo RECOVERY"]
+    fallthrough [shape=parallelogram, script="echo FALLTHROUGH"]
+    start -> gate
+    gate -> recover [condition="outcome=failed", label="[R] Recover"]
+    gate -> fallthrough [label="[Y] Continue"]
+    recover -> exit
+    fallthrough -> exit
+}"#,
+        None,
+    );
+    let script = interview::write(&case.root, "withhold", &[json!({
+        "id": "never",
+        "match": { "node": "gate" },
+        "action": { "kind": "withhold" }
+    })]);
+    let finished = case
+        .run(&workflow, &[
+            "--interview-script",
+            script.to_str().expect("utf-8"),
+        ])
+        .await;
+    finished.assert_code(0);
+    assert_eq!(
+        finished.status_line(),
+        Some("success"),
+        "{}",
+        finished.stderr
+    );
+    let nodes: Vec<(String, String)> = finished.finished_nodes();
+    assert!(
+        nodes.contains(&("failure".to_owned(), "gate".to_owned())),
+        "the exhausted gate stays failed: {nodes:?}"
+    );
+    assert!(
+        nodes.iter().any(|(_, node)| node == "recover"),
+        "the explicit failure edge is taken: {nodes:?}"
+    );
+    assert!(
+        !nodes.iter().any(|(_, node)| node == "fallthrough"),
+        "the failure is not promoted past its explicit route: {nodes:?}"
+    );
+    assert!(
+        finished
+            .echoed()
+            .iter()
+            .any(|(node, line)| node == "recover" && line.contains("RECOVERY")),
+        "{}",
+        finished.stderr
+    );
+    let document = finished.inspect();
+    let gate = &document["executions"][0]["engine"]["context"]["nodes"]["gate"];
+    assert_eq!(
+        gate["failure"]["class"],
+        json!("retry_requested"),
+        "the original failure evidence is kept: {document}"
+    );
+    let receipt = finished.receipt();
+    assert_eq!(receipt["errors"], json!([]), "{receipt}");
     finished.assert_no_leaked_processes().await;
 }
 
@@ -1936,11 +2021,14 @@ async fn parallel_gates_bind_each_answer_to_its_own_branch() {
         assert_eq!(question["delivery"], json!("delivered"));
         let expected = if question["node"] == "a" { "N" } else { "Y" };
         assert_eq!(question["reply"]["choice"], json!(expected), "{question}");
+        // The path is the branch child's call slot: the fork, the fork's
+        // firing (its occurrence), the branch index and the target.
         let index = i32::from(question["node"] != "a");
-        assert_eq!(
-            question["invocation_path"],
-            json!(format!(
-                "/branch:fan:{index}:{}",
+        let path = question["invocation_path"].as_str().expect("a path");
+        assert!(path.starts_with("/branch:fan@"), "{question}");
+        assert!(
+            path.ends_with(&format!(
+                ":{index}:{}",
                 question["node"].as_str().expect("node")
             )),
             "{question}"
@@ -2267,6 +2355,7 @@ fn finding_for(namespace: &str, item: &str, delay_ms: u64) -> Value {
 /// public event stream: one `fork_started` on the parallel node `fan` with
 /// one branch per item, one `branch_completed` per clone in item order, and
 /// one `fork_completed` at the fan-in with the results in the same order.
+/// Zero items is a fork with zero branches and no `branch_completed`.
 fn assert_for_each_fork_events(run_dir: &Path, items: u32) {
     let events = replay_run(run_dir).expect("the run replays");
     let mut forks = Vec::new();
@@ -2285,17 +2374,17 @@ fn assert_for_each_fork_events(run_dir: &Path, items: u32) {
             .unwrap_or_default()
             .to_owned();
         match &event.body {
-            EventBody::ForkStarted { branches: refs } => {
+            EventBody::ForkStarted { branches: refs, .. } => {
                 forks.push((node, kind, refs.iter().map(|b| b.index).collect::<Vec<_>>()));
             }
-            EventBody::BranchCompleted { result } => {
+            EventBody::BranchCompleted { result, .. } => {
                 branches.push((
                     result.branch.index,
                     result.node.name.to_string(),
                     result.status.tag().to_owned(),
                 ));
             }
-            EventBody::ForkCompleted { fork, results } => {
+            EventBody::ForkCompleted { fork, results, .. } => {
                 joins.push((
                     node,
                     kind,
@@ -2439,7 +2528,7 @@ async fn a_fifty_item_fork_declares_small_children_and_prompts_still_see_the_lis
         .filter(|i| {
             i["parent"]["slot"]
                 .as_str()
-                .is_some_and(|slot| slot.starts_with("branch:fan:"))
+                .is_some_and(|slot| slot.starts_with("branch:fan@"))
         })
         .collect();
     assert_eq!(children.len(), 50);
@@ -2533,6 +2622,10 @@ async fn an_empty_for_each_list_joins_without_calling_the_model() {
         "{}",
         finished.stderr
     );
+    // The fork starts and closes with zero branches: the placeholder clone
+    // the lowering fires to reach the fan-in is no branch in the public
+    // stream.
+    assert_for_each_fork_events(&finished.run_dir, 0);
     assert_eq!(results_file(&case), Vec::<Value>::new());
     let context = finished.final_context();
     assert_eq!(context["parallel.branch_count"], json!(0));

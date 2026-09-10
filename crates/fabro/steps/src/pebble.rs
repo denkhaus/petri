@@ -21,6 +21,7 @@ pub mod questions;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::error::Error;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -45,7 +46,7 @@ use pebble_coding_agent::{
 use questions::AgentQuestions;
 use serde_json::json;
 use smol_str::SmolStr;
-use steps::{Steer, StepCtx};
+use steps::{ProgressSender, Steer, StepCtx};
 use tokio::sync::mpsc;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
@@ -311,7 +312,9 @@ impl NativeSession {
                 Ok(agent) => Ok((agent, mcp)),
                 Err(e) => {
                     mcp.shutdown().await;
-                    Err(AgentError::failed("pebble_config", e.to_string()))
+                    // The chain, not the head alone: a refused event sink or a
+                    // bad model selector is the cause under Pebble's summary.
+                    Err(AgentError::failed("pebble_config", chain(&e)))
                 }
             }
         };
@@ -506,6 +509,19 @@ impl NativeSession {
     }
 }
 
+/// An error and its source chain on one line, for the places that must
+/// flatten a typed error into a recorded message.
+fn chain(error: &dyn Error) -> String {
+    let mut out = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        out.push_str(": ");
+        out.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    out
+}
+
 /// The guidance a delivered value carries: a core [`Steer`], or the older
 /// bare string and `{ "text": ... }` spellings.
 fn steering_text(value: &Value) -> Option<String> {
@@ -525,10 +541,19 @@ impl Redactor for PetriRedactor {
     }
 }
 
-/// The driver's completion fence drains the progress channel before recording
-/// the outcome. The nested envelope retains Pebble's event identity.
+/// Pebble's event sink over the attempt's progress channel. Each event is
+/// sent acknowledged: `record` returns only after the driver appended the
+/// `StepProgress` record and every durable store confirmed the write, so an
+/// acknowledgement to Pebble means the event is in Petri's log, and a write
+/// failure stops the prompt as Pebble's contract asks. Queueing alone would not
+/// do: the driver's completion fence drains the channel before it records the
+/// outcome, which orders the events ahead of the outcome, but a crash after an
+/// unacknowledged send can lose the event. What a crash still repeats is the
+/// attempt: an attempt whose finish never landed is re-dispatched on resume
+/// and emits its events again, so a record may appear twice; Pebble's
+/// `(stream_id, seq)` in the nested envelope is the idempotency key.
 struct PetriEvents {
-    sender:  mpsc::Sender<StepEvent>,
+    sender:  ProgressSender,
     masker:  Masker,
     firing:  FiringId,
     attempt: Attempt,
@@ -541,11 +566,11 @@ impl EventSink for PetriEvents {
         let value = serde_json::to_value(event)
             .map_err(|e| EventSinkError::new("Could not encode Pebble event").with_source(e))?;
         self.sender
-            .send(StepEvent::Custom(
+            .send_acked(StepEvent::Custom(
                 json!({"kind": "pebble", "firing": self.firing, "attempt": self.attempt, "scope": self.scope, "node": self.node, "event": self.masker.mask_value(&value)}),
             ))
             .await
-            .map_err(|_| EventSinkError::new("Petri event channel closed"))?;
+            .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))?;
         // A skipped skill file is Pebble's report; the diagnostic is Petri's.
         let skipped = skills::skipped(event);
         if !skipped.is_empty() {

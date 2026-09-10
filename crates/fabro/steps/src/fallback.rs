@@ -60,8 +60,7 @@ use pebble_coding_agent::{CodingAgentOptions, Error as PebbleError, InterruptRea
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use smol_str::SmolStr;
-use steps::StepCtx;
-use tokio::sync::mpsc;
+use steps::{ProgressSender, StepCtx};
 
 use crate::agent::AgentConfig;
 use crate::agent::backend::{AgentError, Session};
@@ -1042,7 +1041,7 @@ impl FallbackService {
 
 /// The stage identity events carry.
 pub(crate) struct Stage {
-    logs:    mpsc::Sender<StepEvent>,
+    logs:    ProgressSender,
     node:    SmolStr,
     firing:  FiringId,
     attempt: Attempt,

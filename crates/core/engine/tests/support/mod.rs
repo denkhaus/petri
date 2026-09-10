@@ -178,11 +178,7 @@ impl Harness {
                 self.started.push(name);
                 let outcome = (self.responder)(&info);
                 self.feed(Event::StepStarted { firing, attempt });
-                self.feed(Event::StepFinished {
-                    firing,
-                    attempt,
-                    outcome,
-                });
+                self.finish_attempt(firing, attempt, outcome);
                 // A retry keeps the firing live; walk the backoff without a clock.
                 self.drain_retries();
                 if let Some(status) = self.status {
@@ -316,6 +312,21 @@ impl Harness {
             .firing(firing)
             .map_or(Attempt::FIRST, |f| f.attempt);
         self.feed(Event::StepStarted { firing, attempt });
+        self.finish_attempt(firing, attempt, outcome);
+    }
+
+    /// Feed a finished attempt as the driver does: the node's exhaustion
+    /// policy applies before the record, and the core records what it is
+    /// given.
+    fn finish_attempt(&mut self, firing: FiringId, attempt: Attempt, outcome: Outcome) {
+        let outcome = match self
+            .state
+            .firing(firing)
+            .and_then(|live| self.state.graph().node(live.node))
+        {
+            Some(node) => node.retry.finalize(attempt, outcome),
+            None => outcome,
+        };
         self.feed(Event::StepFinished {
             firing,
             attempt,

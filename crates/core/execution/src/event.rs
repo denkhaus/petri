@@ -8,8 +8,11 @@ use smol_str::SmolStr;
 use crate::{ExecutionId, GraphDigest, InvocationId, ParentCallKey, SandboxLeaseId};
 
 /// Version 2 records stable dynamic scope identities and their runtime and
-/// execution provenance in the resource ledger.
-pub const COORDINATOR_FORMAT_VERSION: u32 = 2;
+/// execution provenance in the resource ledger. Version 3 stamps every record
+/// with `recorded_at`, the wall-clock time the store appended it, so replay
+/// recovers the original run, invocation and execution times; a version 2 run
+/// has none and is refused, never migrated.
+pub const COORDINATOR_FORMAT_VERSION: u32 = 3;
 
 /// Name-only child secret bindings. Plaintext is not representable here.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +86,13 @@ pub enum CancelReason {
 pub struct CancelRequest {
     pub invocation: InvocationId,
     pub reason:     Option<CancelReason>,
+    /// Whether the request reaches the driver of an invocation that is
+    /// already cancelled, which escalates that driver to its kill tier. A run
+    /// control's repeated cancel escalates. A parent forwarding the polite
+    /// cancel it received to a child does not: the coordinator's own cascade
+    /// has already cancelled every descendant of a cancelled invocation, and
+    /// a second delivery would kill the child.
+    pub escalate:   bool,
 }
 
 /// The one durable result returned by an invocation.
@@ -92,7 +102,15 @@ pub struct InvocationResult {
     pub failure:         Option<FailureInfo>,
     pub final_execution: ExecutionId,
     pub output:          Value,
+    /// The final execution's whole run context.
     pub context:         BTreeMap<SmolStr, Value>,
+    /// The `context_updates` the result node's final outcome reported: what
+    /// that node wrote itself, unchanged values included, as distinct from
+    /// the diff a caller can take between `context` and the context it
+    /// passed in. Empty when the graph projects no result node. Additive to
+    /// coordinator format version 2: a record without it reads as empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub updates:         BTreeMap<SmolStr, Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -172,6 +190,10 @@ pub enum CoordinatorEvent {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CoordinatorRecord {
-    pub seq:   u64,
-    pub event: CoordinatorEvent,
+    pub seq:         u64,
+    pub event:       CoordinatorEvent,
+    /// Milliseconds since the Unix epoch when the store appended the record:
+    /// the recording time, read at the append and persisted with it, so a
+    /// replay recovers the time the event happened, not the time it was read.
+    pub recorded_at: u64,
 }

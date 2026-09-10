@@ -4,19 +4,14 @@
 //! Fabro's `discover_memory` picks filenames by agent profile and walks the
 //! directories from the Git root down to the working directory, root first.
 //! Petri selects the same paths and hands the ordered list to Pebble's
-//! loader (`CodingAgentOptions::with_memory_files`), which owns the
-//! 32,768-byte budget, exact-content deduplication, empty-file handling and
-//! truncation. A native agent session always loads; a prompt node honors
+//! loader, which owns the 32,768-byte budget, exact-content deduplication,
+//! empty-file handling and truncation: a native agent session loads through
+//! `CodingAgentOptions::with_memory_files`, a prompt node through the same
+//! `ProjectMemory::load` over the scope. A prompt node honors
 //! `project_memory=false` and, when enabled, reads only the working
 //! directory. Both paths use [`select`]; the existence check runs one shell
 //! command in the scope so no missing file is ever asked for.
-//!
-//! Pebble does not expose its loader as a function (a library gap recorded
-//! in the task evidence), so a prompt node that needs the document contents
-//! uses [`read`], a small mirror of the loader's rules kept here until Pebble
-//! offers one. Delete `read` when it does.
 
-use std::collections::HashSet;
 use std::iter;
 use std::path::Path;
 use std::sync::Arc;
@@ -24,10 +19,6 @@ use std::sync::Arc;
 use executor::{ExecEnv, OutputMode, ProcessSpec};
 use tokio::time::{Duration, timeout};
 
-/// Pebble's memory budget, in bytes.
-pub const BUDGET_BYTES: usize = 32_768;
-/// Pebble's truncation marker.
-pub const TRUNCATION_MARKER: &str = "[Project instructions truncated at 32KB]";
 /// How long the scope probe may take.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -142,58 +133,6 @@ pub async fn select(env: &dyn ExecEnv, profile: &str, scope: Scope) -> Vec<Strin
     };
     let candidates = candidates(profile, root.as_deref(), env.workspace_path(), scope);
     existing(env, &candidates).await
-}
-
-/// One loaded document.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Document {
-    pub path:      String,
-    pub content:   String,
-    pub truncated: bool,
-}
-
-/// Read `paths` in order under Pebble's rules: an empty or unreadable file
-/// is skipped, a file whose exact content was already loaded is skipped,
-/// the first file past the budget is cut to what remains with the marker,
-/// and later files are dropped. A stand-in for Pebble's crate-private
-/// loader; see the module note.
-pub async fn read(env: &dyn ExecEnv, paths: &[String]) -> Vec<Document> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    let mut remaining = BUDGET_BYTES;
-    for path in paths {
-        if remaining == 0 {
-            break;
-        }
-        let Ok(Some(bytes)) = env.read_file(Path::new(path)).await else {
-            continue;
-        };
-        let content = String::from_utf8_lossy(&bytes).into_owned();
-        if content.is_empty() || !seen.insert(content.clone()) {
-            continue;
-        }
-        if content.len() <= remaining {
-            remaining -= content.len();
-            out.push(Document {
-                path: path.clone(),
-                content,
-                truncated: false,
-            });
-            continue;
-        }
-        let keep = remaining.saturating_sub(TRUNCATION_MARKER.len() + 1);
-        let mut cut = keep;
-        while cut > 0 && !content.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        out.push(Document {
-            path:      path.clone(),
-            content:   format!("{}\n{TRUNCATION_MARKER}", &content[..cut]),
-            truncated: true,
-        });
-        remaining = 0;
-    }
-    out
 }
 
 /// Run `script` in the scope and return its stdout when it succeeds.

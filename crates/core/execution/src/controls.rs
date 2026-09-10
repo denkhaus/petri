@@ -313,7 +313,13 @@ impl ControlService {
 }
 
 impl ExecutionObserver for ControlService {
-    fn on_engine_record(&self, execution: ExecutionId, record: &EventRecord, state: &EngineState) {
+    fn on_engine_record(
+        &self,
+        execution: ExecutionId,
+        record: &EventRecord,
+        _recorded_at: u64,
+        state: &EngineState,
+    ) {
         match &record.event {
             Event::StepStarted { firing, .. } => {
                 let Some(name) = state

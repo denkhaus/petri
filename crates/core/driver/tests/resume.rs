@@ -345,7 +345,7 @@ struct SeqObserver {
 
 #[async_trait::async_trait]
 impl driver::EventObserver for SeqObserver {
-    fn on_record(&self, record: &EventRecord, _state: &engine::EngineState) {
+    fn on_record(&self, record: &EventRecord, _recorded_at: u64, _state: &engine::EngineState) {
         self.seen
             .lock()
             .expect("not poisoned")

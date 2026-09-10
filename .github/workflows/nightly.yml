@@ -143,6 +143,20 @@ jobs:
           PETRI_REQUIRE_FABRO_BUNDLES: '1'
           PETRI_REQUIRE_FABRO_BINARY: ${{ matrix.runner == 'ubuntu-24.04' && '1' || '' }}
 
+      # The final readiness gate, where Docker exists: the strict black box
+      # run (the differential matrix first, Docker and the vendored bundles
+      # required, no skipped cell) and a coverage report that fails unless
+      # every required cell of matrix.json passed, blocked cells included.
+      # check:nightly repeats the same set; this step adds the verdict the
+      # readiness plan's final milestone needs (CONTRACT.md, "Readiness gate").
+      - name: Verify the final readiness gate
+        if: matrix.docker == 'required'
+        run: mise run check:fabro:readiness
+        env:
+          PETRI_REQUIRE_CORPUS: '1'
+          PETRI_REQUIRE_FABRO_CORPUS: '1'
+          PETRI_REQUIRE_FABRO_BINARY: ${{ matrix.runner == 'ubuntu-24.04' && '1' || '' }}
+
       # Required, passed, failed, skipped, missing, blocked, excluded: only a
       # passed cell counts, and a run with no records is not a passing gate.
       # Only after the tests ran: a setup failure has no records to report

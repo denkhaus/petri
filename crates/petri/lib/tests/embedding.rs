@@ -10,6 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::future::pending;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,11 +25,12 @@ use petri::driver::{BranchRole, FiringView};
 use petri::engine::{Admission, Intervention, RouteDecision};
 use petri::execution::events::{
     AppliedRoute, CollectingSink, DeliveredControl, EventBody, EventId, EventProjector,
-    ProjectionReceipt, RunEvent, RunEventSink, SinkError, WaitState, replay_run,
+    EventSource, ProjectionReceipt, ProjectorOptions, RunEvent, RunEventSink, SinkError, WaitState,
+    replay_run,
 };
 use petri::execution::hooks::{
     HOOK_NOTE_KIND, HookAdapter, HookDecision, HookPoint, HookReport, HookRequest, HookRun,
-    HookService,
+    HookService, HookServiceHandle,
 };
 use petri::execution::host::{self, HostRun};
 use petri::execution::{
@@ -41,13 +43,13 @@ use petri::fabro::{
 };
 use petri::frontend::fabro::Fabro;
 use petri::frontend::{CompileInputs, Lowered};
-use petri::ir::{Attempt, EdgeId, Graph, Outcome, RunStatus, Status, Value};
+use petri::ir::{Attempt, EdgeId, Exhaustion, Graph, Outcome, RunStatus, Status, Value};
 use petri::steps::Answer;
 use petri::{RunOptions, Runtime, driver};
 use serde_json::json;
 use testkit::RunDir;
 use tokio::sync::Notify;
-use tokio::time::{Instant, sleep};
+use tokio::time::{Instant, sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
 // ── The workflow ───────────────────────────────────────────────────────────
@@ -81,6 +83,26 @@ const WORKFLOW: &str = r#"digraph G {
     hold -> exit
 }"#;
 
+/// A node with an explicit recovery edge, for the completion preparation
+/// scenarios: `work` is declared by the caller, and what the host is handed
+/// as its final result decides between `recover` and `done`.
+fn recovery_workflow(work: &str) -> String {
+    format!(
+        r#"digraph G {{
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    work [{work}]
+    recover [shape=parallelogram, script="echo recovered"]
+    done [shape=parallelogram, script="echo done"]
+    start -> work
+    work -> recover [condition="outcome=failed"]
+    work -> done
+    recover -> exit
+    done -> exit
+}}"#
+    )
+}
+
 /// One long command, for the stop and recovery scenarios.
 const LONG: &str = r#"digraph G {
     start [shape=Mdiamond]
@@ -88,6 +110,15 @@ const LONG: &str = r#"digraph G {
     long [shape=parallelogram, script="echo go > running; sleep 30"]
     start -> long
     long -> exit
+}"#;
+
+/// One command that prints thousands of lines, for the backlog scenario.
+const CHATTY: &str = r#"digraph G {
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    chatty [shape=parallelogram, script="seq 1 2000"]
+    start -> chatty
+    chatty -> exit
 }"#;
 
 /// Real commands and human gates, simulated agents: the runtime the plan
@@ -131,6 +162,26 @@ fn lower(rt: &Runtime, dir: &RunDir, text: &str) -> Lowered {
         lowered.diagnostics
     );
     lowered
+}
+
+/// Script the agent stub `work` to ask for a retry on every attempt, with a
+/// short backoff so the retry does not slow the scenario.
+fn script_work_retrying(graph: &mut Graph) {
+    let node = graph
+        .body
+        .nodes
+        .iter_mut()
+        .find(|n| n.name == "work")
+        .expect("the work node");
+    node.retry.backoff.initial = Duration::from_millis(10);
+    node.retry.backoff.max = Duration::from_millis(10);
+    let Value::Object(config) = &mut node.step.config else {
+        panic!("an object config");
+    };
+    config.insert(
+        "simulate".into(),
+        json!({ "outcome": "failed", "failure_class": "retry_requested" }),
+    );
 }
 
 /// Script the agent stub: the first attempt asks for a retry, the second
@@ -199,8 +250,10 @@ struct Script {
     pause:             Option<&'static str>,
     skip:              Option<&'static str>,
     block:             Option<&'static str>,
-    /// Make this node's failure a partial success.
+    /// Make this node's final failure a partial success.
     accept_failure_of: Option<&'static str>,
+    /// Make this node's final partial success a failure again.
+    fail_final_of:     Option<&'static str>,
     /// Replace this node's selected route with this edge.
     override_route:    Option<(&'static str, EdgeId)>,
     /// Sleep this long in this node's transition.
@@ -236,6 +289,18 @@ fn wants_checkpoint(view: &FiringView) -> bool {
     !matches!(view.branch, BranchRole::Member(_))
 }
 
+/// What the host was handed to prepare, for one attempt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Handed {
+    node:       String,
+    attempt:    u32,
+    status:     String,
+    /// The stage's reported `output.outcome`, when the step set one.
+    reported:   Option<String>,
+    will_retry: bool,
+    exhausted:  bool,
+}
+
 struct FakeHost {
     script:      Script,
     release:     Notify,
@@ -244,6 +309,8 @@ struct FakeHost {
     checkpoints: Mutex<Vec<(String, bool)>>,
     /// Every callback, in the order the host ran them.
     calls:       Mutex<Vec<String>>,
+    /// Every result the host was asked to prepare, in order.
+    handed:      Mutex<Vec<Handed>>,
 }
 
 impl FakeHost {
@@ -254,6 +321,7 @@ impl FakeHost {
             paused: AtomicU32::new(0),
             checkpoints: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
+            handed: Mutex::new(Vec::new()),
         })
     }
 
@@ -263,6 +331,17 @@ impl FakeHost {
 
     fn calls(&self) -> Vec<String> {
         self.calls.lock().expect("not poisoned").clone()
+    }
+
+    /// What the host was handed for `node`, attempt by attempt.
+    fn handed(&self, node: &str) -> Vec<Handed> {
+        self.handed
+            .lock()
+            .expect("not poisoned")
+            .iter()
+            .filter(|h| h.node == node)
+            .cloned()
+            .collect()
     }
 }
 
@@ -297,8 +376,26 @@ impl ExecutionHooks for FakeHost {
         let view = &request.view;
         let name = view.node_name();
         self.call(format!("prepare_result {name} {}", view.attempt.raw()));
+        self.handed.lock().expect("not poisoned").push(Handed {
+            node:       name.to_owned(),
+            attempt:    view.attempt.raw(),
+            status:     request.outcome.status.tag().to_owned(),
+            reported:   request
+                .outcome
+                .output
+                .get("outcome")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            will_retry: request.will_retry,
+            exhausted:  request.exhausted,
+        });
         let mut prepared = Prepared::unchanged();
         prepared.notes.push(marker("prepare_result", view));
+        // An attempt the engine will retry is not the one to prepare: the
+        // host waits for the final result.
+        if request.will_retry {
+            return Ok(prepared);
+        }
         if self.script.accept_failure_of == Some(name)
             && let Status::Failure(info) = &request.outcome.status
         {
@@ -307,6 +404,17 @@ impl ExecutionHooks for FakeHost {
                     underlying: Some(info.clone()),
                 }),
                 reason: Some("the host accepts this failure".into()),
+                ..ResultAdjustment::default()
+            };
+        }
+        if self.script.fail_final_of == Some(name)
+            && let Status::PartialSuccess {
+                underlying: Some(info),
+            } = &request.outcome.status
+        {
+            prepared.adjustment = ResultAdjustment {
+                status: Some(Status::Failure(info.clone())),
+                reason: Some("the host rejects this partial success".into()),
                 ..ResultAdjustment::default()
             };
         }
@@ -391,6 +499,7 @@ impl HookService for FakeHooks {
                 state:       "executed".into(),
                 duration_ms: Some(3),
                 message:     None,
+                usage:       None,
             });
         }
         report
@@ -435,13 +544,40 @@ impl RunEventSink for FailingSink {
     }
 }
 
+/// A sink that takes `accepted` events and then never returns: the stalled
+/// consumer.
+struct StallingSink {
+    inner:    CollectingSink,
+    accepted: AtomicU32,
+}
+
+#[async_trait::async_trait]
+impl RunEventSink for StallingSink {
+    async fn deliver(&self, event: RunEvent) -> Result<(), SinkError> {
+        if self.accepted.fetch_sub(1, Ordering::SeqCst) == 0 {
+            pending::<()>().await;
+        }
+        self.inner.deliver(event).await
+    }
+}
+
 async fn run_projected(
     rt: &Runtime,
     lowered: Lowered,
     sink: Arc<dyn RunEventSink>,
     observers: Vec<Arc<dyn ExecutionObserver>>,
 ) -> (driver::ExecutionReport, ProjectionReceipt) {
-    let projector = EventProjector::new(sink);
+    run_projected_with(rt, lowered, sink, observers, ProjectorOptions::default()).await
+}
+
+async fn run_projected_with(
+    rt: &Runtime,
+    lowered: Lowered,
+    sink: Arc<dyn RunEventSink>,
+    observers: Vec<Arc<dyn ExecutionObserver>>,
+    options: ProjectorOptions,
+) -> (driver::ExecutionReport, ProjectionReceipt) {
+    let projector = EventProjector::with_options(sink, options);
     let dispatcher = InterviewDispatcher::new(Arc::new(SayYes));
     let mut host_run = HostRun::new(lowered.graph.expect("lowers"))
         .with_children(lowered.children)
@@ -471,9 +607,44 @@ async fn run_workflow_with(
     hooks: Option<Arc<dyn ExecutionHooks>>,
     edit: impl FnOnce(&mut Graph),
 ) -> RunOutcome {
+    run_text_with(dir, WORKFLOW, hooks, edit).await
+}
+
+async fn run_text_with(
+    dir: &RunDir,
+    text: &str,
+    hooks: Option<Arc<dyn ExecutionHooks>>,
+    edit: impl FnOnce(&mut Graph),
+) -> RunOutcome {
     let rt = runtime(dir, hooks);
-    let mut lowered = lower(&rt, dir, WORKFLOW);
+    let mut lowered = lower(&rt, dir, text);
     edit(lowered.graph.as_mut().expect("lowers"));
+    let sink = Arc::new(CollectingSink::default());
+    let (report, receipt) = run_projected(&rt, lowered, sink.clone(), Vec::new()).await;
+    RunOutcome {
+        report,
+        events: sink.events(),
+        receipt,
+    }
+}
+
+/// An event without its recording time, for the one comparison where a
+/// re-recorded record legitimately carries a later time than its original.
+fn timeless(event: &RunEvent) -> RunEvent {
+    RunEvent {
+        recorded_at: None,
+        ..event.clone()
+    }
+}
+
+/// Run the baseline workflow under a host that replaced the hook service:
+/// the service behind the adapter and behind the `HookServiceHandle` the
+/// steps ask, and nothing of the local service.
+async fn run_workflow_hosting(dir: &RunDir, service: Arc<dyn HookService>) -> RunOutcome {
+    let adapter: Arc<dyn ExecutionHooks> = Arc::new(HookAdapter::new(service.clone()));
+    let rt = runtime(dir, Some(adapter)).capability(HookServiceHandle(service));
+    let mut lowered = lower(&rt, dir, WORKFLOW);
+    script_flaky(lowered.graph.as_mut().expect("lowers"));
     let sink = Arc::new(CollectingSink::default());
     let (report, receipt) = run_projected(&rt, lowered, sink.clone(), Vec::new()).await;
     RunOutcome {
@@ -485,6 +656,7 @@ async fn run_workflow_with(
 
 /// Live events with the live-only timestamp removed, in identity order, so a
 /// stream compares with its replay (which lists the coordinator log first).
+/// The recording time stays: it is the same live and on replay.
 fn normalized(events: &[RunEvent]) -> Vec<RunEvent> {
     let mut events: Vec<RunEvent> = events
         .iter()
@@ -617,10 +789,10 @@ impl Timeline {
                     let phase = payload.get("phase").and_then(Value::as_str).unwrap_or("");
                     entry.notes.push(format!("{kind}:{phase}"));
                 }
-                (EventBody::ForkStarted { branches }, Some(entry)) => {
+                (EventBody::ForkStarted { branches, .. }, Some(entry)) => {
                     timeline.forks.push((entry.kind.clone(), branches.len()));
                 }
-                (EventBody::ForkCompleted { fork, results }, _) => {
+                (EventBody::ForkCompleted { fork, results, .. }, _) => {
                     timeline.joins.push((
                         fork.name.to_string(),
                         results
@@ -1106,6 +1278,304 @@ async fn a_prepared_result_keeps_the_original_attempt_evidence() {
     ));
 }
 
+/// The `result_prepared` note recorded for `node`, when the host changed a
+/// result.
+fn result_prepared_note(events: &[RunEvent], node: &str) -> Value {
+    bodies_of(events, node)
+        .into_iter()
+        .find_map(|b| match b {
+            EventBody::HostNote { kind, payload } if kind == RESULT_PREPARED_KIND => {
+                Some(payload.clone())
+            }
+            _ => None,
+        })
+        .expect("the original evidence is recorded")
+}
+
+/// The position of the first event of `node` that `pred` accepts.
+fn position_of(events: &[RunEvent], node: &str, pred: &dyn Fn(&EventBody) -> bool) -> usize {
+    bodies_of(events, node)
+        .iter()
+        .position(|b| pred(b))
+        .expect("the event is present")
+}
+
+/// Exhausted retries under the engine's own exhaustion policy: the host is
+/// handed each attempt, and on the final one the effective result the engine
+/// will record (the `PartialSuccess` that `AcceptPartial` makes), not the
+/// step's intermediate failure. It may change that result, and the routes
+/// follow the change.
+#[tokio::test]
+async fn an_exhausted_retry_is_prepared_as_the_final_effective_result() {
+    let accept_partial = |graph: &mut Graph| {
+        script_work_retrying(graph);
+        let node = graph
+            .body
+            .nodes
+            .iter_mut()
+            .find(|n| n.name == "work")
+            .expect("the work node");
+        // Another dialect's exhaustion policy, set on the node directly: the
+        // Fabro lowering keeps the engine's exhaustion at `Fail`.
+        node.retry.on_exhaustion = Exhaustion::AcceptPartial;
+    };
+    let workflow = recovery_workflow(r#"shape=box, prompt="try", max_retries=1"#);
+
+    // Left alone, the final attempt is handed over already finalized, and the
+    // record is what the host saw.
+    let dir = RunDir::new("embed-exhausted-seen");
+    let host = FakeHost::new(Script::default());
+    let outcome = run_text_with(&dir, &workflow, Some(host.clone()), accept_partial).await;
+    assert_eq!(
+        outcome.report.status,
+        RunStatus::Success,
+        "{:?}",
+        outcome.report.state.errors()
+    );
+    assert_eq!(host.handed("work"), vec![
+        Handed {
+            node:       "work".into(),
+            attempt:    1,
+            status:     "failure".into(),
+            reported:   Some("failed".into()),
+            will_retry: true,
+            exhausted:  false,
+        },
+        Handed {
+            node:       "work".into(),
+            attempt:    2,
+            status:     "partial_success".into(),
+            reported:   Some("failed".into()),
+            will_retry: false,
+            exhausted:  true,
+        },
+    ]);
+    let timeline = Timeline::from_events(&outcome.events);
+    let work = timeline.node("work");
+    assert_eq!(work.attempts, vec![
+        (1, "failure".to_owned()),
+        (2, "partial_success".to_owned())
+    ]);
+    assert_eq!(work.final_status.as_deref(), Some("partial_success"));
+    assert_eq!(work.routes, vec!["done".to_owned()]);
+
+    // Changed by the host, the final result is recorded as changed, the
+    // original evidence beside it, and routing takes the failure edge the
+    // effective result matches.
+    let dir = RunDir::new("embed-exhausted-changed");
+    let host = FakeHost::new(Script {
+        fail_final_of: Some("work"),
+        ..Script::default()
+    });
+    let outcome = run_text_with(&dir, &workflow, Some(host.clone()), accept_partial).await;
+    assert_eq!(
+        outcome.report.status,
+        RunStatus::Success,
+        "{:?}",
+        outcome.report.state.errors()
+    );
+    assert_eq!(host.handed("work").len(), 2);
+    let timeline = Timeline::from_events(&outcome.events);
+    let work = timeline.node("work");
+    assert_eq!(work.attempts, vec![
+        (1, "failure".to_owned()),
+        (2, "failure".to_owned())
+    ]);
+    assert_eq!(work.final_status.as_deref(), Some("failure"));
+    assert_eq!(work.routes, vec!["recover".to_owned()]);
+    let evidence = result_prepared_note(&outcome.events, "work");
+    assert_eq!(evidence["attempt"], json!(2));
+    assert_eq!(
+        evidence["original"]["PartialSuccess"]["underlying"]["class"],
+        json!("retry_requested")
+    );
+    assert_eq!(
+        evidence["effective"]["Failure"]["class"],
+        json!("retry_requested")
+    );
+    assert_eq!(
+        evidence["reason"],
+        json!("the host rejects this partial success")
+    );
+    // The preparation precedes the final attempt's record.
+    let final_note = position_of(
+        &outcome.events,
+        "work",
+        &|b| matches!(b, EventBody::HostNote { kind, .. } if kind == RESULT_PREPARED_KIND),
+    );
+    let records: Vec<usize> = bodies_of(&outcome.events, "work")
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| matches!(b, EventBody::AttemptFinished { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(records.len(), 2);
+    assert!(
+        final_note > records[0],
+        "the note follows the first attempt's record"
+    );
+    assert!(
+        final_note < records[1],
+        "the note precedes the final attempt's record"
+    );
+    let recorded = outcome
+        .report
+        .state
+        .history()
+        .iter()
+        .find(|r| r.name == "work")
+        .expect("recorded");
+    assert!(matches!(
+        &recorded.outcome.status,
+        Status::Failure(info) if info.class == "retry_requested"
+    ));
+}
+
+/// Exhausted retries under Fabro's own policy: the stage finalizes the
+/// exhausted retry inside the step, so the host is handed that decision (here
+/// the failure kept for its explicit `outcome=failed` edge under
+/// `on_failure="succeed"`), and a host that accepts it moves the run onto
+/// the success edge.
+#[tokio::test]
+async fn a_fabro_exhaustion_decision_is_prepared_before_its_record() {
+    let workflow =
+        recovery_workflow(r#"shape=box, prompt="try", max_retries=1, on_failure="succeed""#);
+
+    let dir = RunDir::new("embed-fabro-exhausted-seen");
+    let host = FakeHost::new(Script::default());
+    let outcome = run_text_with(&dir, &workflow, Some(host.clone()), script_work_retrying).await;
+    assert_eq!(
+        outcome.report.status,
+        RunStatus::Success,
+        "{:?}",
+        outcome.report.state.errors()
+    );
+    assert_eq!(host.handed("work"), vec![
+        Handed {
+            node:       "work".into(),
+            attempt:    1,
+            status:     "failure".into(),
+            reported:   Some("failed".into()),
+            will_retry: true,
+            exhausted:  false,
+        },
+        Handed {
+            node:       "work".into(),
+            attempt:    2,
+            status:     "failure".into(),
+            reported:   Some("failed".into()),
+            will_retry: false,
+            exhausted:  true,
+        },
+    ]);
+    let timeline = Timeline::from_events(&outcome.events);
+    assert_eq!(
+        timeline.node("work").final_status.as_deref(),
+        Some("failure")
+    );
+    assert_eq!(timeline.node("work").routes, vec!["recover".to_owned()]);
+
+    let dir = RunDir::new("embed-fabro-exhausted-changed");
+    let host = FakeHost::new(Script {
+        accept_failure_of: Some("work"),
+        ..Script::default()
+    });
+    let outcome = run_text_with(&dir, &workflow, Some(host.clone()), script_work_retrying).await;
+    assert_eq!(
+        outcome.report.status,
+        RunStatus::Success,
+        "{:?}",
+        outcome.report.state.errors()
+    );
+    assert_eq!(
+        host.handed("work").len(),
+        2,
+        "both attempts are handed over"
+    );
+    let timeline = Timeline::from_events(&outcome.events);
+    let work = timeline.node("work");
+    assert_eq!(work.attempts, vec![
+        (1, "failure".to_owned()),
+        (2, "partial_success".to_owned())
+    ]);
+    assert_eq!(work.final_status.as_deref(), Some("partial_success"));
+    assert_eq!(work.routes, vec!["done".to_owned()]);
+    let evidence = result_prepared_note(&outcome.events, "work");
+    assert_eq!(evidence["attempt"], json!(2));
+    assert_eq!(
+        evidence["original"]["Failure"]["class"],
+        json!("retry_requested")
+    );
+}
+
+/// An ordinary, non-retryable failure: one attempt, handed over as final and
+/// exhausted, and a host that accepts it moves the run onto the success edge
+/// instead of the explicit failure edge.
+#[tokio::test]
+async fn an_ordinary_failure_is_prepared_before_its_record_and_routes_on_the_effective_result() {
+    let workflow = recovery_workflow(r#"shape=parallelogram, script="echo boom >&2; exit 3""#);
+
+    let dir = RunDir::new("embed-failure-seen");
+    let host = FakeHost::new(Script::default());
+    let outcome = run_text_with(&dir, &workflow, Some(host.clone()), |_| {}).await;
+    assert_eq!(
+        outcome.report.status,
+        RunStatus::Success,
+        "{:?}",
+        outcome.report.state.errors()
+    );
+    assert_eq!(host.handed("work"), vec![Handed {
+        node:       "work".into(),
+        attempt:    1,
+        status:     "failure".into(),
+        reported:   Some("failed".into()),
+        will_retry: false,
+        exhausted:  true,
+    }]);
+    let timeline = Timeline::from_events(&outcome.events);
+    assert_eq!(
+        timeline.node("work").final_status.as_deref(),
+        Some("failure")
+    );
+    assert_eq!(timeline.node("work").routes, vec!["recover".to_owned()]);
+
+    let dir = RunDir::new("embed-failure-changed");
+    let host = FakeHost::new(Script {
+        accept_failure_of: Some("work"),
+        ..Script::default()
+    });
+    let outcome = run_text_with(&dir, &workflow, Some(host.clone()), |_| {}).await;
+    assert_eq!(
+        outcome.report.status,
+        RunStatus::Success,
+        "{:?}",
+        outcome.report.state.errors()
+    );
+    let timeline = Timeline::from_events(&outcome.events);
+    let work = timeline.node("work");
+    assert_eq!(work.attempts, vec![(1, "partial_success".to_owned())]);
+    assert_eq!(work.final_status.as_deref(), Some("partial_success"));
+    assert_eq!(work.routes, vec!["done".to_owned()]);
+    let evidence = result_prepared_note(&outcome.events, "work");
+    assert_eq!(
+        evidence["original"]["Failure"]["class"],
+        json!("exit_status:3")
+    );
+    assert_eq!(
+        evidence["effective"]["PartialSuccess"]["underlying"]["class"],
+        json!("exit_status:3")
+    );
+    let note = position_of(
+        &outcome.events,
+        "work",
+        &|b| matches!(b, EventBody::HostNote { kind, .. } if kind == RESULT_PREPARED_KIND),
+    );
+    let record = position_of(&outcome.events, "work", &|b| {
+        matches!(b, EventBody::AttemptFinished { .. })
+    });
+    assert!(note < record, "the preparation precedes the record");
+}
+
 /// A route override changes where the run goes; a fatal transition blocks
 /// advancement; a best-effort problem is recorded and the run continues; a
 /// slow transition delays without losing anything.
@@ -1205,7 +1675,12 @@ async fn transitions_override_block_or_continue() {
 
 /// The hook service is asked once per point per attempt, at the plan's
 /// points, and its decision takes effect through the same adapter that a
-/// platform host's service would use.
+/// platform host's service would use. The points the steps ask themselves
+/// reach the same service, once each, with nothing of the local service
+/// installed: `start` asks for the environment, the run start and its own
+/// admission with the sandbox in place, in that order; the fork and the
+/// fan-in announce the branches; the run's end and the scope's release
+/// arrive with no firing.
 #[tokio::test]
 async fn a_hook_service_runs_each_hook_once_at_its_point() {
     let dir = RunDir::new("embed-hooks");
@@ -1213,8 +1688,7 @@ async fn a_hook_service_runs_each_hook_once_at_its_point() {
         skip:  "ship",
         calls: Mutex::new(Vec::new()),
     });
-    let adapter: Arc<dyn ExecutionHooks> = Arc::new(HookAdapter::new(service.clone()));
-    let outcome = run_workflow(&dir, Some(adapter)).await;
+    let outcome = run_workflow_hosting(&dir, service.clone()).await;
     assert_eq!(
         outcome.report.status,
         RunStatus::Success,
@@ -1229,12 +1703,42 @@ async fn a_hook_service_runs_each_hook_once_at_its_point() {
             .map(|(p, _, a)| (*p, *a))
             .collect()
     };
+    assert_eq!(of("start"), vec![
+        (HookPoint::ScopeReady, 1),
+        (HookPoint::RunStarted, 1),
+        (HookPoint::BeforeVisit, 1),
+        (HookPoint::BeforeAttempt, 1),
+        (HookPoint::AfterAttempt, 1),
+        (HookPoint::AfterVisit, 1),
+        (HookPoint::RouteSelected, 1),
+    ]);
     assert_eq!(of("prepare"), vec![
         (HookPoint::BeforeVisit, 1),
         (HookPoint::BeforeAttempt, 1),
         (HookPoint::AfterAttempt, 1),
         (HookPoint::AfterVisit, 1),
         (HookPoint::RouteSelected, 1),
+    ]);
+    assert_eq!(of("fan"), vec![
+        (HookPoint::BeforeVisit, 1),
+        (HookPoint::BeforeAttempt, 1),
+        (HookPoint::ForkStarted, 1),
+        (HookPoint::AfterAttempt, 1),
+        (HookPoint::AfterVisit, 1),
+        (HookPoint::RouteSelected, 1),
+    ]);
+    assert_eq!(of("join"), vec![
+        (HookPoint::BeforeVisit, 1),
+        (HookPoint::BeforeAttempt, 1),
+        (HookPoint::ForkCompleted, 1),
+        (HookPoint::AfterAttempt, 1),
+        (HookPoint::AfterVisit, 1),
+        (HookPoint::RouteSelected, 1),
+    ]);
+    // The run-level points carry no firing.
+    assert_eq!(of(""), vec![
+        (HookPoint::RunFinished, 0),
+        (HookPoint::ScopeReleased, 0)
     ]);
     assert_eq!(of("flaky"), vec![
         (HookPoint::BeforeVisit, 1),
@@ -1270,8 +1774,9 @@ async fn a_hook_service_runs_each_hook_once_at_its_point() {
     assert!(!workspace(&dir).join("shipped.txt").exists());
 }
 
-/// A slow consumer delays delivery and loses nothing; a failing consumer
-/// stops with an honest receipt, and the run dir still projects everything.
+/// A slow consumer whose backlog stays within the queue's capacity delays
+/// delivery and loses nothing; a failing consumer stops with an honest
+/// receipt, and the run dir still projects everything.
 #[tokio::test]
 async fn slow_and_failing_consumers_are_lossless_or_honest() {
     let dir = RunDir::new("embed-slow");
@@ -1329,6 +1834,117 @@ async fn slow_and_failing_consumers_are_lossless_or_honest() {
     assert!(delivered.iter().all(|e| replayed_ids.contains(&e.id)));
 }
 
+/// A sink that stops returning is abandoned after the stall budget: the run
+/// finishes, shutdown completes, the receipt names the stall and counts the
+/// events the sink never took, and the run dir still projects everything.
+#[tokio::test]
+async fn a_stalled_sink_is_abandoned_after_its_budget_and_the_run_dir_still_projects() {
+    let dir = RunDir::new("embed-stalled");
+    let rt = runtime(&dir, None);
+    let mut lowered = lower(&rt, &dir, WORKFLOW);
+    script_flaky(lowered.graph.as_mut().expect("lowers"));
+    let stalled = Arc::new(StallingSink {
+        inner:    CollectingSink::default(),
+        accepted: AtomicU32::new(10),
+    });
+    let options = ProjectorOptions {
+        stall_timeout: Duration::from_millis(300),
+        ..ProjectorOptions::default()
+    };
+    let (report, receipt) = timeout(
+        Duration::from_secs(60),
+        run_projected_with(&rt, lowered, stalled.clone(), Vec::new(), options),
+    )
+    .await
+    .expect("shutdown is bounded by the stall budget");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "a stalled sink never fails the run"
+    );
+    assert!(!receipt.is_clean());
+    assert_eq!(receipt.delivered, 10);
+    assert!(receipt.undelivered > 0, "{receipt:?}");
+    assert_eq!(receipt.projected, receipt.delivered + receipt.undelivered);
+    let failure = receipt.failure.as_deref().expect("the stall is reported");
+    assert!(
+        failure.contains("stalled") && failure.contains("300ms"),
+        "{failure}"
+    );
+    let replayed = replay_run(dir.path()).expect("projects");
+    assert_eq!(
+        replayed.len() as u64,
+        receipt.projected,
+        "recovery rebuilds the whole stream"
+    );
+    let replayed_ids: BTreeSet<EventId> = replayed.iter().map(|e| e.id).collect();
+    let delivered = stalled.inner.events();
+    assert_eq!(delivered.len(), 10);
+    assert!(delivered.iter().all(|e| replayed_ids.contains(&e.id)));
+}
+
+/// A sink that keeps returning but cannot keep up with a chatty run leaves
+/// the overflow to the durable log: the queue never holds more than its
+/// capacity, the run is not slowed, live delivery keeps each source's order
+/// with gaps, the receipt counts what was left behind, and `replay_run`
+/// completes the stream.
+#[tokio::test]
+async fn a_sink_that_falls_behind_leaves_the_overflow_to_the_durable_log() {
+    let dir = RunDir::new("embed-backlog");
+    let rt = runtime(&dir, None);
+    let lowered = lower(&rt, &dir, CHATTY);
+    let slow = Arc::new(SlowSink {
+        inner: CollectingSink::default(),
+        delay: Duration::from_millis(5),
+    });
+    let options = ProjectorOptions {
+        capacity: 16,
+        ..ProjectorOptions::default()
+    };
+    let (report, receipt) =
+        run_projected_with(&rt, lowered, slow.clone(), Vec::new(), options).await;
+    assert_eq!(report.status, RunStatus::Success);
+    assert!(receipt.failure.is_none(), "{receipt:?}");
+    assert!(
+        receipt.overflowed > 0,
+        "the producer outran the sink without waiting for it: {receipt:?}"
+    );
+    assert_eq!(receipt.undelivered, receipt.overflowed);
+    assert_eq!(receipt.projected, receipt.delivered + receipt.undelivered);
+    let delivered = slow.inner.events();
+    assert_eq!(delivered.len() as u64, receipt.delivered);
+    assert!(
+        delivered.len() >= 16,
+        "the queue's worth was delivered at least: {}",
+        delivered.len()
+    );
+    // What the sink saw is a subsequence of each source's stream.
+    let mut last: BTreeMap<EventSource, EventId> = BTreeMap::new();
+    for event in &delivered {
+        if let Some(previous) = last.insert(event.id.source, event.id) {
+            assert!(
+                previous < event.id,
+                "delivery kept the source order: {previous:?} before {:?}",
+                event.id
+            );
+        }
+    }
+    let replayed = replay_run(dir.path()).expect("projects");
+    assert_eq!(
+        replayed.len() as u64,
+        receipt.projected,
+        "the log holds every event, delivered or not"
+    );
+    let replayed_ids: BTreeSet<EventId> = replayed.iter().map(|e| e.id).collect();
+    assert!(delivered.iter().all(|e| replayed_ids.contains(&e.id)));
+    // The chatty command's lines are the bulk of the overflow.
+    let lines = replayed
+        .iter()
+        .filter(|e| matches!(e.body, EventBody::OutputLine { .. }))
+        .count();
+    assert!(lines >= 2000, "{lines} output lines");
+}
+
 /// Recovery: a resumed run re-delivers the regenerated suffix with the same
 /// identities, deduplication by id yields the full stream, and the run dir
 /// projects the same events after the resume.
@@ -1378,15 +1994,28 @@ async fn recovery_redelivers_with_stable_identities() {
         !redelivered.is_empty(),
         "the regenerated suffix was re-delivered"
     );
+    // A re-delivered record was re-recorded by the resume: the same identity
+    // and body, and a recording time of its own, since the original never
+    // reached disk.
     let complete = normalized(&complete);
     for event in normalized(&redelivered) {
         let original = complete
             .iter()
             .find(|e| e.id == event.id)
             .unwrap_or_else(|| panic!("a re-delivered event has a known identity: {:?}", event.id));
-        assert_eq!(&event, original, "a re-delivered event equals the original");
+        assert!(
+            event.recorded_at >= original.recorded_at,
+            "re-recorded no earlier than first recorded: {event:?}"
+        );
+        assert_eq!(
+            timeless(&event),
+            timeless(original),
+            "a re-delivered event equals the original"
+        );
     }
-    // Deduplication by id over both deliveries yields the complete stream.
+    // Deduplication by id over both deliveries yields the complete stream; the
+    // run dir carries the resume's recording time for the re-recorded suffix,
+    // so the comparison is over everything but that time.
     let mut merged: BTreeMap<EventId, RunEvent> = BTreeMap::new();
     for event in complete.iter().chain(normalized(&redelivered).iter()) {
         merged.entry(event.id).or_insert_with(|| event.clone());
@@ -1394,8 +2023,8 @@ async fn recovery_redelivers_with_stable_identities() {
     let mut replayed = replay_run(dir.path()).expect("projects");
     replayed.sort_by_key(|e| e.id);
     assert_eq!(
-        merged.into_values().collect::<Vec<_>>(),
-        replayed,
+        merged.values().map(timeless).collect::<Vec<_>>(),
+        replayed.iter().map(timeless).collect::<Vec<_>>(),
         "the recovered run projects the same stream"
     );
 }

@@ -21,7 +21,14 @@ scenarios/
 ```
 
 Families: `code-review`, `security-review`, `implement`, `interview`,
-`provider-faults`, `routing`, and `backend` (the backend-matrix cases). The
+`provider-faults`, `routing`, `backend` (the backend-matrix cases), and
+`acp` (the ACP agent backend). The `acp` family runs inline graphs whose
+`acp.command` starts `acp/fixtures/scripted_acp_agent.py`, a standard-library
+Python agent the fixture commits into the repository together with a JSON
+script that says what each prompt does (text chunks, a routing directive, a
+file written, an exit before answering, a permission request, a wait for
+`session/cancel`); the agent reads nothing from the environment, so the same
+fixture runs on the host and in a container. The
 `fix-ci` bundle is excluded by an owner decision of 2026-09-07; `../CONTRACT.md`
 records the reason and where its behavior is covered instead. The family's minimum scenarios
 and critical outcomes are the phase 4 table of
@@ -44,8 +51,13 @@ then the coverage report, allowing a skipped cell (a machine with no Docker).
 `mise run test:fabro:blackbox:strict` requires Docker
 (`PETRI_REQUIRE_DOCKER=1`) and the vendored bundles
 (`PETRI_REQUIRE_FABRO_BUNDLES=1`) and fails on any skipped cell; the nightly
-gate runs it, so the repeated container work stays out of the routine
-subset. The bundles are tracked under `../bundles/<id>/` (provenance in
+workflow runs it on the runners that have Docker (through
+`check:fabro:readiness`), so the repeated container work stays out of the
+routine subset. `mise run check:fabro:readiness` is the final readiness gate: the
+same strict run, then the coverage report with `--readiness`, which fails
+unless every required cell passed; a cell the matrix declares `blocked`
+fails it, where the routine `--strict` report only shows it. The bundles are
+tracked under `../bundles/<id>/` (provenance in
 `../bundles/PROVENANCE.md`); `mise run check:bundles` verifies them against
 `../bundles.lock.json`. A bundle missing from the checkout skips its
 scenarios in the routine task and fails them in the strict one.

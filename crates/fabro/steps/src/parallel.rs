@@ -12,18 +12,24 @@
 //! above [`blobs::FAN_OUT_OFFLOAD_THRESHOLD`]. The snapshot then holds
 //! `blob://sha256/<hex>` references in their place, one blob per value for
 //! the whole fork, and the bytes per child do not grow with the item count.
-//! The step's output is `{ snapshot, nodes }`; the parent's own `kv` is not
-//! changed.
+//! The step's output is `{ snapshot, nodes, occurrence }`, where
+//! `occurrence` is `{ fork, firing }`: this visit of the parallel node, which
+//! every branch's call slot and every `fabro.parallel.*` event of the visit
+//! names. The parent's own `kv` is not changed.
 //!
 //! The branch step is the parent-side half of one branch. It takes the fork
 //! snapshot from its input, starts the branch's child graph as an internal
 //! invocation that inherits the parent's sandbox and workspace, waits for
 //! it, and returns the branch envelope Fabro's parallel handler builds:
-//! `{ id, index, item_label?, status, context_updates }`. The envelope is
-//! the step's output and nothing else: a branch's context changes never
-//! reach the parent's `kv`. The child bounds its attempts through the
-//! coordinator's attempt admission under the fork's gate, so `max_parallel`
-//! counts running attempts and a backoff holds no slot.
+//! `{ id, index, item_label?, status, context_updates }`. The updates are
+//! built as Fabro's `branch_context_updates` builds them: the target's own
+//! outcome updates first (an unchanged write-back included), then the public
+//! diff of the child's context against the fork snapshot, the diff winning a
+//! duplicate key. The envelope is the step's output and nothing else: a
+//! branch's context changes never reach the parent's `kv`. The child bounds
+//! its attempts through the coordinator's attempt admission under the fork's
+//! gate, so `max_parallel` counts running attempts and a backoff holds no
+//! slot.
 //!
 //! The fan-in step is the barrier. Its inputs carry every envelope in branch
 //! order; it publishes `parallel.results` and `parallel.branch_count`, takes
@@ -37,15 +43,18 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use execution::hooks::{ForkCompletedPayload, HookPoint, HookRequest, HookServiceHandle};
 use execution::{
-    AttemptAdmission, CallSite, CoordinatorInvocationClient, GraphDigest, InvocationClient,
-    InvocationRequest, InvocationResult, SandboxMode, SecretBindings,
+    AttemptAdmission, CallSite, ChildStart, CoordinatorInvocationClient, GraphDigest,
+    InvocationClient, InvocationHandle, InvocationRequest, InvocationResult, SandboxMode,
+    SecretBindings,
 };
 use frontend_fabro::hooks::HookEvent;
 use frontend_fabro::kinds::{
-    BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_NODES_KEY, EMPTY_BRANCH_MARKER, FAN_IN_KIND, FORK_KIND,
-    FORK_NODES_FIELD, FORK_SNAPSHOT_FIELD, StageOutcome,
+    BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_NODES_KEY, FAN_IN_KIND, FORK_KIND, FORK_NODES_FIELD,
+    FORK_OCCURRENCE_FIELD, FORK_SNAPSHOT_FIELD, StageOutcome,
 };
+use ir::placeholder::{is_placeholder_item, placeholder_item};
 use ir::{
     Control, FailureClass, FailureInfo, Metrics, Outcome, RunStatus, Status, StepEvent, StepKindId,
     Value,
@@ -55,9 +64,8 @@ use serde_json::{Map, json};
 use smol_str::SmolStr;
 use steps::{Step, StepCtx};
 
-use crate::LocalHooksHandle;
 use crate::blobs::{self, OutputStore};
-use crate::hooks::report_event;
+use crate::hooks::{record_report, step_view};
 use crate::stage::record;
 use crate::workflow::ChildInvoker;
 
@@ -71,14 +79,20 @@ pub const RESULTS_KEY: &str = "parallel.results";
 pub const BRANCH_COUNT_KEY: &str = "parallel.branch_count";
 
 /// The `kind` of the `StepEvent::Custom` payload a branch emits when its
-/// child starts: `{ kind, fork, branch, index, item_label, invocation }`.
+/// child starts: `{ kind, fork, occurrence, branch, index, item_label,
+/// invocation }`. `occurrence` is `{ fork, firing }`, the fork visit this
+/// branch belongs to (the fork step's firing in the event's execution), the
+/// same one the typed `fork_started` names.
 pub const BRANCH_STARTED_EVENT: &str = "fabro.parallel.branch.started";
-/// The `kind` of the payload a branch emits when its child finished:
-/// `{ kind, fork, branch, index, item_label, invocation, status, duration_ms
-/// }`.
+/// The `kind` of the payload a branch emits when it reached its end, whether
+/// its child finished, was cancelled or killed, or never started: `{ kind,
+/// fork, occurrence, branch, index, item_label, invocation, status,
+/// disposition, started, duration_ms }`. `status` is the envelope's Fabro
+/// status; `disposition` is one of [`BranchDisposition`]'s names; `started`
+/// says whether the child's engine ever started.
 pub const BRANCH_COMPLETED_EVENT: &str = "fabro.parallel.branch.completed";
-/// The `kind` of the payload the fan-in emits: `{ kind, node, branch_count,
-/// success_count, failure_count, status }`.
+/// The `kind` of the payload the fan-in emits: `{ kind, node, fork,
+/// occurrence, branch_count, success_count, failure_count, status }`.
 pub const FORK_COMPLETED_EVENT: &str = "fabro.parallel.completed";
 
 /// The failure class when a fan-in received no branch envelopes.
@@ -128,6 +142,7 @@ impl Step for ForkStep {
     type Config = ForkConfig;
 
     async fn run(&self, config: ForkConfig, ctx: StepCtx) -> Outcome {
+        parallel_start(&ctx, &config).await;
         let mut snapshot = config.kv;
         let mut nodes = config.nodes;
         if let Some(store) = ctx.capability::<OutputStore>() {
@@ -150,6 +165,7 @@ impl Step for ForkStep {
         Outcome::success(json!({
             FORK_SNAPSHOT_FIELD: snapshot,
             FORK_NODES_FIELD: nodes,
+            FORK_OCCURRENCE_FIELD: { "fork": config.node, "firing": ctx.firing.raw() },
         }))
     }
 }
@@ -187,21 +203,76 @@ pub struct BranchConfig {
     /// The fork visit: repeated visits of one fork get their own gate.
     #[serde(default)]
     pub generation:   u64,
+    /// The fork step's firing, from its output: the fork occurrence this
+    /// branch belongs to, which its call slot and its events name.
+    #[serde(default)]
+    pub fork_firing:  u64,
 }
 
 pub struct BranchStep;
 
-/// Whether a `for_each` item is the placeholder an empty list expands to.
-fn is_placeholder(value: &Value) -> bool {
-    value
-        .as_object()
-        .is_some_and(|map| map.get(EMPTY_BRANCH_MARKER) == Some(&Value::Bool(true)))
+/// How a branch reached its end, beside the Fabro status its envelope
+/// carries. Fabro reports a cancelled branch as `failed` with no reason of
+/// its own; this names what happened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BranchDisposition {
+    /// The child finished on its own; the envelope's `status` says how.
+    Completed,
+    /// The child was cancelled: the parent was told to stop and the child
+    /// settled, or the child's own run ended cancelled.
+    Cancelled,
+    /// The stop escalated to a kill before the child settled; the branch
+    /// stopped waiting for it.
+    Killed,
+    /// The child could not be declared, so nothing ever ran.
+    FailedToStart,
 }
 
-/// Drop the placeholder envelope an empty `for_each` list produces.
+impl BranchDisposition {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::Killed => "killed",
+            Self::FailedToStart => "failed_to_start",
+        }
+    }
+}
+
+/// How a branch's child settled, from the parent's side.
+enum Settled {
+    /// The child returned its result: its own, or the cancelled one the
+    /// coordinator finished it with after the parent was told to stop.
+    Result(InvocationResult),
+    /// The stop escalated to a kill before the child settled; the branch
+    /// stopped waiting for it.
+    Killed,
+}
+
+/// Wait for a stopped child to settle: the coordinator cancels it, and the
+/// branch's work is over when the step returns, unless the stop is a kill or
+/// escalates to one while waiting.
+async fn settle_after_stop(
+    handle: &mut InvocationHandle,
+    ctx: &mut StepCtx,
+    stop: Control,
+) -> Settled {
+    if matches!(stop, Control::Kill) {
+        return Settled::Killed;
+    }
+    match handle.settled_with_control(&mut ctx.control).await {
+        Ok(result) => Settled::Result(result),
+        // Only a kill reaches a firing that is already cancelling.
+        Err(_) => Settled::Killed,
+    }
+}
+
+/// Drop the placeholder envelope an empty `for_each` list produces: the
+/// branch step returns the placeholder item itself for the placeholder
+/// clone, and the fan-in leaves it out of the results.
 pub fn strip_placeholders(results: &mut Value) {
     if let Value::Array(items) = results {
-        items.retain(|item| !is_placeholder(item));
+        items.retain(|item| !is_placeholder_item(item));
     }
 }
 
@@ -291,20 +362,41 @@ fn is_engine_internal(key: &str) -> bool {
         || key.starts_with("current")
 }
 
-/// The branch's own context changes: every public key whose value differs
-/// from the fork snapshot, as Fabro's `context_diff_public` reports them.
-/// Petri's stages write `failure_class` as bookkeeping on every outcome;
-/// an empty class (no failure) is not a change the branch made.
-fn context_updates(
+/// Petri's stage bookkeeping: `Stage::into_outcome` writes `failure_class`
+/// into every stage's context updates, standing in for the key Fabro's
+/// executor sets when it records a stage. Fabro's parallel handler runs a
+/// branch target directly, outside that lifecycle, so its branch updates
+/// never carry the key; neither do Petri's.
+fn is_stage_bookkeeping(key: &str) -> bool {
+    key == "failure_class"
+}
+
+/// The branch's own context changes, as Fabro's `branch_context_updates`
+/// builds them: the target's own outcome updates first (`explicit`, so a key
+/// written back with the value it already had is reported), then every
+/// public key of the child's final context whose value differs from the fork
+/// snapshot (`context_diff_public`), the diff winning a duplicate key.
+fn branch_updates(
+    explicit: &BTreeMap<SmolStr, Value>,
     snapshot: &BTreeMap<SmolStr, Value>,
     after: &BTreeMap<SmolStr, Value>,
 ) -> Map<String, Value> {
-    after
+    let mut updates: Map<String, Value> = explicit
         .iter()
-        .filter(|(key, value)| !is_engine_internal(key) && snapshot.get(*key) != Some(*value))
-        .filter(|(key, value)| !(key.as_str() == "failure_class" && value.as_str() == Some("")))
+        .filter(|(key, _)| !is_stage_bookkeeping(key))
         .map(|(key, value)| (key.to_string(), value.clone()))
-        .collect()
+        .collect();
+    updates.extend(
+        after
+            .iter()
+            .filter(|(key, value)| {
+                !is_engine_internal(key)
+                    && !is_stage_bookkeeping(key)
+                    && snapshot.get(*key) != Some(*value)
+            })
+            .map(|(key, value)| (key.to_string(), value.clone())),
+    );
+    updates
 }
 
 /// The branch status in Fabro's vocabulary: what the target stage reported,
@@ -359,14 +451,14 @@ impl Step for BranchStep {
     type Config = BranchConfig;
 
     async fn run(&self, config: BranchConfig, mut ctx: StepCtx) -> Outcome {
-        let started = Instant::now();
+        let started_at = Instant::now();
         let label = config
             .for_each
             .then(|| item_label(config.item.as_ref().unwrap_or(&Value::Null), config.index));
-        if config.item.as_ref().is_some_and(is_placeholder) {
+        if config.item.as_ref().is_some_and(is_placeholder_item) {
             // The one item an empty list expands to: no branch, no child. The
             // fan-in drops this envelope.
-            return Outcome::success(json!({ EMPTY_BRANCH_MARKER: true }));
+            return Outcome::success(placeholder_item());
         }
         let failed = |reason: String, class: FailureClass| {
             let output = envelope(
@@ -402,8 +494,8 @@ impl Step for BranchStep {
                 firing:  ctx.firing,
                 attempt: ctx.attempt,
                 slot:    SmolStr::new(format!(
-                    "branch:{}:{}:{}",
-                    config.fork, config.index, config.node
+                    "branch:{}@{}:{}:{}",
+                    config.fork, config.fork_firing, config.index, config.node
                 )),
             },
             graph: config.child_digest,
@@ -415,43 +507,91 @@ impl Step for BranchStep {
                 max_parallel: config.max_parallel,
             }),
         };
+        let identity = json!({
+            "fork": config.fork,
+            FORK_OCCURRENCE_FIELD: { "fork": config.fork, "firing": config.fork_firing },
+            "branch": config.node,
+            "index": config.index,
+            "item_label": label,
+        });
+        let completed = |invocation: Option<u64>,
+                         status: StageOutcome,
+                         disposition: BranchDisposition,
+                         started: bool| {
+            let mut payload = identity.clone();
+            payload["kind"] = json!(BRANCH_COMPLETED_EVENT);
+            payload["invocation"] = json!(invocation);
+            payload["status"] = json!(status.as_str());
+            payload["disposition"] = json!(disposition.as_str());
+            payload["started"] = json!(started);
+            payload["duration_ms"] = json!(elapsed_ms(started_at));
+            StepEvent::Custom(payload)
+        };
         let mut handle = match client.start_or_attach(request).await {
             Ok(handle) => handle,
-            Err(error) => return failed(error.to_string(), INVOCATION_CLASS),
-        };
-        let _ = ctx
-            .logs
-            .send(StepEvent::Custom(json!({
-                "kind": BRANCH_STARTED_EVENT,
-                "fork": config.fork,
-                "branch": config.node,
-                "index": config.index,
-                "item_label": label,
-                "invocation": handle.id().raw(),
-            })))
-            .await;
-        let Some(result) = handle.result_with_control(&mut ctx.control).await else {
-            // The parent is stopping. The coordinator cancels the child; wait
-            // for it to settle so the branch's work is over when this step
-            // returns, unless the stop was a kill.
-            let killed = matches!(ctx.control.try_recv(), Ok(Control::Kill));
-            if !killed {
-                let _ = handle.result().await;
+            Err(error) => {
+                // The child could not be declared: the branch never started.
+                let _ = ctx
+                    .logs
+                    .send(completed(
+                        None,
+                        StageOutcome::Failed,
+                        BranchDisposition::FailedToStart,
+                        false,
+                    ))
+                    .await;
+                return failed(error.to_string(), INVOCATION_CLASS);
             }
-            let output = envelope(
-                &config.node,
-                config.index,
-                label.as_deref(),
-                StageOutcome::Failed,
-                Map::new(),
-            );
-            return Outcome::new(Status::Cancelled, output);
         };
-        let status = branch_status(&result);
-        let updates = if result.status == RunStatus::Cancelled {
-            Map::new()
-        } else {
-            context_updates(&snapshot, &result.context)
+        let invocation = handle.id().raw();
+        // The branch starts when its child's engine does: the child holds a
+        // slot under the fork's gate, as Fabro's branch holds a permit. A
+        // stop that arrives first means the branch never started; the
+        // coordinator still runs the child's cancelled execution to record
+        // the cancellation, and the step waits for that.
+        let (started, settled) = match handle.started_with_control(&mut ctx.control).await {
+            ChildStart::Started => {
+                let mut payload = identity.clone();
+                payload["kind"] = json!(BRANCH_STARTED_EVENT);
+                payload["invocation"] = json!(invocation);
+                let _ = ctx.logs.send(StepEvent::Custom(payload)).await;
+                let settled = match handle.settled_with_control(&mut ctx.control).await {
+                    Ok(result) => Settled::Result(result),
+                    Err(stop) => settle_after_stop(&mut handle, &mut ctx, stop).await,
+                };
+                (true, settled)
+            }
+            ChildStart::Finished(result) => {
+                // The child ran to its end before its start was observed.
+                let mut payload = identity.clone();
+                payload["kind"] = json!(BRANCH_STARTED_EVENT);
+                payload["invocation"] = json!(invocation);
+                let _ = ctx.logs.send(StepEvent::Custom(payload)).await;
+                (true, Settled::Result(result))
+            }
+            ChildStart::Stopped(stop) => {
+                (false, settle_after_stop(&mut handle, &mut ctx, stop).await)
+            }
+        };
+        // The child's own result decides: a child that finished before the
+        // stop reached it completed, whatever the parent was told.
+        let result = match settled {
+            Settled::Result(result) => Some(result),
+            Settled::Killed => None,
+        };
+        let disposition = match &result {
+            None => BranchDisposition::Killed,
+            Some(result) if result.status == RunStatus::Cancelled => BranchDisposition::Cancelled,
+            Some(_) => BranchDisposition::Completed,
+        };
+        // A cancelled or killed branch is `failed` with no changes, as
+        // Fabro's `failed_branch_result` reports it.
+        let (status, updates) = match (&result, disposition) {
+            (Some(result), BranchDisposition::Completed) => (
+                branch_status(result),
+                branch_updates(&result.updates, &snapshot, &result.context),
+            ),
+            _ => (StageOutcome::Failed, Map::new()),
         };
         let output = envelope(
             &config.node,
@@ -462,71 +602,114 @@ impl Step for BranchStep {
         );
         let _ = ctx
             .logs
-            .send(StepEvent::Custom(json!({
-                "kind": BRANCH_COMPLETED_EVENT,
-                "fork": config.fork,
-                "branch": config.node,
-                "index": config.index,
-                "item_label": label,
-                "invocation": handle.id().raw(),
-                "status": status.as_str(),
-                "duration_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            })))
+            .send(completed(Some(invocation), status, disposition, started))
             .await;
-        let engine_status = match status {
-            StageOutcome::Succeeded => Status::Success,
-            StageOutcome::PartiallySucceeded => Status::partial_clean(),
-            StageOutcome::Skipped => Status::Skipped,
-            StageOutcome::Failed => {
-                Status::Failure(result.failure.clone().unwrap_or_else(|| {
-                    FailureInfo::new(format!("branch `{}` failed", config.node))
-                }))
-            }
+        let engine_status = match (disposition, status) {
+            (BranchDisposition::Cancelled | BranchDisposition::Killed, _) => Status::Cancelled,
+            (_, StageOutcome::Succeeded) => Status::Success,
+            (_, StageOutcome::PartiallySucceeded) => Status::partial_clean(),
+            (_, StageOutcome::Skipped) => Status::Skipped,
+            (_, StageOutcome::Failed) => Status::Failure(
+                result
+                    .as_ref()
+                    .and_then(|result| result.failure.clone())
+                    .unwrap_or_else(|| {
+                        FailureInfo::new(format!("branch `{}` failed", config.node))
+                    }),
+            ),
         };
         let mut outcome = Outcome::new(engine_status, output);
         outcome.metrics = Metrics {
-            duration_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+            duration_ms: Some(elapsed_ms(started_at)),
             ..Metrics::default()
         };
         outcome
     }
 }
 
+fn elapsed_ms(since: Instant) -> u64 {
+    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FanInConfig {
-    pub label:   String,
-    pub node:    String,
+    pub label:       String,
+    pub node:        String,
     /// The parallel node whose branches this join collects, for the
     /// `parallel_complete` hook.
     #[serde(default)]
-    pub fork:    String,
+    pub fork:        String,
     /// The branch envelopes, in branch order, as the join's inputs carried
     /// them.
     #[serde(default)]
-    pub results: Value,
+    pub results:     Value,
+    /// The fork occurrence each input token named, in the same order: one
+    /// value, repeated, for the branches of one fork visit.
+    #[serde(default)]
+    pub occurrences: Vec<Value>,
+}
+
+/// Fabro's `parallel_start`: the parallel node is about to start its
+/// branches. Asked of the hook service by the fork step, the one thing that
+/// runs exactly once per fork visit before any branch (a `for_each` fork has
+/// one routing group, so the driver cannot see the fork at admission). The
+/// view is the parallel node's own.
+async fn parallel_start(ctx: &StepCtx, config: &ForkConfig) {
+    let Some(handle) = ctx.capability::<HookServiceHandle>() else {
+        return;
+    };
+    let report = handle
+        .0
+        .run(HookRequest {
+            point:   HookPoint::ForkStarted,
+            view:    Some(step_view(ctx, "parallel", &config.label, &config.kv)),
+            outcome: None,
+            routes:  Vec::new(),
+            payload: Value::Null,
+        })
+        .await;
+    record_report(
+        &ctx.logs,
+        &ctx.node,
+        ctx.firing,
+        ctx.attempt,
+        HookEvent::ParallelStart,
+        &report,
+    )
+    .await;
 }
 
 /// Fabro's `parallel_complete`: every branch of `fork` is in, before the
-/// fan-in publishes. Driven by the join step itself, so a synthetic fan-in
-/// and a prompted one report it the same way.
-pub async fn parallel_complete(ctx: &StepCtx, fork: &str) {
-    let Some(local) = ctx.capability::<LocalHooksHandle>() else {
+/// fan-in publishes. Asked of the hook service by the join step itself, so a
+/// synthetic fan-in and a prompted one report it the same way; the payload
+/// names the parallel node the join collects for.
+pub async fn parallel_complete(ctx: &StepCtx, fork: &str, label: &str) {
+    let Some(handle) = ctx.capability::<HookServiceHandle>() else {
         return;
     };
-    let report = local.0.parallel_complete(ctx, fork).await;
-    if !report.is_silent() {
-        let _ = ctx
-            .logs
-            .send(report_event(
-                &ctx.node,
-                ctx.firing,
-                ctx.attempt,
-                HookEvent::ParallelComplete,
-                &report,
-            ))
-            .await;
-    }
+    let payload = ForkCompletedPayload {
+        fork: SmolStr::new(fork),
+    };
+    let report = handle
+        .0
+        .run(HookRequest {
+            point:   HookPoint::ForkCompleted,
+            view:    Some(step_view(ctx, "fan_in", label, &Value::Null)),
+            outcome: None,
+            routes:  Vec::new(),
+            payload: serde_json::to_value(payload).unwrap_or(Value::Null),
+        })
+        .await;
+    record_report(
+        &ctx.logs,
+        &ctx.node,
+        ctx.firing,
+        ctx.attempt,
+        HookEvent::ParallelComplete,
+        &report,
+    )
+    .await;
 }
 
 pub struct FanInStep;
@@ -567,7 +750,7 @@ impl Step for FanInStep {
 
     async fn run(&self, config: FanInConfig, ctx: StepCtx) -> Outcome {
         record(&ctx);
-        parallel_complete(&ctx, &config.fork).await;
+        parallel_complete(&ctx, &config.fork, &config.label).await;
         let mut results = config.results;
         strip_placeholders(&mut results);
         let items = match &results {
@@ -591,11 +774,19 @@ impl Step for FanInStep {
             .iter()
             .filter(|r| r.get("status").and_then(Value::as_str) == Some("failed"))
             .count();
+        let occurrence = config
+            .occurrences
+            .iter()
+            .find(|occurrence| !occurrence.is_null())
+            .cloned()
+            .unwrap_or(Value::Null);
         let _ = ctx
             .logs
             .send(StepEvent::Custom(json!({
                 "kind": FORK_COMPLETED_EVENT,
                 "node": config.node,
+                "fork": config.fork,
+                FORK_OCCURRENCE_FIELD: occurrence,
                 "branch_count": items.len(),
                 "success_count": success_count,
                 "failure_count": failure_count,
@@ -694,30 +885,84 @@ mod tests {
         assert_eq!(aggregate(&[ok, partial]), StageOutcome::PartiallySucceeded);
     }
 
+    fn kv(pairs: &[(&str, Value)]) -> BTreeMap<SmolStr, Value> {
+        pairs
+            .iter()
+            .map(|(key, value)| (SmolStr::new(key), value.clone()))
+            .collect()
+    }
+
+    fn object(value: Value) -> Map<String, Value> {
+        let Value::Object(map) = value else {
+            panic!("an object, not {value}");
+        };
+        map
+    }
+
+    /// The reference contract, section 5: outcome updates first, then the
+    /// public diff.
     #[test]
-    fn updates_are_the_public_diff_against_the_snapshot() {
-        let snapshot: BTreeMap<SmolStr, Value> = [
-            ("command.output".into(), json!("before")),
-            ("kept".into(), json!(1)),
-        ]
-        .into_iter()
-        .collect();
-        let after: BTreeMap<SmolStr, Value> = [
-            ("failure_class".into(), json!("")),
-            ("command.output".into(), json!("after")),
-            ("kept".into(), json!(1)),
-            ("output.finder".into(), json!({ "n": 1 })),
-            ("internal.parallel_item".into(), json!("x")),
-        ]
-        .into_iter()
-        .collect();
-        let updates = context_updates(&snapshot, &after);
+    fn updates_start_with_the_outcome_updates_then_the_public_diff() {
+        let snapshot = kv(&[("command.output", json!("before")), ("kept", json!(1))]);
+        let explicit = kv(&[("output.finder", json!({ "n": 1 }))]);
+        let after = kv(&[
+            ("command.output", json!("after")),
+            ("kept", json!(1)),
+            ("output.finder", json!({ "n": 1 })),
+            ("internal.parallel_item", json!("x")),
+        ]);
         assert_eq!(
-            updates,
-            json!({ "command.output": "after", "output.finder": { "n": 1 } })
-                .as_object()
-                .cloned()
-                .expect("object")
+            branch_updates(&explicit, &snapshot, &after),
+            object(json!({ "command.output": "after", "output.finder": { "n": 1 } }))
+        );
+    }
+
+    /// A key the target wrote back with the value the snapshot already had
+    /// is an outcome update, so it is reported although the diff is silent.
+    #[test]
+    fn an_unchanged_write_back_is_reported() {
+        let snapshot = kv(&[("x", json!("same"))]);
+        let explicit = kv(&[("x", json!("same"))]);
+        let after = snapshot.clone();
+        assert_eq!(
+            branch_updates(&explicit, &snapshot, &after),
+            object(json!({ "x": "same" }))
+        );
+    }
+
+    /// On a duplicate key the diff wins.
+    #[test]
+    fn the_diff_wins_a_duplicate_key() {
+        let snapshot = kv(&[("x", json!(0))]);
+        let explicit = kv(&[("x", json!(1))]);
+        let after = kv(&[("x", json!(2))]);
+        assert_eq!(
+            branch_updates(&explicit, &snapshot, &after),
+            object(json!({ "x": 2 }))
+        );
+    }
+
+    /// Petri's `failure_class` bookkeeping is neither an outcome update nor a
+    /// diff entry, whether the class is empty or names a failure: Fabro's
+    /// branch path never writes the key.
+    #[test]
+    fn stage_bookkeeping_is_not_a_branch_update() {
+        let snapshot = kv(&[("failure_class", json!(""))]);
+        let clean = kv(&[
+            ("failure_class", json!("")),
+            ("command.output", json!("ok\n")),
+        ]);
+        assert_eq!(
+            branch_updates(&clean, &snapshot, &clean),
+            object(json!({ "command.output": "ok\n" }))
+        );
+        let failed = kv(&[
+            ("failure_class", json!("exit_status:3")),
+            ("command.output", json!("boom\n")),
+        ]);
+        assert_eq!(
+            branch_updates(&failed, &snapshot, &failed),
+            object(json!({ "command.output": "boom\n" }))
         );
     }
 }

@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use execution::hooks::HookServiceHandle;
-use frontend_fabro::hooks::HookEvent;
+use execution::hooks::{HookPoint, HookServiceHandle};
+use frontend_fabro::kinds::RETRY_REQUESTED_CLASS;
 use ir::{Control, Value};
 use pebble_coding_agent::state::SessionRecord;
 use pebble_coding_agent::{CodingAgentExport, ShutdownReason};
@@ -16,7 +16,6 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use super::AgentConfig;
-use crate::LocalHooksHandle;
 use crate::acp::{AcpError, AcpHooks, Client};
 use crate::fallback::ModelFailure;
 use crate::hooks::step_view;
@@ -57,14 +56,23 @@ impl AgentError {
     }
 }
 impl From<AcpError> for AgentError {
+    /// A turn that fails after the agent started asks for a retry. Fabro's
+    /// ACP backend turns every such failure (the process exits before the
+    /// protocol completes, a protocol error, a rejected request, a stop
+    /// reason other than `end_turn` or `refusal`) into a handler error
+    /// (`handler/llm/acp.rs::acp_error_to_workflow`), and its engine retries
+    /// a handler error while attempts remain (`handler/mod.rs::should_retry`
+    /// is `is_retryable`, true for the handler stage). The same failures
+    /// carry the `retry_requested` class here, so `max_retries` and
+    /// `retry_policy` apply to them; the message keeps what went wrong.
     fn from(error: AcpError) -> Self {
         match error {
             AcpError::Cancelled => Self::Cancelled,
             AcpError::StopReason(reason) => Self::failed(
-                format!("stop_reason:{reason}"),
+                RETRY_REQUESTED_CLASS,
                 format!("the agent stopped with `{reason}`"),
             ),
-            other => Self::failed("acp_protocol", other.to_string()),
+            other => Self::failed(RETRY_REQUESTED_CLASS, other.to_string()),
         }
     }
 }
@@ -96,31 +104,24 @@ impl Session {
                 let mut client = Client::spawn(ctx.env.as_ref(), &command, ctx.logs.clone())
                     .await
                     .map_err(|e| AgentError::failed("spawn_failed", e.to_string()))?;
-                if let Some(handle) = ctx.capability::<HookServiceHandle>()
-                    && let Some(local) = ctx.capability::<LocalHooksHandle>()
-                {
-                    let names = |event: HookEvent| {
-                        local
-                            .0
-                            .hooks_for(event)
-                            .into_iter()
-                            .map(|hook| hook.name)
-                            .collect::<Vec<_>>()
-                    };
-                    let mut post = names(HookEvent::PostToolUse);
-                    post.extend(names(HookEvent::PostToolUseFailure));
+                // The hook service is asked at the one boundary ACP has (a
+                // permission request), whoever serves it. The service also
+                // says which tool hooks are configured, so the node can warn
+                // about the boundaries this backend lacks for each of them.
+                if let Some(handle) = ctx.capability::<HookServiceHandle>() {
+                    let service = &handle.0;
+                    let mut post = service.configured_hooks(HookPoint::AfterToolUse);
+                    post.extend(service.configured_hooks(HookPoint::AfterToolFailure));
                     let hooks = AcpHooks::new(
-                        handle.0.clone(),
+                        service.clone(),
                         step_view(ctx, "agent", &config.label, &config.kv),
                         ctx.node.clone(),
                         ctx.firing,
                         ctx.attempt,
-                        names(HookEvent::PreToolUse),
+                        service.configured_hooks(HookPoint::BeforeToolUse),
                         post,
                     );
-                    if hooks.has_tool_hooks() {
-                        client.with_hooks(Arc::new(hooks)).await;
-                    }
+                    client.with_hooks(Arc::new(hooks)).await;
                 }
                 if let Err(error) = client.open_session(ctx.env.workspace_path()).await {
                     client.terminate(ctx.env.grace()).await;
@@ -133,7 +134,8 @@ impl Session {
     /// One prompt turn. `deadline` is the node's `timeout`, which an ACP
     /// agent consumes itself (`TimeoutPolicy::HandlerManaged`, as Fabro hands
     /// its `timeout_ms` to the ACP turn): a turn that outlives it is
-    /// terminated and fails with class `timeout`. A native Pebble session
+    /// terminated and asks for a retry (class `retry_requested`), as Fabro's
+    /// timed-out turn is a retryable handler error. A native Pebble session
     /// ignores it; the driver's interview-aware timer owns that deadline.
     pub(crate) async fn prompt(
         &mut self,
@@ -152,7 +154,7 @@ impl Session {
                 let Some(result) = result else {
                     client.terminate(grace).await;
                     return Err(AgentError::failed(
-                        "timeout",
+                        RETRY_REQUESTED_CLASS,
                         format!(
                             "the agent turn timed out after {}ms",
                             deadline

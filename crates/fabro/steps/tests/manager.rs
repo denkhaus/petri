@@ -8,6 +8,7 @@
 //! context updates; a parent cancel cancels the child.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,7 +26,7 @@ use fabro_steps::{WORKFLOW_KIND, WorkflowStep};
 use ir::{Attempt, Control, FailureInfo, FiringId, Outcome, RunStatus, ScopeId, Status, Value};
 use serde_json::json;
 use smol_str::SmolStr;
-use steps::{Capabilities, Step, StepCtx};
+use steps::{Capabilities, ProgressSender, Step, StepCtx};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time;
@@ -187,13 +188,14 @@ async fn run(
     attempt: Attempt,
     config: Value,
 ) -> (JoinHandle<Outcome>, Fixture) {
-    let (logs, mut log_rx) = mpsc::channel(64);
+    let (logs, mut log_rx) = ProgressSender::channel(64);
     tokio::spawn(async move { while log_rx.recv().await.is_some() {} });
     let (control_tx, control) = mpsc::channel(8);
     let invoker: Arc<dyn InvocationClient> = client.clone();
     let ctx = StepCtx {
         firing: FiringId::new(4),
         attempt,
+        max_attempts: NonZeroU32::new(3).expect("non-zero"),
         scope: ScopeId::new(0),
         node: SmolStr::new("manager"),
         config: config.clone(),
@@ -228,6 +230,7 @@ fn finished(status: RunStatus, context: &[(&str, Value)]) -> InvocationResult {
             .iter()
             .map(|(k, v)| (SmolStr::new(k), v.clone()))
             .collect(),
+        updates: BTreeMap::new(),
     }
 }
 

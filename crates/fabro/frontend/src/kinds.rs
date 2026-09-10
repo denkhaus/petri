@@ -38,10 +38,13 @@ pub const FORK_SNAPSHOT_FIELD: &str = "snapshot";
 /// The field of a fork's output that carries the fork-time stage records,
 /// when a branch target is an agent or prompt node.
 pub const FORK_NODES_FIELD: &str = "nodes";
-/// The key of the one placeholder item a `for_each` over an empty list
-/// expands to, so the fan-in still fires. The branch step for it starts no
-/// child and the fan-in drops its envelope.
-pub const EMPTY_BRANCH_MARKER: &str = "petri.parallel.empty";
+/// The field of a fork's output that names the fork occurrence: `{ fork,
+/// firing }`, the parallel node's name and the fork step's firing in its
+/// execution. The branch delegates carry it in their call slot and their
+/// events and the fan-in in its completion event, so every Fabro parallel
+/// event of one fork visit names the same occurrence the typed
+/// `fork_started` does.
+pub const FORK_OCCURRENCE_FIELD: &str = "occurrence";
 /// The context key a branch child reads the parent's stage records from: the
 /// fork snapshot its preamble is rendered from, since the child's own records
 /// are empty when its target starts.

@@ -15,20 +15,20 @@
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use ir::{FiringId, StepEvent, Value};
+use ir::{FiringId, Value};
 use pebble_coding_agent::extensions::{
     Answer as PebbleAnswer, AnswerStatus, HumanInputError, HumanInputProvider,
     Question as PebbleQuestion, QuestionKind,
 };
 use smol_str::SmolStr;
-use steps::{Answer, Question, QuestionOption};
-use tokio::sync::{mpsc, oneshot};
+use steps::{Answer, ProgressSender, Question, QuestionOption};
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 /// The agent's open questions, shared between the session's control loop
 /// and the provider Pebble calls.
 pub struct AgentQuestions {
-    logs:    mpsc::Sender<StepEvent>,
+    logs:    ProgressSender,
     node:    SmolStr,
     firing:  FiringId,
     session: OnceLock<String>,
@@ -36,7 +36,7 @@ pub struct AgentQuestions {
 }
 
 impl AgentQuestions {
-    pub fn new(logs: mpsc::Sender<StepEvent>, node: SmolStr, firing: FiringId) -> Self {
+    pub fn new(logs: ProgressSender, node: SmolStr, firing: FiringId) -> Self {
         Self {
             logs,
             node,

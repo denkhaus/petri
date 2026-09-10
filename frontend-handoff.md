@@ -225,9 +225,14 @@ on), and `synthetic: true` marks a node the frontend invented during lowering
 a child invocation, a synthetic `<fork>.fan_in`). A third key,
 `branch_role = { fork, index }` (`ir::placeholder::BRANCH_ROLE_META`), lets a
 frontend declare a node's branch membership when the branch runs in another
-invocation, and the engine's `BranchMap` honours it. A host uses these, together with the engine's branch
-role, to tell logical stages from lowering artifacts; it never reads node
-names for that.
+invocation, and the engine's `BranchMap` honours it where the node's own
+graph gives it no role (a node that forks in its own graph keeps its fork
+role, so a nested fork projects as its own occurrence). A `for_each` expansion
+item of `{"$placeholder": true}` (`ir::placeholder::PLACEHOLDER_ITEM_KEY`) is
+the one item an empty list expands to when the lowering needs the template
+to fire once; its clone is no branch to `BranchMap` or the event stream. A
+host uses these, together with the engine's branch role, to tell logical
+stages from lowering artifacts; it never reads node names for that.
 
 ## 8. Reporting
 

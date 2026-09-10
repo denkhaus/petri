@@ -521,7 +521,7 @@ pub struct MiddlewareFoldObserver {
 
 #[async_trait::async_trait]
 impl driver::EventObserver for MiddlewareFoldObserver {
-    fn on_record(&self, record: &EventRecord, state: &engine::EngineState) {
+    fn on_record(&self, record: &EventRecord, _recorded_at: u64, state: &engine::EngineState) {
         if self.chain.is_empty() {
             return;
         }

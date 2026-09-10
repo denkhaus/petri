@@ -146,7 +146,10 @@ Rules (violations are review-blockers):
 3. **Log truth** — converting a failure to `PartialSuccess` must preserve the
    real failure in `underlying`. All conversion paths: process `soft_fail`
    config; `Exhaustion::AcceptPartial` (fires whenever a retryable status hits
-   exhaustion, including `max_attempts: 1`); direct StepKind return.
+   exhaustion, including `max_attempts: 1`; `RetryPolicy::finalize`, applied
+   by the driver to every returned attempt before a host prepares the result,
+   and by the engine only to the `invalid_splice` failure it makes itself);
+   direct StepKind return.
 4. `StatusKind` is the payload-free discriminant for `retry_on` matching only —
    derived via one `From<&Status>` impl; not a second classification point
    (an explicit `PartialSuccess` entry in `retry_on` cannot defeat rule 2).
@@ -170,8 +173,9 @@ back `RetryElapsed`). **Retries are invisible everywhere except the event log:**
 routing, run-context recording, cancel-scope propagation, and `kv` merges key
 off the final attempt only. Non-final attempts' full outcomes (including their
 `context_updates`) live in their finish records for tooling. `AcceptPartial`'s
-converted outcome *is* final and merges normally. Success-like statuses are
-never retried. `Budget.max_firings` counts firings, not attempts;
+converted outcome *is* final and merges normally; the engine records the
+finish it is given and does not convert again, so a host's prepared result
+stands. Success-like statuses are never retried. `Budget.max_firings` counts firings, not attempts;
 `Budget.timeout` is per attempt.
 
 **Run context.** Core-maintained, derived state (never checkpointed
@@ -472,7 +476,13 @@ fresh per fork) — with the post-apply `EngineState` alongside, so a consumer
 resolves a firing to its node, name and `meta` in place
 (`EngineState::firing_node`, which searches live firings and history both). A
 callback, deliberately not a broadcast channel: broadcast drops on lag, and a
-store ingest must never lose a record.
+store ingest must never lose a record. `EventObserver::durable(seq)` is the
+acknowledgement seam beside it: a step's acknowledged progress send
+(`StepCtx::logs.send_acked`) resolves after the driver's append once every
+observer confirms its durable storage holds the record, and a store's write
+failure is the sender's error; an observer that stores nothing answers at
+once. A plain send is queued, ordered by the completion fence ahead of the
+attempt's outcome, and not yet durable.
 
 **Public event contract.** An observer sees records; a host projects events.
 `execution::events` (`crates/core/execution/EVENTS.md`, versioned) derives one
@@ -481,18 +491,31 @@ state, live and from a finished run dir alike (`replay_run`), with stable
 identities `(source log, seq, index)`, parent links across nested executions,
 and subjects that carry the node's `meta` and its branch role. Every event is
 derived from a durable record; the projector's `observed_at` is the one
-live-only field. The pure state machine reads no clock: observed times come
-from the driver (the attempt duration it fills into `metrics.duration_ms` when
-a step kind reported none) and from the projector. A record read back from the log is the record that was written, floats included (`serde_json` with `float_roundtrip`), so a replayed stream equals the live one event for event.
+live-only field. The pure state machine reads no clock: the recording time
+comes from the driver, which reads the wall clock once per apply after the
+append and hands it to observers (`recorded_at`; the coordinator store stamps
+its own records the same way), and the stock run-dir writer persists it in
+the `events.jsonl` framing beside the record — never in the core's
+`EventRecord`, so replay stays byte-identical — so every `RunEvent` carries
+the time its record was appended, live and on replay alike. The other
+observed times are the attempt duration the driver fills into
+`metrics.duration_ms` when a step kind reported none, and the projector's
+`observed_at`. A record read back from the log is the record that was written, floats included (`serde_json` with `float_roundtrip`), so a replayed stream equals the live one event for event.
 
 **Awaited extension points.** A host that must finish work before execution
 continues installs `driver::lifecycle::ExecutionHooks`
 (`Runtime::hooks`). The order for a completed node is: node admission
 (`before_attempt`, once per attempt, so a retry-sensitive hook runs per
 attempt; a paused firing keeps its identity, starts no attempt, and a cancel
-settles it) → the attempt → the step's own result policy → result preparation
-(`prepare_result`, before the `StepFinished` record; an adjustment keeps the
-original status and output in a recorded `result_prepared` note) → the
+settles it) → the attempt → the step's own result policy (a Fabro stage
+finalizes an exhausted retry inside the step, explicit routes first) → the
+node's exhaustion policy (`RetryPolicy::finalize`, applied once by the driver
+before the hand-off; the engine records the finish it is given) → result
+preparation (`prepare_result`, once per attempt, before the `StepFinished`
+record; on the final attempt the host is handed the effective outcome the
+engine will record and may change it, and the routes resolved below see the
+change; an adjustment keeps the original status and output in a recorded
+`result_prepared` note) → the
 canonical record → `after_record` → route selection by the decision resolver
 → `transition` (once per completed firing, no-route completions included; an
 override is traced as an intervention, a fatal error blocks every group, a
@@ -512,8 +535,9 @@ serde plus `EventLog::try_from_records(version, records)` (version checked
 under the standing no-migrator policy; seqs contiguous from 0). How records
 are framed and stored is the host's business; the stock run-dir file
 convention is one `coordinator.jsonl`, content-addressed `graphs/`, durable
-`resources/`, and one `events.jsonl` per execution. It is the standalone petri
-host's own and is documented with it, not here.
+`resources/`, and one `events.jsonl` per execution (a `LOG_VERSION` header,
+then one line per record: the record plus its `recorded_at`). It is the
+standalone petri host's own and is documented with it, not here.
 
 **Resume.** `engine::resume(graph, &log)` rebuilds a crashed run by replay and
 reconciles what is still owed. The loaded log must be a **byte-prefix** of the
@@ -743,25 +767,28 @@ details live with that host, not here.
 per-attempt timeout. `ExecutorEnforced` (the default): the driver arms the
 timer at dispatch and it counts **active work only**. A `Question` on the
 firing's progress channel starts an interaction wait for that firing and
-attempt and pauses the timer; the delivered `Answer` naming that question ends
-the wait, and the timer resumes with the remaining time once no question of
-the attempt is pending. Overlapping questions from one attempt are one pause;
-an answer to a question the attempt never asked, or asked and already had
-answered, is stale and changes nothing. Each arming has its own id, so an
+attempt and pauses the timer; the delivered `Answer` naming that question, or
+the step's own `QuestionExpired` report of it, ends the wait, and the timer
+resumes with the remaining time once no question of the attempt is pending.
+Overlapping questions from one attempt are one pause; an answer to a question
+the attempt never asked, or asked and already had answered, is stale and
+changes nothing. Each arming has its own id, so an
 expiry queued by a timer that was paused or re-armed since is ignored. A
 sibling firing's wait never touches another firing's timer. `HandlerManaged`:
 the driver arms no timer; the step consumes `timeout` itself (a process
 deadline the executor enforces through `ProcessSpec.timeout`, reported as
 `ExitStatus.timed_out`; an agent's own turn deadline; a human gate's answer
-deadline). Both kinds keep cancellation, kill and the hard deadline. Resume
+deadline, which the gate reports as a `QuestionExpired` progress event before
+it acts on it). Both kinds keep cancellation, kill and the hard deadline. Resume
 re-dispatches an attempt with a fresh budget, and the redispatched attempt's
 own question pauses that budget before any of it is charged, exactly as a
 live attempt's does. Wait starts and ends are reported through `tracing`
 (`interaction wait started` / `ended`, by firing, attempt and question id);
-the durable record is the `StepProgress` question and the `ControlRequested`
-answer in the log. The run-wide stall watchdog and the failure circuit
-breaker (`Graph.policy`) are host policies over the observer stream and the
-routing middleware; neither is a timer of the driver's.
+the durable record is the `StepProgress` question and, ending it, the
+`ControlRequested` answer or the `StepProgress` expiry in the log. The
+run-wide stall watchdog and the failure circuit breaker (`Graph.policy`) are
+host policies over the observer stream and the routing middleware; neither is
+a timer of the driver's.
 
 **Delivery.** A `DeliverControl{Deliver}` only forwards to the firing's control
 channel — no deadline, no reason: a delivered value never starts the

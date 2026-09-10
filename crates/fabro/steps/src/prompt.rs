@@ -38,11 +38,13 @@ use lithos_llm::types::{
     Message, ReasoningEffort, Request, Response, ResponseFormat, Role, TokenCounts,
 };
 use lithos_llm::{Client, Error};
+use pebble_coding_agent::ProjectMemory;
 use serde::Deserialize;
 use serde_json::json;
 use smol_str::SmolStr;
 use steps::{Step, StepCtx};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::agent::AgentBackend;
 use crate::blobs::{self, OutputStore};
@@ -51,6 +53,7 @@ use crate::fallback::{self, ModelFailure, PlanError, Requested};
 use crate::fidelity::{self, Fidelity, Incoming, Preamble, StageInfo, ThreadConfig};
 use crate::outcome::{ExplicitRoutes, Stage};
 use crate::parallel::{BRANCH_COUNT_KEY, RESULTS_KEY, parallel_complete, strip_placeholders};
+use crate::pebble::environment::PebbleEnvironment;
 use crate::pebble::{PebbleClient, TurnUsage, profile_of, speed_of};
 use crate::stage::{self, RunInfo};
 use crate::{memory, preamble};
@@ -75,75 +78,78 @@ pub struct PromptConfig {
     /// A prompt node is API-only; the lowering leaves `backend` out unless a
     /// node names one, so the default here is the only one it can run on.
     #[serde(default = "api_backend")]
-    pub backend:          AgentBackend,
-    pub label:            String,
-    pub node:             String,
+    pub backend:              AgentBackend,
+    pub label:                String,
+    pub node:                 String,
     #[serde(default)]
-    pub kind:             Option<String>,
+    pub kind:                 Option<String>,
     #[serde(default)]
-    pub goal:             String,
+    pub goal:                 String,
     #[serde(default)]
-    pub prompt:           String,
+    pub prompt:               String,
     #[serde(default)]
-    pub model:            Option<String>,
+    pub model:                Option<String>,
     #[serde(default)]
-    pub provider:         Option<String>,
+    pub provider:             Option<String>,
     #[serde(default)]
-    pub reasoning_effort: Option<String>,
+    pub reasoning_effort:     Option<String>,
     #[serde(default)]
-    pub fidelity:         Option<String>,
+    pub fidelity:             Option<String>,
     #[serde(default)]
-    pub default_fidelity: Option<String>,
+    pub default_fidelity:     Option<String>,
     #[serde(default)]
-    pub thread_id:        Option<String>,
+    pub thread_id:            Option<String>,
     #[serde(default)]
-    pub default_thread:   Option<String>,
+    pub default_thread:       Option<String>,
     #[serde(default)]
-    pub classes:          Vec<String>,
+    pub classes:              Vec<String>,
     #[serde(default)]
-    pub incoming:         Value,
+    pub incoming:             Value,
     #[serde(default)]
-    pub branch:           bool,
-    /// Fabro's `project_memory`: read the working directory's project
-    /// documents as the system prompt. Default true.
+    pub branch:               bool,
+    /// Fabro's `project_memory`: the working directory's project documents,
+    /// loaded by Pebble's loader within its budget, become the system prompt.
+    /// Default true.
     #[serde(default = "default_true")]
-    pub project_memory:   bool,
+    pub project_memory:       bool,
     #[serde(default)]
-    pub speed:            Option<String>,
+    pub speed:                Option<String>,
     #[serde(default)]
-    pub max_tokens:       Option<i64>,
+    pub max_tokens:           Option<i64>,
     /// `[run.model.fallbacks]` as lowered.
     #[serde(default)]
-    pub fallbacks:        BTreeMap<String, Vec<String>>,
+    pub fallbacks:            BTreeMap<String, Vec<String>>,
     #[serde(default)]
-    pub stages:           Value,
+    pub stages:               Value,
     #[serde(default)]
-    pub output_schema:    Option<Value>,
+    pub output_schema:        Option<Value>,
     #[serde(default = "default_output_retries")]
-    pub output_retries:   u64,
+    pub output_retries:       u64,
     #[serde(default)]
-    pub on_failure:       Option<Policy>,
+    pub on_failure:           Option<Policy>,
+    #[serde(default)]
+    pub on_retries_exhausted: Option<Policy>,
     #[serde(default, rename = "routes")]
-    pub explicit_routes:  Option<ExplicitRoutes>,
+    pub explicit_routes:      Option<ExplicitRoutes>,
     #[serde(default)]
-    pub timeout_ms:       Option<u64>,
+    pub timeout_ms:           Option<u64>,
     #[serde(default)]
-    pub kv:               Value,
+    pub kv:                   Value,
     /// A `for_each` branch's item, rendered as fenced untrusted data by the
     /// branch step. Appended after the prompt, as Fabro appends it.
     #[serde(default)]
-    pub item_data:        Option<String>,
+    pub item_data:            Option<String>,
     #[serde(default)]
-    pub nodes:            Value,
+    pub nodes:                Value,
     /// A prompted fan-in: the branch source node ids, in edge order.
     #[serde(default)]
-    pub sources:          Vec<String>,
+    pub sources:              Vec<String>,
     /// A prompted fan-in: the ordered branch results the barrier collected.
     #[serde(default)]
-    pub branch_results:   Value,
+    pub branch_results:       Value,
     /// A prompted fan-in: the parallel node it joins, for `parallel_complete`.
     #[serde(default)]
-    pub fork:             Option<String>,
+    pub fork:                 Option<String>,
 }
 
 fn default_output_retries() -> u64 {
@@ -253,11 +259,14 @@ impl Step for PromptStep {
             blobs::restore_fabro_view(&mut config.kv, &mut config.nodes, store.0.as_ref()).await;
         }
         let on_failure = config.on_failure;
+        let on_retries_exhausted = config.on_retries_exhausted;
+        let final_attempt = ctx.is_final_attempt();
         let routes = config.explicit_routes.clone();
         let kv = config.kv.clone();
         let fail = |reason: String, class: &str| {
             Stage::failed(reason, class, on_failure)
                 .with_routing(routes.clone(), kv.clone())
+                .with_retries(on_retries_exhausted, final_attempt)
                 .into_outcome(&config.node)
         };
         if config.backend == AgentBackend::Acp {
@@ -311,7 +320,7 @@ impl Step for PromptStep {
         let started = Instant::now();
         stage::record(&ctx);
         if let Some(fork) = &config.fork {
-            parallel_complete(&ctx, fork).await;
+            parallel_complete(&ctx, fork, &config.label).await;
         }
         let run_id = ctx
             .capability::<RunInfo>()
@@ -354,18 +363,20 @@ impl Step for PromptStep {
         stage.route(&plan, false, None).await;
         // Fabro's prompt handler: with `project_memory` on, the working
         // directory's instruction files for the model's profile become the
-        // system prompt.
+        // system prompt. Petri selects the paths; Pebble's loader, the one a
+        // native session runs, reads them within its budget.
         let system_prompt = if config.project_memory {
             let profile = profile_of(&client.0, &selector).unwrap_or_default();
             let paths =
                 memory::select(ctx.env.as_ref(), &profile, memory::Scope::WorkingDirOnly).await;
-            let documents = memory::read(ctx.env.as_ref(), &paths).await;
-            let text = documents
-                .iter()
-                .map(|d| d.content.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            (!text.is_empty()).then_some(text)
+            let reader = PebbleEnvironment::for_files(ctx.env.clone());
+            // The loader errs only when its token is cancelled; this one
+            // never is.
+            ProjectMemory::load(&reader, &paths, &CancellationToken::new())
+                .await
+                .ok()
+                .filter(|memory| !memory.is_empty())
+                .map(|memory| memory.text())
         } else {
             None
         };
@@ -543,7 +554,8 @@ impl Step for PromptStep {
         };
 
         let mut stage = Stage::new(StageOutcome::Succeeded, on_failure)
-            .with_routing(routes.clone(), kv.clone());
+            .with_routing(routes.clone(), kv.clone())
+            .with_retries(on_retries_exhausted, final_attempt);
         stage.output.insert("text".into(), json!(text));
         stage.output.insert("turns".into(), json!(turns));
         stage.output.insert("model".into(), json!(selector));

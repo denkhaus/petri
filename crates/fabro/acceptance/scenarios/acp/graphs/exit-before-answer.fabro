@@ -1,0 +1,13 @@
+digraph AcpExitBeforeAnswer {
+    graph [
+        goal="An ACP agent that dies before answering is started again while attempts remain",
+        backend="acp",
+        acp.command="python3 .fabro/scripted_acp_agent.py"
+    ]
+    rankdir=LR
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    agent [label="Answer once stable", prompt="Answer once you are stable. [acp:flaky]", max_retries=1, on_failure="exit"]
+    verify [shape=parallelogram, script="cat attempts.log"]
+    start -> agent -> verify -> exit
+}

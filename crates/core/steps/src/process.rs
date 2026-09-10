@@ -23,6 +23,7 @@ use tokio::time;
 use crate::ctx::{Step, StepCtx, StepFailure};
 use crate::drain::{DRAIN_IDLE_LIMIT, Drain, Forwarded, Forwarder};
 use crate::outputs::{BAD_OUTPUT_CLASS, parse};
+use crate::progress::ProgressSender;
 
 /// The step kind id the process step registers under.
 pub const PROCESS_KIND: StepKindId = StepKindId::new_static("process");
@@ -429,11 +430,7 @@ pub(crate) fn natural_outcome(status: &ExitStatus, soft_fail: &SoftFail, output:
     }
 }
 
-async fn forward_lines(
-    mut lines: executor::LineStream,
-    out: mpsc::Sender<StepEvent>,
-    forwarded: Forwarded,
-) {
+async fn forward_lines(mut lines: executor::LineStream, out: ProgressSender, forwarded: Forwarded) {
     while let Some(LogLine { stream, line, .. }) = lines.recv().await {
         if out.send(StepEvent::Log { stream, line }).await.is_err() {
             return;

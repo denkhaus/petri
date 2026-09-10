@@ -30,6 +30,7 @@ pub(crate) const BUNDLES_LOCK: &str = "../../fabro/acceptance/bundles.lock.json"
 pub(crate) const BUNDLES_DIR: &str = "../../fabro/acceptance/bundles";
 
 pub(crate) const FAMILIES: &[&str] = &[
+    "acp",
     "backend",
     "code-review",
     "security-review",
@@ -292,6 +293,14 @@ pub(crate) struct ProcessExpect {
     pub(crate) forbidden_nodes: Vec<String>,
     #[serde(default)]
     pub(crate) visits:          BTreeMap<String, u64>,
+    /// How many attempts a node's final firing took, from the node records:
+    /// how a retry within one firing is observed.
+    #[serde(default)]
+    pub(crate) attempts:        BTreeMap<String, u64>,
+    /// Texts the run's terminal output (stderr) must contain: the echoed
+    /// step lines and the run's own notices.
+    #[serde(default)]
+    pub(crate) stderr_contains: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

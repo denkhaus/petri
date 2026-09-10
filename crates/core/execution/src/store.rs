@@ -218,6 +218,7 @@ impl CoordinatorStore {
         let record = CoordinatorRecord {
             seq: self.next_seq,
             event,
+            recorded_at: driver::recorded_now(),
         };
         let mut encoded = serde_json::to_vec(&record).map_err(StoreError::Encode)?;
         encoded.push(b'\n');

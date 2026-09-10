@@ -296,6 +296,7 @@ impl ExecutionObserver for CancelOnChildLog {
         &self,
         execution: ExecutionId,
         record: &engine::EventRecord,
+        _recorded_at: u64,
         _state: &engine::EngineState,
     ) {
         if let engine::Event::StepProgress {

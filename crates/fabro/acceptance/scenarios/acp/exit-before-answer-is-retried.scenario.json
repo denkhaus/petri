@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "id": "acp/exit-before-answer-is-retried",
+  "family": "acp",
+  "title": "A scripted ACP agent exits before answering its first prompt and answers the second: the node's max_retries starts a new agent process, the firing takes two attempts, the run succeeds, and the file the agent appended on each attempt shows both.",
+  "obligation": null,
+  "bundle": {
+    "inline": "graphs/exit-before-answer.fabro"
+  },
+  "inputs": {},
+  "fixture": {
+    "commits": [
+      {
+        "message": "fixture",
+        "write": {
+          "README.md": {
+            "text": "fixture\n"
+          },
+          ".fabro/scripted_acp_agent.py": {
+            "file": "fixtures/scripted_acp_agent.py",
+            "mode": "0755"
+          },
+          ".fabro/acp-script.json": {
+            "file": "fixtures/exit-before-answer-script.json"
+          }
+        }
+      }
+    ]
+  },
+  "modes": {
+    "backend": "host",
+    "agent": "acp"
+  },
+  "services": {},
+  "interviews": [],
+  "controls": {},
+  "bounds": {
+    "deadline_ms": 120000
+  },
+  "expect": {
+    "process": {
+      "exit_code": 0,
+      "status": "success",
+      "required_nodes": [
+        "agent",
+        "verify"
+      ],
+      "forbidden_nodes": [],
+      "visits": {
+        "agent": 1,
+        "verify": 1
+      },
+      "attempts": {
+        "agent": 2
+      }
+    },
+    "context": {
+      "exact": {
+        "stable": true,
+        "last_response": "Stable now.\n{\"outcome\": \"succeeded\", \"context_updates\": {\"stable\": true}}",
+        "command.output": "attempt 1 exited\nattempt 2 answered\n"
+      },
+      "absent": [],
+      "extra_allowed": [],
+      "complete": false
+    },
+    "files": [
+      {
+        "path": "attempts.log",
+        "text": "attempt 1 exited\nattempt 2 answered\n"
+      },
+      {
+        "path": ".fabro/acp-state/acp_flaky.calls",
+        "text": "2"
+      }
+    ],
+    "side_effects": {
+      "git": [],
+      "http": []
+    },
+    "providers": {},
+    "interviews": {
+      "questions": [],
+      "errors": [],
+      "consumed": {},
+      "no_plaintext": []
+    },
+    "lifecycle": {
+      "no_leaked_processes": true,
+      "retained_workspace": true
+    }
+  }
+}
