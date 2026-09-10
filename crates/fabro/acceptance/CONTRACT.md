@@ -574,9 +574,14 @@ names the decision record under `decisions/`; "gap" names the owner.
 
 ## Library pin
 
-Pebble is pinned at `408638fe982ace5b570e04ba808be3a32d4001f7`
-(`petri/readiness-batch`), the library batch the coordinator ran after wave 3.
-Five changes reached Petri with the re-pin:
+Pebble is pinned at `6b7d26e0f791edf3381b110b78db1c5507c94f66`
+(`petri-readiness-gaps`, on top of the readiness batch's
+`408638fe982ace5b570e04ba808be3a32d4001f7`). The `petri-readiness-gaps`
+revision adds the two capabilities the readiness review's G07 and G14 asked
+for and changes no existing behavior: `CodingAgentOptions::with_max_tool_rounds`
+(a prompt ends with `Error::ToolRoundsExhausted` and a `ToolRoundsExhausted`
+event when the bound is reached) and the public `ProjectMemory` loader. The
+readiness batch itself brought five changes:
 
 - The summary call's usage and cost are in the prompt report, so
   `pebble.usage` and `pebble.cost_usd_micros` include compaction and the
@@ -610,7 +615,7 @@ fails when any of them disagree. The row names are the keys of a record's
 
 | Pin | Revision | Repository | Role |
 |---|---|---|---|
-| `pebble` | `408638fe982ace5b570e04ba808be3a32d4001f7` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
+| `pebble` | `6b7d26e0f791edf3381b110b78db1c5507c94f66` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
 | `lithos_llm` | `4aab27d7d42e7f762a8b6a3871c3db86816b0721` | `lithoscomputer/lithos-llm` (public) | provider transport and request retries |
 | `sandbox_driver` | `5b9f9dae506560f030ca4ef43d0facbe7baa99dc` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `fedab8e6b9b8e2577bee7d93812a318d6adb4aa4` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
@@ -620,7 +625,7 @@ fails when any of them disagree. The row names are the keys of a record's
 A change to Pebble, lithos-llm, or an MCP client library runs the owning
 repository's required checks before Petri moves its pin; then this table, the
 manifests, and the affected evidence records move together. The library batch
-the readiness work asked for is pinned (Pebble `408638fe`, sandbox-driver
+the readiness work asked for is pinned (Pebble `6b7d26e0`, sandbox-driver
 `5b9f9da`); the twins are pinned in both test crates that serve them.
 
 ## Readiness gate checklist
