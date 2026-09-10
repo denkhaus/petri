@@ -733,7 +733,7 @@ impl Timeline {
                     let phase = payload.get("phase").and_then(Value::as_str).unwrap_or("");
                     entry.notes.push(format!("{kind}:{phase}"));
                 }
-                (EventBody::ForkStarted { branches }, Some(entry)) => {
+                (EventBody::ForkStarted { branches, .. }, Some(entry)) => {
                     timeline.forks.push((entry.kind.clone(), branches.len()));
                 }
                 (EventBody::ForkCompleted { fork, results, .. }, _) => {

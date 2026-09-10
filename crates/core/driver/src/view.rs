@@ -85,7 +85,10 @@ pub struct BranchRef {
 /// of its own ([`ir::placeholder::BRANCH_ROLE_META`]). The node then plays
 /// [`BranchRole::Member`] of that branch even though its own graph has no
 /// fork, so hosts and events see the same role a branch that stayed in the
-/// caller's graph would have.
+/// caller's graph would have. A node that itself forks in its own graph (a
+/// nested parallel node run as a branch) keeps its own fork role, so its
+/// branches and join project as a fork occurrence of their own; the declared
+/// membership stays readable in its `meta`.
 pub use ir::placeholder::BRANCH_ROLE_META;
 
 /// The branch roles of every node in a graph, computed once per graph shape.
@@ -112,11 +115,6 @@ pub struct BranchMap {
 impl BranchMap {
     pub fn of(graph: &Graph) -> Self {
         let mut roles: BTreeMap<NodeId, BranchRole> = BTreeMap::new();
-        for node in &graph.nodes {
-            if let Some(declared) = declared_role(&node.meta) {
-                roles.insert(node.id, declared);
-            }
-        }
         for fork in &graph.nodes {
             let groups = &fork.routing.groups;
             if groups.len() < 2 {
@@ -185,6 +183,13 @@ impl BranchMap {
                         .entry(node)
                         .or_insert(BranchRole::Join { fork: fork.id });
                 }
+            }
+        }
+        // A declared membership fills in where the graph's own shape gave
+        // the node no role: a branch that left its caller's graph.
+        for node in &graph.nodes {
+            if let Some(declared) = declared_role(&node.meta) {
+                roles.entry(node.id).or_insert(declared);
             }
         }
         Self {

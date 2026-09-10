@@ -12,7 +12,8 @@ use std::{fs, thread};
 
 use execution::ExecutionObserver;
 use execution::events::{
-    CollectingSink, EventBody, EventProjector, ForkDisposition, RunEvent, replay_run,
+    CollectingSink, EventBody, EventProjector, ForkDisposition, ForkOccurrence, RunEvent,
+    replay_run,
 };
 use execution::host::{self, HostRun};
 use execution::inspect::{InvocationInspection, RunInspection, inspect_run};
@@ -128,7 +129,7 @@ fn branch_closes(events: &[RunEvent]) -> Vec<(u32, String)> {
     events
         .iter()
         .filter_map(|event| match &event.body {
-            EventBody::BranchCompleted { result } => {
+            EventBody::BranchCompleted { result, .. } => {
                 Some((result.branch.index, result.status.tag().to_owned()))
             }
             _ => None,
@@ -153,6 +154,77 @@ fn fork_closes(events: &[RunEvent]) -> Vec<(ForkDisposition, Vec<(u32, String)>)
                     .map(|result| (result.branch.index, result.status.tag().to_owned()))
                     .collect(),
             )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every `fork_started` as its occurrence and branch indexes, in record
+/// order.
+fn fork_starts(events: &[RunEvent]) -> Vec<(ForkOccurrence, Vec<u32>)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.body {
+            EventBody::ForkStarted {
+                occurrence,
+                branches,
+            } => Some((
+                occurrence.clone(),
+                branches.iter().map(|branch| branch.index).collect(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every `branch_completed` as its occurrence and branch index, in record
+/// order.
+fn branch_occurrences(events: &[RunEvent]) -> Vec<(ForkOccurrence, u32)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.body {
+            EventBody::BranchCompleted { occurrence, result } => {
+                Some((occurrence.clone(), result.branch.index))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every `fork_completed` as its occurrence and result indexes, in record
+/// order.
+fn close_occurrences(events: &[RunEvent]) -> Vec<(ForkOccurrence, Vec<u32>)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.body {
+            EventBody::ForkCompleted {
+                occurrence,
+                results,
+                ..
+            } => Some((
+                occurrence.clone(),
+                results.iter().map(|result| result.branch.index).collect(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `occurrence.firing` a `fabro.parallel.*` payload names.
+fn custom_occurrence(event: &Value) -> u64 {
+    event["occurrence"]["firing"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("an occurrence on {event}"))
+}
+
+/// The call slots of every child invocation, in declaration order.
+fn child_slots(events: &[RunEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match &event.body {
+            EventBody::InvocationDeclared {
+                call: Some(call), ..
+            } => Some(call.slot.to_string()),
             _ => None,
         })
         .collect()
@@ -433,11 +505,14 @@ async fn a_succeed_policy_promotes_a_failed_branch_before_collection() {
     assert_eq!(status_of(&report, "soft").as_deref(), Some("success"));
 }
 
+/// Two branches with the same target are two branches of one fork
+/// occurrence, told apart by index everywhere: the envelopes, the typed
+/// branch events and the children's call slots.
 #[tokio::test]
 async fn duplicate_targets_are_separate_branches_with_their_own_index() {
     let dir = RunDir::new("parallel-duplicate");
     let rt = runtime(dir.path());
-    let report = run(
+    let (report, events) = run_projected(
         &rt,
         lower(&dot(r#"
         fork [shape=component]
@@ -449,6 +524,7 @@ async fn duplicate_targets_are_separate_branches_with_their_own_index() {
         a -> merge
         merge -> exit
     "#)),
+        |_| {},
     )
     .await;
     assert_eq!(
@@ -465,6 +541,26 @@ async fn duplicate_targets_are_separate_branches_with_their_own_index() {
     assert_eq!(results[1]["index"], json!(1));
     assert_eq!(status_of(&report, "a.branch1").as_deref(), Some("success"));
     assert_eq!(invocation_count(dir.path()), 3);
+
+    let starts = fork_starts(&events);
+    assert_eq!(starts.len(), 1, "{starts:#?}");
+    let (occurrence, branches) = &starts[0];
+    assert_eq!(*branches, vec![0, 1]);
+    assert_eq!(occurrence.visit, 1);
+    assert_eq!(branch_occurrences(&events), vec![
+        (occurrence.clone(), 0),
+        (occurrence.clone(), 1),
+    ]);
+    assert_eq!(close_occurrences(&events), vec![(
+        occurrence.clone(),
+        vec![0, 1]
+    )]);
+    let firing = occurrence.firing.raw();
+    assert_eq!(child_slots(&events), vec![
+        format!("branch:fork@{firing}:0:a"),
+        format!("branch:fork@{firing}:1:a"),
+    ]);
+    assert_replay_matches(dir.path(), &events);
 }
 
 const FOR_EACH: &str = r#"
@@ -507,7 +603,7 @@ async fn an_empty_for_each_list_joins_with_no_branches_and_no_child() {
     let forks: Vec<(String, Vec<u32>)> = events
         .iter()
         .filter_map(|event| match &event.body {
-            EventBody::ForkStarted { branches } => Some((
+            EventBody::ForkStarted { branches, .. } => Some((
                 event
                     .subject
                     .as_ref()
@@ -585,11 +681,16 @@ async fn for_each_items_are_labelled_and_ordered_by_index() {
     assert_eq!(invocation_count(dir.path()), 4);
 }
 
+/// A fork visited twice is two fork occurrences: each visit's `fork_started`,
+/// `branch_completed` and `fork_completed` name its own occurrence (the
+/// fork's firing and visit), the `fabro.parallel.*` events and the
+/// children's call slots name the same firing, and nothing about the second
+/// visit matches the first by position.
 #[tokio::test]
 async fn a_repeated_fork_publishes_results_per_visit_with_its_own_children() {
     let dir = RunDir::new("parallel-repeat");
     let rt = runtime(dir.path());
-    let report = run(
+    let (report, events) = run_projected(
         &rt,
         lower(&dot(r#"
         fork [shape=component]
@@ -606,6 +707,7 @@ async fn a_repeated_fork_publishes_results_per_visit_with_its_own_children() {
         check -> exit [condition="context.done=yes"]
         check -> fork
     "#)),
+        |_| {},
     )
     .await;
     assert_eq!(
@@ -629,13 +731,74 @@ async fn a_repeated_fork_publishes_results_per_visit_with_its_own_children() {
         json!("second\n")
     );
     assert_eq!(invocation_count(dir.path()), 5, "two children per visit");
+
+    let starts = fork_starts(&events);
+    assert_eq!(starts.len(), 2, "{starts:#?}");
+    let (first, second) = (&starts[0].0, &starts[1].0);
+    assert_eq!(first.fork, second.fork, "one fork node");
+    assert_eq!(first.execution, second.execution);
+    assert_ne!(first.firing, second.firing, "two occurrences");
+    assert_eq!((first.visit, second.visit), (1, 2));
+    assert_ne!(first.generation, second.generation);
+    assert_eq!(starts[0].1, vec![0, 1]);
+    assert_eq!(starts[1].1, vec![0, 1]);
+    assert_eq!(branch_occurrences(&events), vec![
+        (first.clone(), 0),
+        (first.clone(), 1),
+        (second.clone(), 0),
+        (second.clone(), 1),
+    ]);
+    assert_eq!(close_occurrences(&events), vec![
+        (first.clone(), vec![0, 1]),
+        (second.clone(), vec![0, 1]),
+    ]);
+    // The Fabro events of each visit name the same occurrence, by the
+    // fork's firing in the execution.
+    for kind in [
+        "fabro.parallel.branch.started",
+        "fabro.parallel.branch.completed",
+    ] {
+        let mut firings: Vec<u64> = customs(&events, kind)
+            .iter()
+            .map(custom_occurrence)
+            .collect();
+        firings.sort_unstable();
+        assert_eq!(
+            firings,
+            vec![
+                first.firing.raw(),
+                first.firing.raw(),
+                second.firing.raw(),
+                second.firing.raw()
+            ],
+            "{kind}"
+        );
+    }
+    let completed = customs(&events, "fabro.parallel.completed");
+    assert_eq!(
+        completed.iter().map(custom_occurrence).collect::<Vec<_>>(),
+        vec![first.firing.raw(), second.firing.raw()]
+    );
+    assert_eq!(completed[0]["fork"], json!("fork"));
+    // Each child's call slot names its visit's occurrence.
+    let (first_firing, second_firing) = (first.firing.raw(), second.firing.raw());
+    assert_eq!(child_slots(&events), vec![
+        format!("branch:fork@{first_firing}:0:a"),
+        format!("branch:fork@{first_firing}:1:b"),
+        format!("branch:fork@{second_firing}:0:a"),
+        format!("branch:fork@{second_firing}:1:b"),
+    ]);
+    assert_replay_matches(dir.path(), &events);
 }
 
+/// An inner fork inside a branch is its own occurrence in the branch's child
+/// execution: the outer and inner events never share an occurrence, and the
+/// Fabro completion events name their own fork.
 #[tokio::test]
 async fn a_nested_fork_runs_inside_its_branch_and_reports_its_own_results() {
     let dir = RunDir::new("parallel-nested");
     let rt = runtime(dir.path());
-    let report = run(
+    let (report, events) = run_projected(
         &rt,
         lower(&dot(r#"
         outer [shape=component]
@@ -656,6 +819,7 @@ async fn a_nested_fork_runs_inside_its_branch_and_reports_its_own_results() {
         inner_join -> outer_join
         outer_join -> exit
     "#)),
+        |_| {},
     )
     .await;
     assert_eq!(
@@ -680,6 +844,40 @@ async fn a_nested_fork_runs_inside_its_branch_and_reports_its_own_results() {
     );
     // Root, x, inner, p, q.
     assert_eq!(invocation_count(dir.path()), 5);
+
+    // The outer fork starts first; the inner one, inside branch 1's child,
+    // starts and closes before the outer join fires.
+    let starts = fork_starts(&events);
+    assert_eq!(starts.len(), 2, "{starts:#?}");
+    let (outer, inner) = (&starts[0].0, &starts[1].0);
+    assert_eq!(outer.execution.raw(), 0, "the outer fork is in the root");
+    assert_ne!(
+        inner.execution, outer.execution,
+        "the inner fork runs in its branch's child"
+    );
+    assert_ne!(inner.fork, outer.fork);
+    assert_eq!(branch_occurrences(&events), vec![
+        (inner.clone(), 0),
+        (inner.clone(), 1),
+        (outer.clone(), 0),
+        (outer.clone(), 1),
+    ]);
+    assert_eq!(close_occurrences(&events), vec![
+        (inner.clone(), vec![0, 1]),
+        (outer.clone(), vec![0, 1]),
+    ]);
+    let completed = customs(&events, "fabro.parallel.completed");
+    assert_eq!(completed.len(), 2, "{completed:#?}");
+    let of = |fork: &str| {
+        completed
+            .iter()
+            .find(|event| event["fork"] == json!(fork))
+            .cloned()
+            .unwrap_or_else(|| panic!("`{fork}` completed: {completed:#?}"))
+    };
+    assert_eq!(custom_occurrence(&of("outer")), outer.firing.raw());
+    assert_eq!(custom_occurrence(&of("inner")), inner.firing.raw());
+    assert_replay_matches(dir.path(), &events);
 }
 
 #[tokio::test]
@@ -782,6 +980,25 @@ async fn a_clean_cancel_during_work_closes_the_branches_and_the_fork() {
         ForkDisposition::Cancelled,
         vec![(0, "cancelled".to_owned()), (1, "cancelled".to_owned()),]
     )]);
+    // The closure names the occurrence the start announced, as do the
+    // branches and the Fabro events.
+    let starts = fork_starts(&events);
+    assert_eq!(starts.len(), 1);
+    let occurrence = &starts[0].0;
+    assert_eq!(close_occurrences(&events), vec![(
+        occurrence.clone(),
+        vec![0, 1]
+    )]);
+    assert!(
+        branch_occurrences(&events)
+            .iter()
+            .all(|(branch, _)| branch == occurrence)
+    );
+    assert!(
+        completed
+            .iter()
+            .all(|event| custom_occurrence(event) == occurrence.firing.raw())
+    );
     for invocation in 0..3 {
         assert_eq!(
             kills_in(&events, invocation),
@@ -1131,7 +1348,7 @@ fn fan_out_over(n: usize) -> String {
 
 /// The branch children of `fork`, in declaration order.
 fn children_of<'a>(inspection: &'a RunInspection, fork: &str) -> Vec<&'a InvocationInspection> {
-    let prefix = format!("branch:{fork}:");
+    let prefix = format!("branch:{fork}@");
     inspection
         .invocations
         .iter()

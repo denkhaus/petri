@@ -185,14 +185,21 @@ async fn parallel_gates_are_answered_out_of_order_and_each_answer_lands_on_its_o
     for record in &receipt.questions {
         assert_eq!(record.delivery, Delivery::Delivered);
         // Each gate ran in its branch's child invocation, whose call slot
-        // names the fork, the branch index and the target.
-        assert_eq!(
-            record.invocation_path,
-            format!(
-                "/branch:fan:{}:{}",
+        // names the fork, the fork's firing (its occurrence), the branch
+        // index and the target.
+        assert!(
+            record.invocation_path.starts_with("/branch:fan@"),
+            "{}",
+            record.invocation_path
+        );
+        assert!(
+            record.invocation_path.ends_with(&format!(
+                ":{}:{}",
                 i32::from(record.node != "a"),
                 record.node
-            )
+            )),
+            "{}",
+            record.invocation_path
         );
         assert_eq!(record.occurrence, 1);
         assert_eq!(record.ask, 1);

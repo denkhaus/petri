@@ -12,8 +12,10 @@
 //! above [`blobs::FAN_OUT_OFFLOAD_THRESHOLD`]. The snapshot then holds
 //! `blob://sha256/<hex>` references in their place, one blob per value for
 //! the whole fork, and the bytes per child do not grow with the item count.
-//! The step's output is `{ snapshot, nodes }`; the parent's own `kv` is not
-//! changed.
+//! The step's output is `{ snapshot, nodes, occurrence }`, where
+//! `occurrence` is `{ fork, firing }`: this visit of the parallel node, which
+//! every branch's call slot and every `fabro.parallel.*` event of the visit
+//! names. The parent's own `kv` is not changed.
 //!
 //! The branch step is the parent-side half of one branch. It takes the fork
 //! snapshot from its input, starts the branch's child graph as an internal
@@ -45,7 +47,7 @@ use execution::{
 use frontend_fabro::hooks::HookEvent;
 use frontend_fabro::kinds::{
     BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_NODES_KEY, FAN_IN_KIND, FORK_KIND, FORK_NODES_FIELD,
-    FORK_SNAPSHOT_FIELD, StageOutcome,
+    FORK_OCCURRENCE_FIELD, FORK_SNAPSHOT_FIELD, StageOutcome,
 };
 use ir::placeholder::{is_placeholder_item, placeholder_item};
 use ir::{
@@ -73,17 +75,20 @@ pub const RESULTS_KEY: &str = "parallel.results";
 pub const BRANCH_COUNT_KEY: &str = "parallel.branch_count";
 
 /// The `kind` of the `StepEvent::Custom` payload a branch emits when its
-/// child starts: `{ kind, fork, branch, index, item_label, invocation }`.
+/// child starts: `{ kind, fork, occurrence, branch, index, item_label,
+/// invocation }`. `occurrence` is `{ fork, firing }`, the fork visit this
+/// branch belongs to (the fork step's firing in the event's execution), the
+/// same one the typed `fork_started` names.
 pub const BRANCH_STARTED_EVENT: &str = "fabro.parallel.branch.started";
 /// The `kind` of the payload a branch emits when it reached its end, whether
 /// its child finished, was cancelled or killed, or never started: `{ kind,
-/// fork, branch, index, item_label, invocation, status, disposition, started,
-/// duration_ms }`. `status` is the envelope's Fabro status; `disposition` is
-/// one of [`BranchDisposition`]'s names; `started` says whether the child's
-/// engine ever started.
+/// fork, occurrence, branch, index, item_label, invocation, status,
+/// disposition, started, duration_ms }`. `status` is the envelope's Fabro
+/// status; `disposition` is one of [`BranchDisposition`]'s names; `started`
+/// says whether the child's engine ever started.
 pub const BRANCH_COMPLETED_EVENT: &str = "fabro.parallel.branch.completed";
-/// The `kind` of the payload the fan-in emits: `{ kind, node, branch_count,
-/// success_count, failure_count, status }`.
+/// The `kind` of the payload the fan-in emits: `{ kind, node, fork,
+/// occurrence, branch_count, success_count, failure_count, status }`.
 pub const FORK_COMPLETED_EVENT: &str = "fabro.parallel.completed";
 
 /// The failure class when a fan-in received no branch envelopes.
@@ -155,6 +160,7 @@ impl Step for ForkStep {
         Outcome::success(json!({
             FORK_SNAPSHOT_FIELD: snapshot,
             FORK_NODES_FIELD: nodes,
+            FORK_OCCURRENCE_FIELD: { "fork": config.node, "firing": ctx.firing.raw() },
         }))
     }
 }
@@ -192,6 +198,10 @@ pub struct BranchConfig {
     /// The fork visit: repeated visits of one fork get their own gate.
     #[serde(default)]
     pub generation:   u64,
+    /// The fork step's firing, from its output: the fork occurrence this
+    /// branch belongs to, which its call slot and its events name.
+    #[serde(default)]
+    pub fork_firing:  u64,
 }
 
 pub struct BranchStep;
@@ -458,8 +468,8 @@ impl Step for BranchStep {
                 firing:  ctx.firing,
                 attempt: ctx.attempt,
                 slot:    SmolStr::new(format!(
-                    "branch:{}:{}:{}",
-                    config.fork, config.index, config.node
+                    "branch:{}@{}:{}:{}",
+                    config.fork, config.fork_firing, config.index, config.node
                 )),
             },
             graph: config.child_digest,
@@ -473,6 +483,7 @@ impl Step for BranchStep {
         };
         let identity = json!({
             "fork": config.fork,
+            FORK_OCCURRENCE_FIELD: { "fork": config.fork, "firing": config.fork_firing },
             "branch": config.node,
             "index": config.index,
             "item_label": label,
@@ -597,16 +608,20 @@ fn elapsed_ms(since: Instant) -> u64 {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FanInConfig {
-    pub label:   String,
-    pub node:    String,
+    pub label:       String,
+    pub node:        String,
     /// The parallel node whose branches this join collects, for the
     /// `parallel_complete` hook.
     #[serde(default)]
-    pub fork:    String,
+    pub fork:        String,
     /// The branch envelopes, in branch order, as the join's inputs carried
     /// them.
     #[serde(default)]
-    pub results: Value,
+    pub results:     Value,
+    /// The fork occurrence each input token named, in the same order: one
+    /// value, repeated, for the branches of one fork visit.
+    #[serde(default)]
+    pub occurrences: Vec<Value>,
 }
 
 /// Fabro's `parallel_complete`: every branch of `fork` is in, before the
@@ -693,11 +708,19 @@ impl Step for FanInStep {
             .iter()
             .filter(|r| r.get("status").and_then(Value::as_str) == Some("failed"))
             .count();
+        let occurrence = config
+            .occurrences
+            .iter()
+            .find(|occurrence| !occurrence.is_null())
+            .cloned()
+            .unwrap_or(Value::Null);
         let _ = ctx
             .logs
             .send(StepEvent::Custom(json!({
                 "kind": FORK_COMPLETED_EVENT,
                 "node": config.node,
+                "fork": config.fork,
+                FORK_OCCURRENCE_FIELD: occurrence,
                 "branch_count": items.len(),
                 "success_count": success_count,
                 "failure_count": failure_count,

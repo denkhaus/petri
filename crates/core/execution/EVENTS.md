@@ -34,6 +34,15 @@ Visits and attempts are distinct: a retry advances `attempt` and keeps the
 firing and visit; a loop that fires the node again starts a new firing and
 advances `visit`.
 
+A fork's branch events (`fork_started`, `branch_completed`, `fork_completed`)
+carry a `ForkOccurrence`: the parent execution, the fork node, the fork's
+firing, its visit and its generation. It is the one reference for one
+occurrence of a fork. A host keys a repeated visit of one fork, a fork inside
+a branch (its own occurrence, in the branch's child execution), or two
+branches with the same target on it, never on the most recent fork it saw.
+The static `BranchRef {fork, index}` beside it names the branch within the
+fork's shape.
+
 ## Source metadata
 
 `subject.node.meta` is the frontend's node metadata. The Fabro frontend sets
@@ -43,8 +52,11 @@ advances `visit`.
 invented. A `parallel.branch` node is the parent-side delegate of one branch;
 its `meta.branch = { fork, target, index }` names the branch, and the branch's
 stage itself runs in the child invocation the delegate starts (the child's
-entry node carries `meta.branch_role = { fork, index }`). A synthetic
-`<fork>.fan_in` is a `parallel.fan_in` with `synthetic: true`. A host
+entry node carries `meta.branch_role = { fork, index }`, which gives it the
+member role in its own graph unless it is itself a fork: a nested parallel
+node keeps its fork role there, and its branches project as a fork occurrence
+of their own). A synthetic `<fork>.fan_in` is a `parallel.fan_in` with
+`synthetic: true`. A host
 distinguishes logical stages from lowering artifacts with these fields and
 with `BranchRole`, never with node names.
 
@@ -85,7 +97,7 @@ Execution events (engine log), each attributed to a subject where one exists:
 | `visit_completed` | the firing's final record exists; `executed` is false for a synthesized completion (false precondition, cancelled scope, blocked or skipped admission); `attempts` is the count |
 | `routes_resolved` | one `RouteChoice` per group with the decision, resolved target, interventions (overrides, jumps, blocks) and whether a weighted draw happened |
 | `route_applied` | one applied route: edge (with target, transition, back), jump, or none |
-| `fork_started`, `branch_completed`, `fork_completed` | a fork's branches start; a branch reaches its end; the fork's branches are all accounted for, in branch order, with the `disposition` that closed them (`joined`, `cancelled`, `killed`; see "Fork closure"). A static fork's branches are its routing groups; a `for_each` expansion's branches are its clones, in item order, and the fork is the node that fanned out into the template (Fabro's `parallel` node), so both fan-outs carry the same identities |
+| `fork_started`, `branch_completed`, `fork_completed` | a fork's branches start; a branch reaches its end; the fork's branches are all accounted for, in branch order, with the `disposition` that closed them (`joined`, `cancelled`, `killed`; see "Fork closure"). All three carry the `ForkOccurrence` of the fork visit; `branch_completed`'s subject is the branch's last firing with its visit, attempt and generation. A static fork's branches are its routing groups; a `for_each` expansion's branches are its clones, in item order, and the fork is the node that fanned out into the template (Fabro's `parallel` node), so both fan-outs carry the same identities |
 | `node_expanded` | a `for_each` expansion with its clones |
 | `question_asked`, `control_delivered` | a question on the firing's progress channel; a host control decoded as an answer when it is one, with whether the firing could receive it |
 | `wait_state_changed` | `awaiting_admission`, `running`, `awaiting_answer`, `awaiting_retry`, `cancelling` |
@@ -123,9 +135,11 @@ keeps whichever copy it deduplicated first.
 
 Every fork that announced `fork_started` closes with exactly one
 `fork_completed`, live and on replay, whatever stopped it. The projection
-keeps each open fork by the fork node's firing and ties its branches and its
+keeps each open fork by its `ForkOccurrence` and ties its branches and its
 join to that occurrence through the generation the fork's tokens carry, so
-two visits of one fork or a fork inside a branch never share a closure.
+two visits of one fork or a fork inside a branch never share a closure, and
+every `branch_completed` and `fork_completed` names the occurrence its
+`fork_started` announced.
 
 | `disposition` | When | Each `branch_completed` | `results` |
 | --- | --- | --- | --- |
@@ -148,10 +162,10 @@ cancellation, and this contract does not claim it does.
 
 | Petri | Fabro |
 | --- | --- |
-| `fork_started` | `parallel.started` |
-| `fabro.parallel.branch.started {fork, branch, index, item_label, invocation}`, emitted once the child's engine has started (it holds a slot under the fork's gate, as Fabro's branch holds a permit) | `parallel.branch.started` |
-| `fabro.parallel.branch.completed {fork, branch, index, item_label, invocation, status, disposition, started, duration_ms}`, emitted on every path a branch ends. `status` is the envelope's Fabro status; `disposition` is `completed` (the child finished; `status` says how), `cancelled` (the child settled cancelled; `status` is `failed`), `killed` (the stop escalated to a kill before the child settled; `failed`) or `failed_to_start` (the child could not be declared; `failed`); `started` is whether the child's engine ever started (false for a queued branch the cancel reached first) | `parallel.branch.completed` with the same `status`, for every event with `started: true`. Fabro emits none for a branch that never held a slot, so a host projecting Fabro's stream drops `started: false`. Fabro reports a cancelled branch as `failed` with duration 0; Petri carries the observed duration |
-| `fabro.parallel.completed {node, branch_count, success_count, failure_count, status}`, emitted by the fan-in when it runs | `parallel.completed`. Neither engine emits it for a cancelled or killed fork; the terminal group fact is then Petri's `fork_completed {disposition}`, which Fabro has no event for |
+| `fork_started {occurrence}` | `parallel.started`; Fabro's `parallel_group_id` (`node@visit`) is the occurrence's fork node and visit |
+| `fabro.parallel.branch.started {fork, occurrence, branch, index, item_label, invocation}`, emitted once the child's engine has started (it holds a slot under the fork's gate, as Fabro's branch holds a permit). `occurrence` is `{fork, firing}`: the fork step's firing in the event's execution, the same firing the typed `fork_started` names. The child's `invocation_declared.call.slot` is `branch:<fork>@<firing>:<index>:<target>`, so the child link names the occurrence too | `parallel.branch.started` |
+| `fabro.parallel.branch.completed {fork, occurrence, branch, index, item_label, invocation, status, disposition, started, duration_ms}`, emitted on every path a branch ends. `status` is the envelope's Fabro status; `disposition` is `completed` (the child finished; `status` says how), `cancelled` (the child settled cancelled; `status` is `failed`), `killed` (the stop escalated to a kill before the child settled; `failed`) or `failed_to_start` (the child could not be declared; `failed`); `started` is whether the child's engine ever started (false for a queued branch the cancel reached first) | `parallel.branch.completed` with the same `status`, for every event with `started: true`. Fabro emits none for a branch that never held a slot, so a host projecting Fabro's stream drops `started: false`. Fabro reports a cancelled branch as `failed` with duration 0; Petri carries the observed duration |
+| `fabro.parallel.completed {node, fork, occurrence, branch_count, success_count, failure_count, status}`, emitted by the fan-in when it runs, with the occurrence its inputs carried | `parallel.completed`. Neither engine emits it for a cancelled or killed fork; the terminal group fact is then Petri's `fork_completed {disposition}`, which Fabro has no event for |
 
 ## Ordering and delivery
 
@@ -229,8 +243,8 @@ also carries `node`, `firing` and `attempt` beside the event's `subject`.
 | `stage.started/completed/failed/retrying` | `visit_started`, `attempt_admitted`, `attempt_started`, `attempt_finished {final, exhausted}`, `retry_scheduled`, `retry_elapsed`, `visit_completed {executed, attempts}`; `subject.node.meta.kind` and `synthetic` map lowering nodes to the logical stage | node, firing, visit, attempt, generation | durable | `embedding::the_workflow_runs_without_adapters_…` (the retry), `embedding_readiness` (every logical stage's final status) |
 | `stage.prompt`, `prompt.completed` | `step_custom` kinds `fabro.prompt`, `fabro.prompt.completed`; a prompt node's `attempt_finished` output | node, firing, attempt | durable | `petri-fabro-steps::prompt` (prompt events), `fabro_blackbox::a_prompt_node_makes_one_tool_free_model_call` |
 | `edge.selected`, `loop.restart` | `routes_resolved {choices}` (decision, target, overrides, jumps, blocks, weighted draw), `route_applied {edge / jump / none, transition, back}`; a restart is `execution_finished {Restart}` then `execution_declared {predecessor}` | firing, edge, execution | durable | `embedding::transitions_override_block_or_continue`, `controls::node_visit_totals_survive_a_restart_while_context_resets` |
-| `parallel.started`, branch start and completion, `parallel.completed` (static fan-out) | `fork_started {branches}`, `branch_completed {result}`, `fork_completed {fork, results, disposition}` in branch order; `BranchRole` on every subject; the `fabro.parallel.*` `step_custom` events with the branch dispositions ("Fork closure") | fork node, `BranchRef {fork, index}` | durable | `embedding::the_workflow_runs_without_adapters_…` (`forks`, `joins`); `petri-fabro-steps::parallel` (`a_clean_cancel_during_work_closes_the_branches_and_the_fork`, `a_cancel_before_admission_records_a_branch_that_never_started`, `a_cancel_before_the_fan_in_keeps_the_finished_branch_result`, `a_kill_after_the_cancel_closes_the_fork_as_killed`: every closure live and through `replay_run`) |
-| the same for a `for_each` fan-out (an expansion) | the same three bodies, with the same identities: `fork_started {branches}` on the parallel node once the expansion knows its items (one `BranchRef {fork, index}` per item, in item order; none for an empty list), `branch_completed {result}` per clone as its token reaches the fan-in, `fork_completed {fork, results}` at the fan-in in item order; the clones are `member {fork, index}`, the fan-in `join {fork}`. Beside them: `node_expanded {clones}`; one `invocation_declared` per branch child with its `parent` link, `invocation_finished` per child; `step_custom` kinds `fabro.parallel.branch.started`, `fabro.parallel.branch.completed` (the delegates) and `fabro.parallel.completed` (the fan-in, with `parallel.results`). The roles come from one mechanism for both fan-outs: `BranchMap::of` reads the graph shape, `BranchMap::with_expansions` reads the engine's applied splices (the template, its clones by item index, the one node whose forward arm reaches the template as the fork) | fork node, `BranchRef {fork, index}`, child invocation | durable | `embedding::the_milestone_workflow_runs_through_the_embedding_boundary` (`fork:2`, `join`, `forks`, `joins`; live equals replay), `fabro_blackbox::for_each_branches_keep_distinct_values_under_one_key_in_item_order` (the three bodies through `replay_run`), `embedding_readiness`, `fabro_readiness_blackbox` (one expansion, one fork, one join, two children) |
+| `parallel.started`, branch start and completion, `parallel.completed` (static fan-out) | `fork_started {occurrence, branches}`, `branch_completed {occurrence, result}`, `fork_completed {occurrence, fork, results, disposition}` in branch order; `BranchRole` on every subject; the `fabro.parallel.*` `step_custom` events with the same occurrence and the branch dispositions ("Fork closure") | `ForkOccurrence {execution, fork, firing, visit, generation}`, `BranchRef {fork, index}` | durable | `embedding::the_workflow_runs_without_adapters_…` (`forks`, `joins`); `petri-fabro-steps::parallel` (`a_repeated_fork_publishes_results_per_visit_with_its_own_children`, `duplicate_targets_are_separate_branches_with_their_own_index`, `a_nested_fork_runs_inside_its_branch_and_reports_its_own_results`: two visits, duplicate targets and a nested fork each keyed on their own occurrence, live and replayed; `a_clean_cancel_during_work_closes_the_branches_and_the_fork`, `a_cancel_before_admission_records_a_branch_that_never_started`, `a_cancel_before_the_fan_in_keeps_the_finished_branch_result`, `a_kill_after_the_cancel_closes_the_fork_as_killed`: every closure live and through `replay_run`) |
+| the same for a `for_each` fan-out (an expansion) | the same three bodies, with the same identities: `fork_started {occurrence, branches}` on the parallel node once the expansion knows its items (one `BranchRef {fork, index}` per item, in item order; none for an empty list), `branch_completed {occurrence, result}` per clone as its token reaches the fan-in, `fork_completed {occurrence, fork, results}` at the fan-in in item order; the clones are `member {fork, index}`, the fan-in `join {fork}`. Beside them: `node_expanded {clones}`; one `invocation_declared` per branch child with its `parent` link, `invocation_finished` per child; `step_custom` kinds `fabro.parallel.branch.started`, `fabro.parallel.branch.completed` (the delegates) and `fabro.parallel.completed` (the fan-in, with `parallel.results`). The roles come from one mechanism for both fan-outs: `BranchMap::of` reads the graph shape, `BranchMap::with_expansions` reads the engine's applied splices (the template, its clones by item index, the one node whose forward arm reaches the template as the fork) | `ForkOccurrence`, `BranchRef {fork, index}`, child invocation (its call slot names the occurrence) | durable | `embedding::the_milestone_workflow_runs_through_the_embedding_boundary` (`fork:2`, `join`, `forks`, `joins`; live equals replay), `fabro_blackbox::for_each_branches_keep_distinct_values_under_one_key_in_item_order` (the three bodies through `replay_run`), `embedding_readiness`, `fabro_readiness_blackbox` (one expansion, one fork, one join, two children) |
 | `interview.started/completed/timeout/interrupted` | `question_asked {question}` (type, choices, interaction identity), `wait_state_changed {awaiting_answer}`, `control_delivered {Answer, deliverable}`; expiry and interruption are the attempt's `TimedOut`/`Cancelled` status; a sensitive answer stays `{"$secret": …}` | node, firing, attempt, question id | durable | `embedding::the_workflow_runs_without_adapters_…`, `embedding_readiness` (`questions`, `answers`), `petri::interview` (the interviewer contract), `inspect_cli::inspect_shows_a_sensitive_answer_as_a_secret_reference_only` |
 | `command.started/completed` | `attempt_started`, `attempt_finished {outcome}` (`metrics.exit_code`, `duration_ms`, `output`), `output_line`, `artifact_recorded` | node, firing, attempt | durable | `embedding::the_workflow_runs_without_adapters_…` |
 | `agent.*` session, tool calls, LLM requests, steering | `agent_activity {backend, session, parent_session, tool_call, stream, stream_seq, envelope}`: Pebble's own `CodingAgentEvent` envelope, one stream per session | session id, stream id and sequence, tool call id | durable | `fabro_subagents_blackbox::a_parent_delegates_a_workspace_change_to_a_child`, `embedding_readiness` |

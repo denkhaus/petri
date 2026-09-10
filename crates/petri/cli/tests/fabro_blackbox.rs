@@ -2010,11 +2010,14 @@ async fn parallel_gates_bind_each_answer_to_its_own_branch() {
         assert_eq!(question["delivery"], json!("delivered"));
         let expected = if question["node"] == "a" { "N" } else { "Y" };
         assert_eq!(question["reply"]["choice"], json!(expected), "{question}");
+        // The path is the branch child's call slot: the fork, the fork's
+        // firing (its occurrence), the branch index and the target.
         let index = i32::from(question["node"] != "a");
-        assert_eq!(
-            question["invocation_path"],
-            json!(format!(
-                "/branch:fan:{index}:{}",
+        let path = question["invocation_path"].as_str().expect("a path");
+        assert!(path.starts_with("/branch:fan@"), "{question}");
+        assert!(
+            path.ends_with(&format!(
+                ":{index}:{}",
                 question["node"].as_str().expect("node")
             )),
             "{question}"
@@ -2360,10 +2363,10 @@ fn assert_for_each_fork_events(run_dir: &Path, items: u32) {
             .unwrap_or_default()
             .to_owned();
         match &event.body {
-            EventBody::ForkStarted { branches: refs } => {
+            EventBody::ForkStarted { branches: refs, .. } => {
                 forks.push((node, kind, refs.iter().map(|b| b.index).collect::<Vec<_>>()));
             }
-            EventBody::BranchCompleted { result } => {
+            EventBody::BranchCompleted { result, .. } => {
                 branches.push((
                     result.branch.index,
                     result.node.name.to_string(),
@@ -2514,7 +2517,7 @@ async fn a_fifty_item_fork_declares_small_children_and_prompts_still_see_the_lis
         .filter(|i| {
             i["parent"]["slot"]
                 .as_str()
-                .is_some_and(|slot| slot.starts_with("branch:fan:"))
+                .is_some_and(|slot| slot.starts_with("branch:fan@"))
         })
         .collect();
     assert_eq!(children.len(), 50);

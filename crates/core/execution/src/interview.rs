@@ -78,8 +78,8 @@
 //! dispatcher orders the receipt's `questions` itself when it produces the
 //! receipt: by invocation path, then invocation, execution, firing,
 //! occurrence, and ask. The root invocation's questions (`/`) come first
-//! and each nested invocation's follow in path order (`/branch:fan:0:a`
-//! before `/branch:fan:1:b`); the path leads because invocation ids are
+//! and each nested invocation's follow in path order (`/branch:fan@2:0:a`
+//! before `/branch:fan@2:1:b`); the path leads because invocation ids are
 //! allocated in declaration order, which two parallel branches decide by
 //! timing, while the path is the same on every run. The id then orders
 //! re-invocations of one slot, and within one invocation the key is the

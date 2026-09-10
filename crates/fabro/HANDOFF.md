@@ -60,7 +60,11 @@ subset; the unconfigured path stays the standalone runner.
   `for_each`: the parallel node is the fork, each branch node or clone a
   member of its index, the fan-in the join. `fork_started`,
   `branch_completed` and `fork_completed` carry the same `BranchRef {fork,
-  index}` for both; the `fabro.parallel.*` payloads carry the index as well.
+  index}` for both and one `ForkOccurrence {execution, fork, firing, visit,
+  generation}` per fork visit; the `fabro.parallel.*` payloads carry the
+  index and the same occurrence (`{fork, firing}`), and a branch child's call
+  slot is `branch:<fork>@<firing>:<index>:<target>`. A host keys every
+  branch fact on the occurrence, never on the fork it saw last.
 - **Interactions.** A question's identity is the node, the firing, its
   occurrence within the run, and the invocation path; `InterviewRequest` and
   `question_asked` carry it, `control_delivered {Answer}` closes it, and the

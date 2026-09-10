@@ -55,7 +55,7 @@ use smol_str::SmolStr;
 use super::{Ctx, Kind, MAX_FOR_EACH_ITEMS, Resolved, placeholder};
 use crate::kinds::{
     AGENT_KIND, BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_NODES_KEY, FAN_IN_KIND, FORK_KIND,
-    FORK_NODES_FIELD, FORK_SNAPSHOT_FIELD, PROMPT_KIND,
+    FORK_NODES_FIELD, FORK_OCCURRENCE_FIELD, FORK_SNAPSHOT_FIELD, PROMPT_KIND,
 };
 use crate::model::{AttrValue, EdgeDecl, NodeDecl, Workflow};
 
@@ -137,14 +137,8 @@ impl Ctx<'_> {
     /// The fan-in step: the ordered branch envelopes its inputs carry. A
     /// prompted fan-in (already a `fabro/prompt` step) reads the same list.
     fn fan_in_step(&mut self, node: &NodeDecl, id: NodeId) {
-        let ordered = {
-            let exprs = self.b.exprs();
-            let inputs = exprs.var("inputs");
-            let index = exprs.lit("index");
-            let sorted = exprs.call("sort_by_key", vec![inputs, index]);
-            let value = exprs.lit("value");
-            exprs.call("pluck", vec![sorted, value])
-        };
+        let ordered = self.ordered_results();
+        let occurrences = self.ordered_field(FORK_OCCURRENCE_FIELD);
         let step = &mut self.b.node_mut(id).step;
         if step.kind == PROMPT_KIND {
             if let Value::Object(config) = &mut step.config {
@@ -158,6 +152,7 @@ impl Ctx<'_> {
                 "label": node.attrs.text("label").unwrap_or_else(|| node.id.clone()),
                 "node": node.id,
                 "results": placeholder(ordered),
+                "occurrences": placeholder(occurrences),
             }),
         );
     }
@@ -383,6 +378,7 @@ impl Ctx<'_> {
         let target = goal_check.filter(|_| join_id == exit).unwrap_or(join_id);
         let name = format!("{}.fan_in", fork.id);
         let results = placeholder(self.ordered_results());
+        let occurrences = placeholder(self.ordered_field(FORK_OCCURRENCE_FIELD));
         let collector = self.b.add_node(
             &name,
             self.scope,
@@ -393,6 +389,7 @@ impl Ctx<'_> {
                     "node": name,
                     "fork": fork.id,
                     "results": results,
+                    "occurrences": occurrences,
                 }),
             ),
         );
@@ -413,13 +410,20 @@ impl Ctx<'_> {
         Some((collector, join))
     }
 
+    /// The branch envelopes the fan-in's inputs carry, in branch order.
     fn ordered_results(&mut self) -> ExprId {
+        self.ordered_field("value")
+    }
+
+    /// One field of every input token of a fan-in, in branch order: the
+    /// tokens are `{ index, value, occurrence }` from the branch delegates.
+    fn ordered_field(&mut self, field: &str) -> ExprId {
         let exprs = self.b.exprs();
         let inputs = exprs.var("inputs");
         let index = exprs.lit("index");
         let sorted = exprs.call("sort_by_key", vec![inputs, index]);
-        let value = exprs.lit("value");
-        exprs.call("pluck", vec![sorted, value])
+        let field = exprs.lit(field);
+        exprs.call("pluck", vec![sorted, field])
     }
 
     #[expect(
@@ -722,6 +726,14 @@ impl Ctx<'_> {
         config.insert("kv".into(), placeholder(kv));
         let generation = self.b.exprs().var("generation");
         config.insert("generation".into(), placeholder(generation));
+        // The fork occurrence, from the same token: the fork step's firing.
+        let fork_firing = {
+            let exprs = self.b.exprs();
+            let input = exprs.var("input");
+            let occurrence = exprs.field(input, FORK_OCCURRENCE_FIELD);
+            exprs.field(occurrence, "firing")
+        };
+        config.insert("fork_firing".into(), placeholder(fork_firing));
         if kind.is_llm() {
             let nodes = {
                 let exprs = self.b.exprs();
@@ -733,7 +745,13 @@ impl Ctx<'_> {
         let payload = {
             let exprs = self.b.exprs();
             let output = exprs.var("output");
-            exprs.object(vec![("index", index_expr), ("value", output)])
+            let input = exprs.var("input");
+            let occurrence = exprs.field(input, FORK_OCCURRENCE_FIELD);
+            exprs.object(vec![
+                ("index", index_expr),
+                ("value", output),
+                (FORK_OCCURRENCE_FIELD, occurrence),
+            ])
         };
         let edge_id = self.b.next_edge_id();
         let mut edge = Edge::always(edge_id, collector);
