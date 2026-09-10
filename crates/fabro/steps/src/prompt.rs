@@ -38,11 +38,13 @@ use lithos_llm::types::{
     Message, ReasoningEffort, Request, Response, ResponseFormat, Role, TokenCounts,
 };
 use lithos_llm::{Client, Error};
+use pebble_coding_agent::ProjectMemory;
 use serde::Deserialize;
 use serde_json::json;
 use smol_str::SmolStr;
 use steps::{Step, StepCtx};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::agent::AgentBackend;
 use crate::blobs::{self, OutputStore};
@@ -51,6 +53,7 @@ use crate::fallback::{self, ModelFailure, PlanError, Requested};
 use crate::fidelity::{self, Fidelity, Incoming, Preamble, StageInfo, ThreadConfig};
 use crate::outcome::{ExplicitRoutes, Stage};
 use crate::parallel::{BRANCH_COUNT_KEY, RESULTS_KEY, parallel_complete, strip_placeholders};
+use crate::pebble::environment::PebbleEnvironment;
 use crate::pebble::{PebbleClient, TurnUsage, profile_of, speed_of};
 use crate::stage::{self, RunInfo};
 use crate::{memory, preamble};
@@ -104,8 +107,9 @@ pub struct PromptConfig {
     pub incoming:             Value,
     #[serde(default)]
     pub branch:               bool,
-    /// Fabro's `project_memory`: read the working directory's project
-    /// documents as the system prompt. Default true.
+    /// Fabro's `project_memory`: the working directory's project documents,
+    /// loaded by Pebble's loader within its budget, become the system prompt.
+    /// Default true.
     #[serde(default = "default_true")]
     pub project_memory:       bool,
     #[serde(default)]
@@ -359,18 +363,20 @@ impl Step for PromptStep {
         stage.route(&plan, false, None).await;
         // Fabro's prompt handler: with `project_memory` on, the working
         // directory's instruction files for the model's profile become the
-        // system prompt.
+        // system prompt. Petri selects the paths; Pebble's loader, the one a
+        // native session runs, reads them within its budget.
         let system_prompt = if config.project_memory {
             let profile = profile_of(&client.0, &selector).unwrap_or_default();
             let paths =
                 memory::select(ctx.env.as_ref(), &profile, memory::Scope::WorkingDirOnly).await;
-            let documents = memory::read(ctx.env.as_ref(), &paths).await;
-            let text = documents
-                .iter()
-                .map(|d| d.content.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            (!text.is_empty()).then_some(text)
+            let reader = PebbleEnvironment::for_files(ctx.env.clone());
+            // The loader errs only when its token is cancelled; this one
+            // never is.
+            ProjectMemory::load(&reader, &paths, &CancellationToken::new())
+                .await
+                .ok()
+                .filter(|memory| !memory.is_empty())
+                .map(|memory| memory.text())
         } else {
             None
         };

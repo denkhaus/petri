@@ -26,7 +26,7 @@ use fabro_steps::{
 };
 use frontend::{CompileInputs, Lowered, MapFiles};
 use ir::{Graph, RunStatus, StepEvent, Value};
-use lithos_llm::types::{ErrorKind, Role, Speed};
+use lithos_llm::types::{ErrorKind, Message, Role, Speed};
 use pebble_coding_agent::test_support::{
     ScriptedCall, ScriptedCompletion, ScriptedFailure, ScriptedProvider, client_from, message_text,
     text_response, tool_call_response,
@@ -2351,6 +2351,69 @@ async fn project_memory_follows_the_profile_and_the_node_kind() {
             .all(|m| m.role() != Role::System),
         "project_memory=false"
     );
+}
+
+/// A prompt node and a native session load project memory through the one
+/// loader, so both see the same text within the budget: a file that crosses
+/// the 32 KiB line is cut to what remains and ends with Pebble's marker, no
+/// newline before it, and the files after it are skipped.
+#[tokio::test]
+async fn prompt_nodes_and_sessions_load_the_same_truncated_memory() {
+    let dir = RunDir::new("memory-budget");
+    let ws = workspace(&dir);
+    fs::create_dir_all(&ws).expect("workspace");
+    let big = "every rule in this file holds\n".repeat(1500);
+    assert!(big.len() > 32 * 1024);
+    fs::write(ws.join("AGENTS.md"), &big).expect("write");
+    fs::write(ws.join("CLAUDE.md"), "Claude rules.").expect("write");
+    let marker = "[Project instructions truncated at 32KB]";
+    let expected = format!("{}{marker}", &big[..32 * 1024 - marker.len()]);
+    let (client, provider) = scripted(
+        vec![ScriptedCall::response(text_response("agent done"))],
+        vec![ScriptedCompletion::response(text_response("prompt done"))],
+    );
+    let graph = lower(
+        r#"digraph W {
+        graph [backend="api", default_model="test/model"]
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        agent [prompt="Agent."]
+        summary [shape=tab, prompt="Summarize."]
+        start -> agent -> summary -> exit
+    }"#,
+        "",
+    );
+    let (report, _) = run(&dir, graph, Some(client)).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let system_of = |messages: &[Message]| {
+        messages
+            .iter()
+            .filter(|m| m.role() == Role::System)
+            .map(message_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let prompt_system = system_of(provider.completion_requests()[0].messages());
+    assert_eq!(
+        prompt_system, expected,
+        "the prompt node's system prompt is the loaded text"
+    );
+    let agent_system = system_of(provider.requests()[0].messages());
+    assert!(
+        agent_system.ends_with(&expected),
+        "the session appends the same text: {}",
+        &agent_system[agent_system.len().saturating_sub(120)..]
+    );
+    assert!(
+        !agent_system.contains("Claude rules."),
+        "the budget was spent"
+    );
+    assert_eq!(expected.len(), 32 * 1024);
 }
 
 /// Model request controls: `speed` and `max_tokens` reach the native

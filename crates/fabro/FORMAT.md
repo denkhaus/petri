@@ -702,7 +702,10 @@ metadata): `AGENTS.md` and `CLAUDE.md` for Anthropic models, `AGENTS.md` and
 `AGENTS.md` alone otherwise; from the Git root down to the working directory,
 root first, when the working directory is inside a repository. Petri selects
 the paths that exist in the scope (`fabro_steps::memory::select`) and Pebble's
-loader owns the 32 KiB budget, deduplication and truncation. The backend
+loader owns the 32 KiB budget, deduplication and truncation; a prompt node
+reads the working directory's files through the same loader
+(`ProjectMemory::load`), so its system prompt is the text a session would
+load, the crossing file cut with Pebble's marker. The backend
 searches Fabro's skill directories (below, "Skills"). Every
 session carries the run's tool hooks as Pebble middleware (`pre_tool_use`
 denies before the tool runs; `post_tool_use` observes the outcome), and the

@@ -278,9 +278,9 @@ summary-call usage accounting, `continue_prompt` for a failover with no
 repeated tool effect, child agents inheriting project memory and skill
 directories, skipped-skill reporting, sequential sub-agent tools, a routed
 scripted provider; sandbox-driver's silence-based output drain and the
-preview-URL operation for servers inside containers. Still open in Pebble:
-its project-memory loader is crate-private, so `fabro_steps::memory` mirrors
-it for prompt nodes.
+preview-URL operation for servers inside containers. The later
+`petri-readiness-gaps` revision exports Pebble's project-memory loader, which
+prompt nodes now load through, and the tool-round budget agent hooks enforce.
 
 Host and container scopes use the `sandbox-driver-host` and
 `sandbox-driver-docker` plugins. Petri launches them and communicates over

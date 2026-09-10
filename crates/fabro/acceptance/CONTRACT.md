@@ -567,8 +567,11 @@ names the decision record under `decisions/`; "gap" names the owner.
    node is the fork, the clones are members by item index, the fan-in is the
    join), derived from the engine's applied splices by the same branch map
    the static path uses (`EVENTS.md`).
-8. Pebble does not export its project-memory loader; `fabro_steps::memory`
-   mirrors it for prompt nodes. Owner Pebble.
+8. Retired: Pebble exports its project-memory loader (`ProjectMemory`), and a
+   prompt node loads its documents through it over the scope, so one loader
+   owns the budget, deduplication and truncation for native sessions and
+   prompt nodes alike; `fabro_steps::memory` keeps only Fabro's path
+   selection.
 9. Retired: the interview bundle's launch-level model default is
    `petri run --provider` and `--model`.
 
