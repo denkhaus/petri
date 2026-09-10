@@ -423,7 +423,8 @@ the coordinator registers `fabro_steps::workflow::ChildInvoker`.
   options directly on an API node is an error. An ACP turn that fails after
   the agent started (the process exits before the protocol completes, a
   protocol error, a rejected request, a stop reason other than `end_turn` or
-  `refusal`) is classed `retry_requested`, as Fabro's retryable handler error
+  `refusal`, or a turn that outlives the node's `timeout`) is classed
+  `retry_requested`, as Fabro's retryable handler error
   is, so `max_retries` and `retry_policy` apply to it; a node with no attempts
   left fails and routes on `outcome=failed` as before.
 - **`fabro/human`** asks through the core `Question` event and routes on the

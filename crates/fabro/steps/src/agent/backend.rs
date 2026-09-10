@@ -143,7 +143,8 @@ impl Session {
     /// One prompt turn. `deadline` is the node's `timeout`, which an ACP
     /// agent consumes itself (`TimeoutPolicy::HandlerManaged`, as Fabro hands
     /// its `timeout_ms` to the ACP turn): a turn that outlives it is
-    /// terminated and fails with class `timeout`. A native Pebble session
+    /// terminated and asks for a retry (class `retry_requested`), as Fabro's
+    /// timed-out turn is a retryable handler error. A native Pebble session
     /// ignores it; the driver's interview-aware timer owns that deadline.
     pub(crate) async fn prompt(
         &mut self,
@@ -162,7 +163,7 @@ impl Session {
                 let Some(result) = result else {
                     client.terminate(grace).await;
                     return Err(AgentError::failed(
-                        "timeout",
+                        RETRY_REQUESTED_CLASS,
                         format!(
                             "the agent turn timed out after {}ms",
                             deadline

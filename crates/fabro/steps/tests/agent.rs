@@ -294,16 +294,18 @@ async fn cancelling_a_turn_sends_session_cancel_and_stops_the_agent() {
 }
 
 /// An ACP node's `timeout` is handed to the turn (`HandlerManaged`): a turn
-/// that outlives it is terminated and the stage fails with class `timeout`,
-/// well before the driver's structural budget.
+/// that outlives it is terminated well before the driver's structural budget
+/// and asks for a retry, as Fabro's timed-out turn is a retryable handler
+/// error; the node retries while attempts remain and fails when none are
+/// left.
 #[tokio::test]
-async fn an_acp_turn_that_outlives_the_node_timeout_fails_with_class_timeout() {
+async fn an_acp_turn_that_outlives_the_node_timeout_is_retried_then_fails() {
     let dir = RunDir::new("fabro-agent-timeout");
     let agent = fake_agent(&dir);
     let graph = with_env(
         lower(&agent_dot(
             &agent,
-            r#", timeout="500ms", on_failure="exit""#,
+            r#", timeout="500ms", max_retries=1, on_failure="exit""#,
         )),
         &[("ACP_MODE", "timeout")],
     );
@@ -330,9 +332,20 @@ async fn an_acp_turn_that_outlives_the_node_timeout_fails_with_class_timeout() {
     assert_eq!(report.status, RunStatus::Failed);
     assert_eq!(status_of(&report, "a").as_deref(), Some("failure"));
     let output = output_of(&report, "a");
-    assert_eq!(output["failure_class"], json!("timeout"));
+    assert_eq!(output["failure_class"], json!("retry_requested"));
     assert_eq!(
         output["failure_reason"],
         json!("the agent turn timed out after 500ms")
+    );
+    let record = report
+        .state
+        .history()
+        .iter()
+        .find(|record| record.name == "a")
+        .expect("`a` finished");
+    assert_eq!(
+        record.attempt,
+        Attempt::FIRST.next(),
+        "the timeout was retried once before the node failed"
     );
 }
