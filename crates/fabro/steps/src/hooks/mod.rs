@@ -49,7 +49,6 @@ use runtime::engine::RouteDecision;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, json};
 use smol_str::SmolStr;
-use tokio::sync::mpsc;
 
 use crate::outcome::reported_outcome;
 use crate::pebble::PebbleClient;
@@ -807,7 +806,7 @@ fn merge_report(report: &mut HookReport, extra: HookReport) {
 /// as the adapter records them, then the report as a [`REPORT_EVENT`] when it
 /// says something.
 pub async fn record_report(
-    logs: &mpsc::Sender<ir::StepEvent>,
+    logs: &steps::ProgressSender,
     node: &str,
     firing: ir::FiringId,
     attempt: ir::Attempt,
