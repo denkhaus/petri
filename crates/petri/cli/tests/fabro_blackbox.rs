@@ -2369,7 +2369,7 @@ fn assert_for_each_fork_events(run_dir: &Path, items: u32) {
                     result.status.tag().to_owned(),
                 ));
             }
-            EventBody::ForkCompleted { fork, results } => {
+            EventBody::ForkCompleted { fork, results, .. } => {
                 joins.push((
                     node,
                     kind,

@@ -736,7 +736,7 @@ impl Timeline {
                 (EventBody::ForkStarted { branches }, Some(entry)) => {
                     timeline.forks.push((entry.kind.clone(), branches.len()));
                 }
-                (EventBody::ForkCompleted { fork, results }, _) => {
+                (EventBody::ForkCompleted { fork, results, .. }, _) => {
                     timeline.joins.push((
                         fork.name.to_string(),
                         results

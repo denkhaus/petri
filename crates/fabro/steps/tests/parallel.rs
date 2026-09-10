@@ -10,6 +10,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
+use execution::ExecutionObserver;
+use execution::events::{
+    CollectingSink, EventBody, EventProjector, ForkDisposition, RunEvent, replay_run,
+};
 use execution::host::{self, HostRun};
 use execution::inspect::{InvocationInspection, RunInspection, inspect_run};
 use fabro_steps::blobs::{holds_ref, hydrate};
@@ -82,6 +86,145 @@ async fn run_with(
     )
     .await
     .expect("the run completes")
+}
+
+/// `run_with`, with the public event stream projected live beside the run.
+async fn run_projected(
+    rt: &Runtime,
+    lowered: Lowered,
+    with_handle: impl FnOnce(execution::CoordinatorHandle),
+) -> (ExecutionReport, Vec<RunEvent>) {
+    let sink = Arc::new(CollectingSink::default());
+    let projector = EventProjector::new(sink.clone());
+    let graph: Graph = lowered.graph.expect("lowers");
+    let report = host::run_configured(
+        rt,
+        HostRun::new(graph)
+            .with_children(lowered.children)
+            .observe(projector.clone() as Arc<dyn ExecutionObserver>),
+        |handle, _| with_handle(handle),
+    )
+    .await
+    .expect("the run completes");
+    let receipt = projector.shutdown().await;
+    assert!(receipt.is_clean(), "{receipt:?}");
+    (report, sink.events())
+}
+
+/// The `step_custom` payloads of one `fabro.parallel.*` kind, in record
+/// order.
+fn customs(events: &[RunEvent], kind: &str) -> Vec<Value> {
+    events
+        .iter()
+        .filter_map(|event| match &event.body {
+            EventBody::StepCustom { value } if value["kind"] == json!(kind) => Some(value.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every `branch_completed` as `(index, status tag)`, in record order.
+fn branch_closes(events: &[RunEvent]) -> Vec<(u32, String)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.body {
+            EventBody::BranchCompleted { result } => {
+                Some((result.branch.index, result.status.tag().to_owned()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every `fork_completed` as its disposition and `(index, status tag)` per
+/// result, in record order.
+fn fork_closes(events: &[RunEvent]) -> Vec<(ForkDisposition, Vec<(u32, String)>)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.body {
+            EventBody::ForkCompleted {
+                results,
+                disposition,
+                ..
+            } => Some((
+                *disposition,
+                results
+                    .iter()
+                    .map(|result| (result.branch.index, result.status.tag().to_owned()))
+                    .collect(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// How many `kill_requested` events the execution of `invocation` carries.
+fn kills_in(events: &[RunEvent], invocation: u64) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            event.invocation.is_some_and(|id| id.raw() == invocation)
+                && matches!(event.body, EventBody::KillRequested { .. })
+        })
+        .count()
+}
+
+/// The child invocation a branch delegate declared, by the target in its
+/// call slot.
+fn child_invocation(events: &[RunEvent], target: &str) -> u64 {
+    events
+        .iter()
+        .find_map(|event| match &event.body {
+            EventBody::InvocationDeclared {
+                invocation,
+                call: Some(call),
+                ..
+            } if call.slot.ends_with(&format!(":{target}")) => Some(invocation.raw()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("a child for `{target}`"))
+}
+
+/// The replayed stream equals the live one, identity for identity, with
+/// the live-only `observed_at` set aside.
+fn assert_replay_matches(dir: &Path, live: &[RunEvent]) {
+    let mut live: Vec<RunEvent> = live
+        .iter()
+        .cloned()
+        .map(|mut event| {
+            event.observed_at = None;
+            event
+        })
+        .collect();
+    live.sort_by_key(|event| event.id);
+    let mut replayed = replay_run(dir).expect("replays");
+    replayed.sort_by_key(|event| event.id);
+    assert_eq!(
+        replayed.len(),
+        live.len(),
+        "the replay has every live event"
+    );
+    for (from_replay, from_live) in replayed.iter().zip(&live) {
+        assert_eq!(from_replay, from_live);
+    }
+}
+
+/// Poll until `condition` holds, or fail after `limit`.
+fn wait_until(limit: Duration, what: &str, mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + limit;
+    while !condition() {
+        assert!(Instant::now() < deadline, "{what}");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// How many coordinator records of `kind` the run dir holds so far.
+fn coordinator_records(dir: &Path, kind: &str) -> usize {
+    fs::read_to_string(dir.join("coordinator.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains(kind))
+        .count()
 }
 
 fn published_results(report: &ExecutionReport) -> Vec<Value> {
@@ -518,6 +661,271 @@ async fn cancelling_the_run_settles_every_branch_child() {
     assert!(!workspace.join("finished_a").exists());
     assert!(!workspace.join("finished_b").exists());
     assert_eq!(status_of(&report, "a").as_deref(), Some("cancelled"));
+}
+
+/// Two running branches, one polite cancel: both children settle cancelled
+/// without a kill, every branch reports a `cancelled` disposition after its
+/// `started`, no group completion is claimed (Fabro emits none either), and
+/// the typed stream still closes the fork as cancelled with both branches,
+/// live and on replay.
+#[tokio::test]
+async fn a_clean_cancel_during_work_closes_the_branches_and_the_fork() {
+    let dir = RunDir::new("parallel-cancel-clean");
+    let rt = runtime(dir.path());
+    let workspace = dir.path().join("scopes/invocation-0-scope-0/work");
+    let lowered = lower(&dot(r#"
+        fork [shape=component]
+        a [shape=parallelogram, script="touch started_a; sleep 30"]
+        b [shape=parallelogram, script="touch started_b; sleep 30"]
+        merge [shape=tripleoctagon]
+        start -> fork
+        fork -> a
+        fork -> b
+        a -> merge
+        b -> merge
+        merge -> exit
+    "#));
+    let (report, events) = run_projected(&rt, lowered, |handle| {
+        let workspace = workspace.clone();
+        thread::spawn(move || {
+            wait_until(Duration::from_secs(20), "both branches started", || {
+                workspace.join("started_a").exists() && workspace.join("started_b").exists()
+            });
+            handle.cancel_root();
+        });
+    })
+    .await;
+    assert_eq!(report.status, RunStatus::Cancelled);
+
+    let started = customs(&events, "fabro.parallel.branch.started");
+    assert_eq!(started.len(), 2, "{started:#?}");
+    let completed = customs(&events, "fabro.parallel.branch.completed");
+    assert_eq!(completed.len(), 2, "{completed:#?}");
+    for event in &completed {
+        assert!(event["index"].is_u64(), "{event}");
+        assert_eq!(event["started"], json!(true), "{event}");
+        assert_eq!(event["disposition"], json!("cancelled"), "{event}");
+        assert_eq!(event["status"], json!("failed"), "{event}");
+        assert!(event["invocation"].is_u64(), "{event}");
+    }
+    assert!(
+        customs(&events, "fabro.parallel.completed").is_empty(),
+        "the fan-in never ran, so no group completion is claimed"
+    );
+    assert_eq!(branch_closes(&events), vec![
+        (0, "cancelled".to_owned()),
+        (1, "cancelled".to_owned()),
+    ]);
+    assert_eq!(fork_closes(&events), vec![(
+        ForkDisposition::Cancelled,
+        vec![(0, "cancelled".to_owned()), (1, "cancelled".to_owned()),]
+    )]);
+    for invocation in 0..3 {
+        assert_eq!(
+            kills_in(&events, invocation),
+            0,
+            "a clean cancel never escalates invocation {invocation}"
+        );
+    }
+    let inspection = inspect_run(dir.path()).expect("inspects");
+    assert_eq!(inspection.invocations.len(), 3);
+    assert!(
+        inspection
+            .invocations
+            .iter()
+            .all(|invocation| invocation.status == "finished")
+    );
+    assert_replay_matches(dir.path(), &events);
+}
+
+/// One slot, two branches: the cancel arrives while the second child is
+/// still queued. Its branch reports `started: false` and never reports a
+/// start; the child is still finished as cancelled, without ever running an
+/// attempt; the fork closes with both branches.
+#[tokio::test]
+async fn a_cancel_before_admission_records_a_branch_that_never_started() {
+    let dir = RunDir::new("parallel-cancel-queued");
+    let rt = runtime(dir.path());
+    let workspace = dir.path().join("scopes/invocation-0-scope-0/work");
+    let lowered = lower(&dot(r#"
+        fork [shape=component, max_parallel=1]
+        a [shape=parallelogram, script="touch started_a; sleep 30"]
+        b [shape=parallelogram, script="touch started_b; sleep 30"]
+        merge [shape=tripleoctagon]
+        start -> fork
+        fork -> a
+        fork -> b
+        a -> merge
+        b -> merge
+        merge -> exit
+    "#));
+    let (report, events) = run_projected(&rt, lowered, |handle| {
+        let workspace = workspace.clone();
+        thread::spawn(move || {
+            wait_until(Duration::from_secs(20), "branch a started", || {
+                workspace.join("started_a").exists()
+            });
+            handle.cancel_root();
+        });
+    })
+    .await;
+    assert_eq!(report.status, RunStatus::Cancelled);
+    assert!(!workspace.join("started_b").exists(), "b never ran");
+
+    let started = customs(&events, "fabro.parallel.branch.started");
+    assert_eq!(started.len(), 1, "{started:#?}");
+    assert_eq!(started[0]["branch"], json!("a"));
+    let completed = customs(&events, "fabro.parallel.branch.completed");
+    assert_eq!(completed.len(), 2, "{completed:#?}");
+    let of = |branch: &str| {
+        completed
+            .iter()
+            .find(|event| event["branch"] == json!(branch))
+            .cloned()
+            .unwrap_or_else(|| panic!("`{branch}` completed: {completed:#?}"))
+    };
+    assert_eq!(of("a")["started"], json!(true));
+    assert_eq!(of("a")["disposition"], json!("cancelled"));
+    assert_eq!(of("b")["started"], json!(false));
+    assert_eq!(of("b")["disposition"], json!("cancelled"));
+    assert_eq!(of("b")["status"], json!("failed"));
+    assert_eq!(fork_closes(&events), vec![(
+        ForkDisposition::Cancelled,
+        vec![(0, "cancelled".to_owned()), (1, "cancelled".to_owned()),]
+    )]);
+    // The queued child was finished as cancelled without an attempt.
+    let child_b = child_invocation(&events, "b");
+    assert!(events.iter().any(|event| matches!(
+        &event.body,
+        EventBody::InvocationFinished { invocation, result }
+            if invocation.raw() == child_b && result.status == RunStatus::Cancelled
+    )));
+    assert!(
+        !events.iter().any(|event| {
+            event.invocation.is_some_and(|id| id.raw() == child_b)
+                && matches!(event.body, EventBody::AttemptStarted)
+        }),
+        "no attempt of b's child started"
+    );
+    assert_replay_matches(dir.path(), &events);
+}
+
+/// The cancel arrives after one branch finished and before the fan-in: the
+/// finished branch keeps its success, the other is cancelled, the fork closes
+/// as cancelled with both results, and `parallel.results` is never published.
+#[tokio::test]
+async fn a_cancel_before_the_fan_in_keeps_the_finished_branch_result() {
+    let dir = RunDir::new("parallel-cancel-before-join");
+    let rt = runtime(dir.path());
+    let workspace = dir.path().join("scopes/invocation-0-scope-0/work");
+    let lowered = lower(&dot(r#"
+        fork [shape=component]
+        a [shape=parallelogram, script="echo a"]
+        b [shape=parallelogram, script="touch started_b; sleep 30"]
+        merge [shape=tripleoctagon]
+        start -> fork
+        fork -> a
+        fork -> b
+        a -> merge
+        b -> merge
+        merge -> exit
+    "#));
+    let run_dir = dir.path().to_path_buf();
+    let (report, events) = run_projected(&rt, lowered, |handle| {
+        let workspace = workspace.clone();
+        thread::spawn(move || {
+            wait_until(Duration::from_secs(20), "a finished and b started", || {
+                workspace.join("started_b").exists()
+                    && coordinator_records(&run_dir, "InvocationFinished") >= 1
+            });
+            handle.cancel_root();
+        });
+    })
+    .await;
+    assert_eq!(report.status, RunStatus::Cancelled);
+
+    let completed = customs(&events, "fabro.parallel.branch.completed");
+    assert_eq!(completed.len(), 2, "{completed:#?}");
+    let of = |branch: &str| {
+        completed
+            .iter()
+            .find(|event| event["branch"] == json!(branch))
+            .cloned()
+            .unwrap_or_else(|| panic!("`{branch}` completed: {completed:#?}"))
+    };
+    assert_eq!(of("a")["disposition"], json!("completed"), "{completed:#?}");
+    assert_eq!(of("a")["status"], json!("succeeded"));
+    assert_eq!(of("b")["disposition"], json!("cancelled"));
+    assert!(customs(&events, "fabro.parallel.completed").is_empty());
+    assert_eq!(fork_closes(&events), vec![(
+        ForkDisposition::Cancelled,
+        vec![(0, "success".to_owned()), (1, "cancelled".to_owned()),]
+    )]);
+    assert!(
+        report.state.run_context().get("parallel.results").is_none(),
+        "the fan-in never published"
+    );
+    assert_replay_matches(dir.path(), &events);
+}
+
+/// A second cancel escalates to a kill while the children ignore the polite
+/// signal: every branch reports `killed`, the fork closes as killed from the
+/// branches' own records (the join never fires), and the kill is in every
+/// execution's log.
+#[tokio::test]
+async fn a_kill_after_the_cancel_closes_the_fork_as_killed() {
+    let dir = RunDir::new("parallel-kill");
+    let rt = runtime(dir.path());
+    let workspace = dir.path().join("scopes/invocation-0-scope-0/work");
+    let lowered = lower(&dot(r#"
+        fork [shape=component]
+        a [shape=parallelogram, script="trap '' TERM; touch started_a; while :; do sleep 1; done"]
+        b [shape=parallelogram, script="trap '' TERM; touch started_b; while :; do sleep 1; done"]
+        merge [shape=tripleoctagon]
+        start -> fork
+        fork -> a
+        fork -> b
+        a -> merge
+        b -> merge
+        merge -> exit
+    "#));
+    let run_dir = dir.path().to_path_buf();
+    let (report, events) = run_projected(&rt, lowered, |handle| {
+        let workspace = workspace.clone();
+        thread::spawn(move || {
+            wait_until(Duration::from_secs(20), "both branches started", || {
+                workspace.join("started_a").exists() && workspace.join("started_b").exists()
+            });
+            handle.cancel_root();
+            wait_until(
+                Duration::from_secs(20),
+                "the cancel reached every child",
+                || coordinator_records(&run_dir, "InvocationCancelRequested") >= 3,
+            );
+            handle.cancel_root();
+        });
+    })
+    .await;
+    assert_eq!(report.status, RunStatus::Cancelled);
+
+    let completed = customs(&events, "fabro.parallel.branch.completed");
+    assert_eq!(completed.len(), 2, "{completed:#?}");
+    for event in &completed {
+        assert_eq!(event["started"], json!(true), "{event}");
+        assert_eq!(event["disposition"], json!("killed"), "{event}");
+    }
+    assert_eq!(fork_closes(&events), vec![(ForkDisposition::Killed, vec![
+        (0, "cancelled".to_owned()),
+        (1, "cancelled".to_owned()),
+    ])]);
+    assert!(kills_in(&events, 0) >= 1, "the root was killed");
+    for target in ["a", "b"] {
+        assert!(
+            kills_in(&events, child_invocation(&events, target)) >= 1,
+            "the kill reached `{target}`'s child"
+        );
+    }
+    assert_replay_matches(dir.path(), &events);
 }
 
 /// Keep `lines` of a JSONL file up to and including the first line `keep`

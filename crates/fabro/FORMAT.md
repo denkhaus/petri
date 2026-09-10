@@ -343,8 +343,14 @@ under the bound, and finishes as cancelled. The slots are one gate per parent
 execution and fork visit (`AttemptAdmission` on the child invocation). On
 resume the gate is rebuilt from the coordinator log, and every declared but
 unfinished branch queues again under the same bound. Branch steps report
-`fabro.parallel.branch.started` and `fabro.parallel.branch.completed`, the
-fan-in `fabro.parallel.completed`, as `StepEvent::Custom`.
+`fabro.parallel.branch.started` once the child's engine has started and
+`fabro.parallel.branch.completed` on every path a branch ends (with the
+envelope's `status`, a `disposition` of `completed`, `cancelled`, `killed` or
+`failed_to_start`, and whether the child ever `started`); the fan-in reports
+`fabro.parallel.completed` when it runs. All three are `StepEvent::Custom`;
+`crates/core/execution/EVENTS.md` ("Fork closure") maps them to Fabro's
+`parallel.*` events beside the typed `fork_completed` that closes a cancelled
+or killed fork.
 
 Every Fabro run has a hard ceiling of 10,000 invocations, root and all
 children counted, finished ones included (`RunPolicy.max_invocations`, set by

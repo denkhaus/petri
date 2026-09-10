@@ -224,17 +224,36 @@ pub struct RouteChoice {
     pub weighted: bool,
 }
 
-/// One branch's result as it reached the join.
+/// One branch's result: the record of the last node that ran on the branch.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BranchResult {
     pub branch:  BranchRef,
-    /// The last node on the branch, whose token reached the join.
+    /// The last node on the branch: the one whose token reached the join, or
+    /// the branch's last record when the fork was cancelled or killed.
     pub node:    NodeRef,
     pub firing:  FiringId,
     pub status:  Status,
-    /// The token payload the branch handed to the join.
+    /// The token payload the branch handed to the join. Absent when the join
+    /// never fired (a cancelled or killed fork).
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub payload: Value,
+}
+
+/// How a fork's branches were closed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkDisposition {
+    /// Every branch's token reached the join and the join fired.
+    #[default]
+    Joined,
+    /// The join completed without running: its scope was cancelled, or every
+    /// branch reached it cancelled. The results are the branches' last
+    /// records.
+    Cancelled,
+    /// The fork's scope was killed and the join never fired. The results are
+    /// the branches' last records; a branch that never recorded one is
+    /// absent.
+    Killed,
 }
 
 /// A backend's own event, attributed. `envelope` is the backend's envelope
@@ -386,14 +405,18 @@ pub enum EventBody {
     ForkStarted {
         branches: Vec<BranchRef>,
     },
-    /// A branch's final token reached the join.
+    /// A branch reached its end: its final token reached the join, or the
+    /// fork was cancelled or killed and this is the branch's last record.
     BranchCompleted {
         result: BranchResult,
     },
-    /// The join fired: every branch is in, in branch order.
+    /// The fork's branches are all accounted for, in branch order:
+    /// `disposition` says whether the join fired or the fork was stopped.
     ForkCompleted {
-        fork:    NodeRef,
-        results: Vec<BranchResult>,
+        fork:        NodeRef,
+        results:     Vec<BranchResult>,
+        #[serde(default)]
+        disposition: ForkDisposition,
     },
     /// A `for_each` expansion spliced clones in.
     NodeExpanded {
@@ -502,7 +525,56 @@ struct ExecutionTrack {
     history:    usize,
     branches:   BranchMap,
     /// Fork firings whose `ForkStarted` was emitted.
-    forks:      BTreeSet<FiringId>,
+    announced:  BTreeSet<FiringId>,
+    /// Forks whose `ForkCompleted` is still to come, by the fork's firing.
+    open:       BTreeMap<FiringId, OpenFork>,
+}
+
+/// A fork between its `ForkStarted` and its `ForkCompleted`. The generation
+/// ties the branches and the join to this occurrence of the fork: the engine
+/// fires one `(node, generation)` at most once, and the tokens a fork routes
+/// to its branches and on to the join keep the fork firing's generation.
+struct OpenFork {
+    fork:       NodeId,
+    generation: Generation,
+    branches:   Vec<BranchRef>,
+}
+
+impl OpenFork {
+    fn covers(&self, fork: NodeId, generation: Generation) -> bool {
+        self.fork == fork && self.generation == generation
+    }
+}
+
+impl ExecutionTrack {
+    /// Remember an announced fork until its join closes it.
+    fn open_fork(
+        &mut self,
+        firing: FiringId,
+        fork: NodeId,
+        generation: Option<Generation>,
+        branches: &[BranchRef],
+    ) {
+        let Some(generation) = generation else {
+            return;
+        };
+        self.open.insert(firing, OpenFork {
+            fork,
+            generation,
+            branches: branches.to_vec(),
+        });
+    }
+
+    /// Take the open fork a join of `fork` in `generation` closes, if any.
+    fn close_fork(&mut self, fork: NodeId, generation: Option<Generation>) -> Option<OpenFork> {
+        let generation = generation?;
+        let firing = self
+            .open
+            .iter()
+            .find(|(_, open)| open.covers(fork, generation))
+            .map(|(firing, _)| *firing)?;
+        self.open.remove(&firing)
+    }
 }
 
 /// The stateless-by-record derivation, with the little state it needs across
@@ -806,16 +878,16 @@ impl Projection {
                 emit(subject.clone(), EventBody::RouteApplied { route });
                 if let (Some(subject), RouteApplied::Edge { .. }) = (&subject, applied)
                     && let BranchRole::Fork { branches } = subject.branch
-                    && track.forks.insert(firing)
+                    && track.announced.insert(firing)
                 {
                     // The fork's routing applies group by group; the first
                     // applied route announces the fork once.
                     let fork = subject.node.id;
-                    emit(Some(subject.clone()), EventBody::ForkStarted {
-                        branches: (0..branches)
-                            .map(|index| BranchRef { fork, index })
-                            .collect(),
-                    });
+                    let branches: Vec<BranchRef> = (0..branches)
+                        .map(|index| BranchRef { fork, index })
+                        .collect();
+                    track.open_fork(firing, fork, subject.generation, &branches);
+                    emit(Some(subject.clone()), EventBody::ForkStarted { branches });
                 }
             }
             Event::RetryElapsed {
@@ -866,13 +938,18 @@ impl Projection {
                 // `branch_completed` and `fork_completed` from the same roles
                 // the static path uses.
                 if let Some(fork) = track.branches.expansion_fork(*node) {
+                    // The fork's own firing: the record of the fork node in
+                    // the expansion's generation, which the template's token
+                    // carried from it.
                     let firing = state
                         .history()
                         .iter()
                         .rev()
-                        .find(|record| record.node == fork)
+                        .find(|record| {
+                            record.node == fork && record.generation == splice.generation
+                        })
                         .map(|record| record.firing);
-                    let announced = firing.is_some_and(|firing| !track.forks.insert(firing));
+                    let announced = firing.is_some_and(|firing| !track.announced.insert(firing));
                     let subject = firing
                         .and_then(|firing| subject_of(state, track, firing))
                         .or_else(|| node_subject(state, track, fork));
@@ -886,6 +963,9 @@ impl Projection {
                         .collect();
                     branches.sort_by_key(|branch| branch.index);
                     if !announced {
+                        if let Some(firing) = firing {
+                            track.open_fork(firing, fork, Some(splice.generation), &branches);
+                        }
                         emit(subject, EventBody::ForkStarted { branches });
                     }
                 }
@@ -951,28 +1031,19 @@ impl Projection {
                 if let Some(subject) = &subject
                     && let BranchRole::Join { fork } = subject.branch
                 {
+                    // The join fired: every branch is in, and its inputs are
+                    // the branches' final tokens.
                     let results = branch_results(state, track, fork, &inputs);
-                    for result in &results {
-                        emit(
-                            Some(Subject {
-                                node:       result.node.clone(),
-                                firing:     Some(result.firing),
-                                visit:      None,
-                                attempt:    None,
-                                generation: None,
-                                branch:     BranchRole::Member(result.branch),
-                            }),
-                            EventBody::BranchCompleted {
-                                result: result.clone(),
-                            },
-                        );
-                    }
-                    if let Some(fork_node) = state.graph().node(fork).map(node_ref) {
-                        emit(Some(subject.clone()), EventBody::ForkCompleted {
-                            fork: fork_node,
-                            results,
-                        });
-                    }
+                    track.close_fork(fork, subject.generation);
+                    close_fork(
+                        &mut emit,
+                        state,
+                        track,
+                        subject,
+                        fork,
+                        results,
+                        ForkDisposition::Joined,
+                    );
                 }
                 emit(subject.clone(), EventBody::VisitStarted { inputs });
                 emit(subject, EventBody::WaitStateChanged {
@@ -1013,6 +1084,23 @@ impl Projection {
                     generation: Some(entry.generation),
                     branch:     track.branches.role(entry.node),
                 });
+                // A join that completed without ever being live was
+                // synthesized: the fork's scope was cancelled, or every
+                // branch reached it cancelled. Its record closes the fork
+                // from the branches' own final records.
+                if let Some(subject) = &subject
+                    && let BranchRole::Join { fork } = subject.branch
+                    && !track.firings.contains(&entry.firing)
+                    && let Some(open) = track.close_fork(fork, Some(entry.generation))
+                {
+                    let results = member_results(state, track, &open);
+                    let disposition = if matches!(entry.outcome.status, Status::Cancelled) {
+                        ForkDisposition::Cancelled
+                    } else {
+                        ForkDisposition::Joined
+                    };
+                    close_fork(&mut emit, state, track, subject, fork, results, disposition);
+                }
                 emit(subject, EventBody::VisitCompleted {
                     outcome: entry.outcome.clone(),
                     executed,
@@ -1020,6 +1108,42 @@ impl Projection {
                 });
             }
             track.history = history.len();
+        }
+        // A killed fork's join never fires: its tokens were dropped. Once no
+        // branch of the fork has a live firing left, the fork is closed from
+        // the branches' final records.
+        let killed: Vec<FiringId> = track
+            .open
+            .iter()
+            .filter(|(_, open)| {
+                state.is_node_killed(open.fork)
+                    && !state.live_firings().any(|firing| {
+                        firing.generation == open.generation
+                            && matches!(
+                                track.branches.role(firing.node),
+                                BranchRole::Member(branch) if branch.fork == open.fork
+                            )
+                    })
+            })
+            .map(|(firing, _)| *firing)
+            .collect();
+        for firing in killed {
+            let Some(open) = track.open.remove(&firing) else {
+                continue;
+            };
+            let Some(subject) = subject_of(state, track, firing) else {
+                continue;
+            };
+            let results = member_results(state, track, &open);
+            close_fork(
+                &mut emit,
+                state,
+                track,
+                &subject,
+                open.fork,
+                results,
+                ForkDisposition::Killed,
+            );
         }
 
         let invocation = track.invocation;
@@ -1176,6 +1300,69 @@ fn branch_results(
         .collect();
     results.sort_by_key(|result| result.branch.index);
     results
+}
+
+/// Emit `branch_completed` per result, each on its branch's last firing,
+/// then `fork_completed` on `subject` (the join's firing when there is one,
+/// else the fork's own).
+fn close_fork(
+    emit: &mut impl FnMut(Option<Subject>, EventBody),
+    state: &EngineState,
+    track: &ExecutionTrack,
+    subject: &Subject,
+    fork: NodeId,
+    results: Vec<BranchResult>,
+    disposition: ForkDisposition,
+) {
+    for result in &results {
+        emit(
+            subject_of(state, track, result.firing),
+            EventBody::BranchCompleted {
+                result: result.clone(),
+            },
+        );
+    }
+    if let Some(fork_node) = state.graph().node(fork).map(node_ref) {
+        emit(Some(subject.clone()), EventBody::ForkCompleted {
+            fork: fork_node,
+            results,
+            disposition,
+        });
+    }
+}
+
+/// The branches' final records for a fork that was cancelled or killed: the
+/// latest record of a member of each branch in the fork's generation, in
+/// branch order. A branch with no record yet is absent. The token payloads
+/// are gone with the join that never ran, so none is carried.
+fn member_results(
+    state: &EngineState,
+    track: &ExecutionTrack,
+    open: &OpenFork,
+) -> Vec<BranchResult> {
+    let mut results: BTreeMap<u32, BranchResult> = BTreeMap::new();
+    for record in state.history().iter().rev() {
+        if record.generation != open.generation {
+            continue;
+        }
+        let BranchRole::Member(branch) = track.branches.role(record.node) else {
+            continue;
+        };
+        if !open.branches.contains(&branch) || results.contains_key(&branch.index) {
+            continue;
+        }
+        let Some(node) = state.graph().node(record.node) else {
+            continue;
+        };
+        results.insert(branch.index, BranchResult {
+            branch,
+            node: node_ref(node),
+            firing: record.firing,
+            status: record.outcome.status.clone(),
+            payload: Value::Null,
+        });
+    }
+    results.into_values().collect()
 }
 
 /// Read a backend's envelope out of a `StepEvent::Custom` value: an object

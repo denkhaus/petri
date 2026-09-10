@@ -85,7 +85,7 @@ Execution events (engine log), each attributed to a subject where one exists:
 | `visit_completed` | the firing's final record exists; `executed` is false for a synthesized completion (false precondition, cancelled scope, blocked or skipped admission); `attempts` is the count |
 | `routes_resolved` | one `RouteChoice` per group with the decision, resolved target, interventions (overrides, jumps, blocks) and whether a weighted draw happened |
 | `route_applied` | one applied route: edge (with target, transition, back), jump, or none |
-| `fork_started`, `branch_completed`, `fork_completed` | a fork's branches start; each branch's last token reaches the join; the join fires with every branch result in branch order. A static fork's branches are its routing groups; a `for_each` expansion's branches are its clones, in item order, and the fork is the node that fanned out into the template (Fabro's `parallel` node), so both fan-outs carry the same identities |
+| `fork_started`, `branch_completed`, `fork_completed` | a fork's branches start; a branch reaches its end; the fork's branches are all accounted for, in branch order, with the `disposition` that closed them (`joined`, `cancelled`, `killed`; see "Fork closure"). A static fork's branches are its routing groups; a `for_each` expansion's branches are its clones, in item order, and the fork is the node that fanned out into the template (Fabro's `parallel` node), so both fan-outs carry the same identities |
 | `node_expanded` | a `for_each` expansion with its clones |
 | `question_asked`, `control_delivered` | a question on the firing's progress channel; a host control decoded as an answer when it is one, with whether the firing could receive it |
 | `wait_state_changed` | `awaiting_admission`, `running`, `awaiting_answer`, `awaiting_retry`, `cancelling` |
@@ -118,6 +118,40 @@ replay regenerates that never reached a log (a crash's lost tail, before any
 resume re-recorded it) has no `recorded_at`; once a resume re-records it, it
 carries the resume's recording time, and a host that saw the original live
 keeps whichever copy it deduplicated first.
+
+## Fork closure
+
+Every fork that announced `fork_started` closes with exactly one
+`fork_completed`, live and on replay, whatever stopped it. The projection
+keeps each open fork by the fork node's firing and ties its branches and its
+join to that occurrence through the generation the fork's tokens carry, so
+two visits of one fork or a fork inside a branch never share a closure.
+
+| `disposition` | When | Each `branch_completed` | `results` |
+| --- | --- | --- | --- |
+| `joined` | every branch's token reached the join and the join fired (`visit_started` on the join follows) | the token that reached the join, with its `payload` | every branch |
+| `cancelled` | the join completed without running (`visit_completed {executed: false}` with a `cancelled` outcome): its scope was cancelled, or every branch reached it cancelled | the branch's last record; no `payload`, since the join never ran | every branch with a record |
+| `killed` | the fork's scope was killed, so the join's tokens were dropped and it never fires; the fork closes once no branch of it has a live firing left, on the fork's own firing as subject | the branch's last record; no `payload` | the branches with a record; one that never recorded is absent |
+
+A branch's own terminal facts stay where they are: the member's
+`visit_completed` (with `executed`, false for a branch cancelled before it was
+admitted) and, for a Fabro branch, the child's `invocation_finished`. A Fabro
+branch child cancelled before it was admitted still gets an execution that
+records the cancellation and no `attempt_started`.
+
+### The Fabro branch events
+
+The Fabro frontend's branch delegates and fan-in add `step_custom` events
+with dispositions of their own. This is the mapping from Petri's facts to the
+pinned Fabro's `parallel.*` events; Fabro emits no group event on
+cancellation, and this contract does not claim it does.
+
+| Petri | Fabro |
+| --- | --- |
+| `fork_started` | `parallel.started` |
+| `fabro.parallel.branch.started {fork, branch, index, item_label, invocation}`, emitted once the child's engine has started (it holds a slot under the fork's gate, as Fabro's branch holds a permit) | `parallel.branch.started` |
+| `fabro.parallel.branch.completed {fork, branch, index, item_label, invocation, status, disposition, started, duration_ms}`, emitted on every path a branch ends. `status` is the envelope's Fabro status; `disposition` is `completed` (the child finished; `status` says how), `cancelled` (the child settled cancelled; `status` is `failed`), `killed` (the stop escalated to a kill before the child settled; `failed`) or `failed_to_start` (the child could not be declared; `failed`); `started` is whether the child's engine ever started (false for a queued branch the cancel reached first) | `parallel.branch.completed` with the same `status`, for every event with `started: true`. Fabro emits none for a branch that never held a slot, so a host projecting Fabro's stream drops `started: false`. Fabro reports a cancelled branch as `failed` with duration 0; Petri carries the observed duration |
+| `fabro.parallel.completed {node, branch_count, success_count, failure_count, status}`, emitted by the fan-in when it runs | `parallel.completed`. Neither engine emits it for a cancelled or killed fork; the terminal group fact is then Petri's `fork_completed {disposition}`, which Fabro has no event for |
 
 ## Ordering and delivery
 
@@ -195,7 +229,7 @@ also carries `node`, `firing` and `attempt` beside the event's `subject`.
 | `stage.started/completed/failed/retrying` | `visit_started`, `attempt_admitted`, `attempt_started`, `attempt_finished {final, exhausted}`, `retry_scheduled`, `retry_elapsed`, `visit_completed {executed, attempts}`; `subject.node.meta.kind` and `synthetic` map lowering nodes to the logical stage | node, firing, visit, attempt, generation | durable | `embedding::the_workflow_runs_without_adapters_…` (the retry), `embedding_readiness` (every logical stage's final status) |
 | `stage.prompt`, `prompt.completed` | `step_custom` kinds `fabro.prompt`, `fabro.prompt.completed`; a prompt node's `attempt_finished` output | node, firing, attempt | durable | `petri-fabro-steps::prompt` (prompt events), `fabro_blackbox::a_prompt_node_makes_one_tool_free_model_call` |
 | `edge.selected`, `loop.restart` | `routes_resolved {choices}` (decision, target, overrides, jumps, blocks, weighted draw), `route_applied {edge / jump / none, transition, back}`; a restart is `execution_finished {Restart}` then `execution_declared {predecessor}` | firing, edge, execution | durable | `embedding::transitions_override_block_or_continue`, `controls::node_visit_totals_survive_a_restart_while_context_resets` |
-| `parallel.started`, branch start and completion, `parallel.completed` (static fan-out) | `fork_started {branches}`, `branch_completed {result}`, `fork_completed {fork, results}` in branch order; `BranchRole` on every subject | fork node, `BranchRef {fork, index}` | durable | `embedding::the_workflow_runs_without_adapters_…` (`forks`, `joins`) |
+| `parallel.started`, branch start and completion, `parallel.completed` (static fan-out) | `fork_started {branches}`, `branch_completed {result}`, `fork_completed {fork, results, disposition}` in branch order; `BranchRole` on every subject; the `fabro.parallel.*` `step_custom` events with the branch dispositions ("Fork closure") | fork node, `BranchRef {fork, index}` | durable | `embedding::the_workflow_runs_without_adapters_…` (`forks`, `joins`); `petri-fabro-steps::parallel` (`a_clean_cancel_during_work_closes_the_branches_and_the_fork`, `a_cancel_before_admission_records_a_branch_that_never_started`, `a_cancel_before_the_fan_in_keeps_the_finished_branch_result`, `a_kill_after_the_cancel_closes_the_fork_as_killed`: every closure live and through `replay_run`) |
 | the same for a `for_each` fan-out (an expansion) | the same three bodies, with the same identities: `fork_started {branches}` on the parallel node once the expansion knows its items (one `BranchRef {fork, index}` per item, in item order), `branch_completed {result}` per clone as its token reaches the fan-in, `fork_completed {fork, results}` at the fan-in in item order; the clones are `member {fork, index}`, the fan-in `join {fork}`. Beside them: `node_expanded {clones}`; one `invocation_declared` per branch child with its `parent` link, `invocation_finished` per child; `step_custom` kinds `fabro.parallel.branch.started`, `fabro.parallel.branch.completed` (the delegates) and `fabro.parallel.completed` (the fan-in, with `parallel.results`). The roles come from one mechanism for both fan-outs: `BranchMap::of` reads the graph shape, `BranchMap::with_expansions` reads the engine's applied splices (the template, its clones by item index, the one node whose forward arm reaches the template as the fork) | fork node, `BranchRef {fork, index}`, child invocation | durable | `embedding::the_milestone_workflow_runs_through_the_embedding_boundary` (`fork:2`, `join`, `forks`, `joins`; live equals replay), `fabro_blackbox::for_each_branches_keep_distinct_values_under_one_key_in_item_order` (the three bodies through `replay_run`), `embedding_readiness`, `fabro_readiness_blackbox` (one expansion, one fork, one join, two children) |
 | `interview.started/completed/timeout/interrupted` | `question_asked {question}` (type, choices, interaction identity), `wait_state_changed {awaiting_answer}`, `control_delivered {Answer, deliverable}`; expiry and interruption are the attempt's `TimedOut`/`Cancelled` status; a sensitive answer stays `{"$secret": …}` | node, firing, attempt, question id | durable | `embedding::the_workflow_runs_without_adapters_…`, `embedding_readiness` (`questions`, `answers`), `petri::interview` (the interviewer contract), `inspect_cli::inspect_shows_a_sensitive_answer_as_a_secret_reference_only` |
 | `command.started/completed` | `attempt_started`, `attempt_finished {outcome}` (`metrics.exit_code`, `duration_ms`, `output`), `output_line`, `artifact_recorded` | node, firing, attempt | durable | `embedding::the_workflow_runs_without_adapters_…` |

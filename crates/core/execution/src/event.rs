@@ -86,6 +86,13 @@ pub enum CancelReason {
 pub struct CancelRequest {
     pub invocation: InvocationId,
     pub reason:     Option<CancelReason>,
+    /// Whether the request reaches the driver of an invocation that is
+    /// already cancelled, which escalates that driver to its kill tier. A run
+    /// control's repeated cancel escalates. A parent forwarding the polite
+    /// cancel it received to a child does not: the coordinator's own cascade
+    /// has already cancelled every descendant of a cancelled invocation, and
+    /// a second delivery would kill the child.
+    pub escalate:   bool,
 }
 
 /// The one durable result returned by an invocation.
