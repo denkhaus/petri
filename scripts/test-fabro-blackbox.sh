@@ -24,6 +24,9 @@
 #   PETRI_REQUIRED_BACKENDS the backends this runner must cover in the strict
 #                          report (default: host, plus docker when a daemon
 #                          answers or PETRI_REQUIRE_DOCKER is set)
+#   PETRI_COVERAGE_READINESS set: the report is the final readiness gate and
+#                          fails unless every required cell passed, blocked
+#                          cells included (mise run check:fabro:readiness)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -78,6 +81,7 @@ else
   backends=host
 fi
 report=(python3 scripts/fabro-coverage-report.py --evidence "$PETRI_EVIDENCE_DIR" --strict --backends "$backends")
+[ -n "${PETRI_COVERAGE_READINESS:-}" ] && report+=(--readiness)
 [ -f "$matrix" ] && report+=(--matrix "$matrix")
 [ -f "$PETRI_EVIDENCE_DIR/junit.xml" ] && report+=(--junit "$PETRI_EVIDENCE_DIR/junit.xml")
 "${report[@]}" || status=1

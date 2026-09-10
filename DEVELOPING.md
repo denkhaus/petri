@@ -73,6 +73,7 @@ bounded output capture, and the Pebble environment contract on Host and Docker.
 | `mise run test:fabro:blackbox` | Run the required Fabro black box scenarios and write their evidence records and coverage report |
 | `mise run test:fabro:blackbox:repeat` | The same set three times, each in fresh processes under a different schedule |
 | `mise run test:fabro:differential` | Compare the shipped binary with the pinned `fabro` binary (built from the corpus on first use, about three minutes) |
+| `mise run check:fabro:readiness` | The final readiness gate: the strict black box run, then a coverage report that fails unless every required cell passed, blocked cells included |
 | `mise run check:nightly` | Run the extended verification gate |
 | `mise run release <target> <version>` | Build a native release archive |
 

@@ -52,7 +52,11 @@ then the coverage report, allowing a skipped cell (a machine with no Docker).
 (`PETRI_REQUIRE_DOCKER=1`) and the vendored bundles
 (`PETRI_REQUIRE_FABRO_BUNDLES=1`) and fails on any skipped cell; the nightly
 gate runs it, so the repeated container work stays out of the routine
-subset. The bundles are tracked under `../bundles/<id>/` (provenance in
+subset. `mise run check:fabro:readiness` is the final readiness gate: the
+same strict run, then the coverage report with `--readiness`, which fails
+unless every required cell passed; a cell the matrix declares `blocked`
+fails it, where the routine `--strict` report only shows it. The bundles are
+tracked under `../bundles/<id>/` (provenance in
 `../bundles/PROVENANCE.md`); `mise run check:bundles` verifies them against
 `../bundles.lock.json`. A bundle missing from the checkout skips its
 scenarios in the routine task and fails them in the strict one.

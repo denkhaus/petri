@@ -193,7 +193,9 @@ lists every required (scenario, backend, agent) cell with its state, so a
 filtered or skipped case stays visible; `mise run test:fabro:blackbox` runs
 them and reports the coverage, and `mise run test:fabro:blackbox:strict`
 (in `check:nightly`) requires Docker, the vendored bundles, and no skipped
-cell.
+cell. `mise run check:fabro:readiness` is the final readiness gate: the same
+strict run, then a coverage report that fails unless every required cell
+passed, blocked cells included.
 
 ### The integration handoff
 
