@@ -46,6 +46,12 @@ use smol_str::SmolStr;
 /// The note kind the adapter records for every service report.
 pub const HOOK_NOTE_KIND: &str = "hook";
 
+/// The note kind one record of a hook's own agent activity is recorded
+/// under: the payload is a [`HookActivity`]. The projector derives
+/// `hook_activity` events from it, apart from the stage's own agent activity,
+/// so a consumer never counts a hook's model requests as the stage's.
+pub const HOOK_ACTIVITY_NOTE_KIND: &str = "hook.activity";
+
 /// Where in a run a hook may be configured. Names describe the point, not
 /// any one workflow format's spelling of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -127,6 +133,29 @@ pub enum HookDecision {
     },
 }
 
+/// What a hook's own model and tool work cost. A prompt hook makes one
+/// request; an agent hook makes one per model turn and runs tools. `tokens`
+/// is the backend's token accounting in the shape the native agent reports
+/// under `pebble.usage` (`input`, `output`, `reasoning`, `cache_read`,
+/// `cache_write`); it is absent when no answer arrived (a timeout, a failed
+/// request).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct HookUsage {
+    /// Model requests the hook made, answered or not.
+    pub requests:        u64,
+    /// Tool calls the hook's agent started; none for a prompt hook.
+    #[serde(default)]
+    pub tool_calls:      u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens:          Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_ms:    Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_ms:         Option<u64>,
+}
+
 /// One hook the service ran, or could not run, for the record.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HookRun {
@@ -137,6 +166,28 @@ pub struct HookRun {
     pub duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message:     Option<String>,
+    /// What the hook's own model and tool work cost, when it did any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage:       Option<HookUsage>,
+}
+
+/// The hook operation an activity record belongs to: the point and the
+/// hook's name. With the firing and attempt the record is attributed to,
+/// this identifies one execution of one hook.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookOperation {
+    pub point: HookPoint,
+    pub hook:  String,
+}
+
+/// One event a hook's own agent produced, for the record. `backend` names
+/// the agent backend and `envelope` is the backend's own event, as the
+/// stage's agent activity carries them; the operation says which hook.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HookActivity {
+    pub hook:     HookOperation,
+    pub backend:  SmolStr,
+    pub envelope: Value,
 }
 
 /// The service's answer for one point.
@@ -149,6 +200,11 @@ pub struct HookReport {
     /// Problems that fail open: recorded, execution continues.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// The activity of the hooks' own agents, in order. Not part of the
+    /// report's own record: the caller records each entry as its own
+    /// [`HOOK_ACTIVITY_NOTE_KIND`] note before the report.
+    #[serde(skip)]
+    pub activity: Vec<HookActivity>,
 }
 
 impl HookReport {
@@ -158,7 +214,30 @@ impl HookReport {
             decision: HookDecision::Proceed,
             hooks: Vec::new(),
             warnings: Vec::new(),
+            activity: Vec::new(),
         }
+    }
+
+    /// The notes that record this report: one per activity entry, then the
+    /// report itself when it says something.
+    pub fn notes(&self) -> Vec<Note> {
+        let mut notes: Vec<Note> = self
+            .activity
+            .iter()
+            .map(|activity| {
+                Note::new(
+                    HOOK_ACTIVITY_NOTE_KIND,
+                    serde_json::to_value(activity).unwrap_or(Value::Null),
+                )
+            })
+            .collect();
+        if !self.is_silent() {
+            notes.push(Note::new(
+                HOOK_NOTE_KIND,
+                serde_json::to_value(self).unwrap_or(Value::Null),
+            ));
+        }
+        notes
     }
 
     /// Whether anything happened worth a record.
@@ -261,16 +340,6 @@ impl HookAdapter {
     pub fn new(service: Arc<dyn HookService>) -> Self {
         Self { service }
     }
-
-    fn note(report: &HookReport) -> Option<Note> {
-        if report.is_silent() {
-            return None;
-        }
-        Some(Note::new(
-            HOOK_NOTE_KIND,
-            serde_json::to_value(report).unwrap_or(Value::Null),
-        ))
-    }
 }
 
 /// Whether a node is a lowering artifact rather than a stage: the frontend
@@ -319,7 +388,7 @@ impl ExecutionHooks for HookAdapter {
                     payload: Value::Null,
                 })
                 .await;
-            notes.extend(Self::note(&report));
+            notes.extend(report.notes());
             match report.decision {
                 HookDecision::Skip { status } => {
                     admission = Admission::Skip {
@@ -356,7 +425,7 @@ impl ExecutionHooks for HookAdapter {
             })
             .await;
         let mut prepared = Prepared::unchanged();
-        prepared.notes.extend(Self::note(&report));
+        prepared.notes.extend(report.notes());
         if let HookDecision::Adjust { status, reason } = report.decision {
             prepared.adjustment.status = Some(status);
             prepared.adjustment.reason = Some(reason);
@@ -378,7 +447,7 @@ impl ExecutionHooks for HookAdapter {
                 payload: Value::Null,
             })
             .await;
-        Self::note(&report).into_iter().collect()
+        report.notes()
     }
 
     async fn transition(
@@ -406,7 +475,7 @@ impl ExecutionHooks for HookAdapter {
             problems: report.warnings.clone(),
             ..TransitionReport::default()
         };
-        out.notes.extend(Self::note(&report));
+        out.notes.extend(report.notes());
         match report.decision {
             HookDecision::Block { reason } => Err(TransitionError::new(reason)),
             HookDecision::Override { group, edge } => {
@@ -425,7 +494,7 @@ impl ExecutionHooks for HookAdapter {
             })
             .await;
         Self::log_run_level(&report);
-        Self::note(&report).into_iter().collect()
+        report.notes()
     }
 
     async fn scope_released(&self, released: ScopeReleased) -> Vec<Note> {
@@ -439,7 +508,7 @@ impl ExecutionHooks for HookAdapter {
             })
             .await;
         Self::log_run_level(&report);
-        Self::note(&report).into_iter().collect()
+        report.notes()
     }
 }
 

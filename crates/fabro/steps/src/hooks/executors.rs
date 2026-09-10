@@ -13,22 +13,33 @@
 //! joins the agent before the hook's result is returned, and a hook future
 //! the driver dropped (a root kill aborts the awaiting callback) still leaves
 //! an owner to finish that cleanup.
+//!
+//! What a hook's own model and tool work did is returned with its outcome
+//! ([`Execution`]): the usage of a prompt hook's one request, and for an
+//! agent hook every event its agent produced (recorded by a Petri sink) with
+//! the prompt's usage, so the service can put them on the record under the
+//! hook's own identity.
 
 use std::collections::BTreeMap;
+use std::mem;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use execution::hooks::HookUsage;
 use executor::{ExecEnv, OutputMode, ProcessSpec, Sig, StdinMode};
 use frontend_fabro::hooks::{
     DEFAULT_MAX_TOOL_ROUNDS, DEFAULT_MODEL, HookDefinition, HookKind, TlsMode,
 };
 use lithos_llm::types::{Message, Request, ResponseFormat, Role};
-use pebble_coding_agent::events::PermissionLevel;
-use pebble_coding_agent::{CodingAgent, ShutdownReason};
+use pebble_coding_agent::events::{
+    CodingAgentEvent, CodingEvent, EventSink, EventSinkError, PermissionLevel, TokenUsage,
+};
+use pebble_coding_agent::{CodingAgent, PromptReport, ShutdownReason};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 use tokio::time::{sleep, timeout};
@@ -65,6 +76,31 @@ pub enum Executed {
     Unsupported(String),
 }
 
+/// The agent backend an agent hook runs on, as the record names it.
+pub const AGENT_BACKEND: &str = "pebble";
+
+/// How one hook ended, with what its own model and tool work cost and did.
+#[derive(Clone, Debug)]
+pub struct Execution {
+    pub outcome:  Executed,
+    /// Present when the hook made a model request, answered or not.
+    pub usage:    Option<HookUsage>,
+    /// Every event the hook's agent produced, in order: Pebble's
+    /// `CodingAgentEvent` envelopes.
+    pub activity: Vec<Value>,
+}
+
+impl Execution {
+    /// An outcome with no model or tool work behind it.
+    fn of(outcome: Executed) -> Self {
+        Self {
+            outcome,
+            usage: None,
+            activity: Vec::new(),
+        }
+    }
+}
+
 /// One `reqwest` client per TLS mode, built on first use.
 #[derive(Default)]
 pub struct HttpClients {
@@ -97,11 +133,13 @@ pub async fn execute(
     env: Option<&Arc<dyn ExecEnv>>,
     client: Option<&PebbleClient>,
     http: &HttpClients,
-) -> Executed {
+) -> Execution {
     match &hook.kind {
-        HookKind::Command { command } => command_hook(hook, command, context, env).await,
+        HookKind::Command { command } => {
+            Execution::of(command_hook(hook, command, context, env).await)
+        }
         HookKind::Http { url, headers, tls } => {
-            http_hook(hook, url, headers, *tls, context, http).await
+            Execution::of(http_hook(hook, url, headers, *tls, context, http).await)
         }
         HookKind::Prompt { prompt, model } => {
             prompt_hook(hook, prompt, model.as_deref(), context, client).await
@@ -380,9 +418,11 @@ async fn prompt_hook(
     model: Option<&str>,
     context: &Context,
     client: Option<&PebbleClient>,
-) -> Executed {
+) -> Execution {
     let Some(client) = client else {
-        return Executed::Unsupported("a prompt hook needs the application's model client".into());
+        return Execution::of(Executed::Unsupported(
+            "a prompt hook needs the application's model client".into(),
+        ));
     };
     let model = model.unwrap_or(DEFAULT_MODEL);
     let schema = json!({
@@ -416,18 +456,36 @@ async fn prompt_hook(
     }
     let request = match builder.build() {
         Ok(request) => request,
-        Err(error) => return Executed::FailedOpen(format!("prompt hook request: {error}")),
+        Err(error) => {
+            return Execution::of(Executed::FailedOpen(format!(
+                "prompt hook request: {error}"
+            )));
+        }
     };
-    match timeout(hook.timeout(), client.0.complete(request)).await {
-        Ok(Ok(response)) => match verdict(&response.text()) {
-            Some(decision) => Executed::Decided(decision),
-            None => Executed::FailedOpen("the model did not return a hook verdict".into()),
-        },
+    // One request, answered or not; the answer brings its usage.
+    let mut usage = HookUsage {
+        requests: 1,
+        ..HookUsage::default()
+    };
+    let outcome = match timeout(hook.timeout(), client.0.complete(request)).await {
+        Ok(Ok(response)) => {
+            usage.tokens = Some(json!(TokenUsage::from(response.usage)));
+            usage.cost_usd_micros = response.cost.as_ref().map(|cost| cost.usd_micros);
+            match verdict(&response.text()) {
+                Some(decision) => Executed::Decided(decision),
+                None => Executed::FailedOpen("the model did not return a hook verdict".into()),
+            }
+        }
         Ok(Err(error)) => Executed::FailedOpen(format!("prompt hook model call failed: {error}")),
         Err(_) => Executed::FailedOpen(format!(
             "prompt hook timed out after {} ms",
             hook.timeout().as_millis()
         )),
+    };
+    Execution {
+        outcome,
+        usage: Some(usage),
+        activity: Vec::new(),
     }
 }
 
@@ -439,16 +497,18 @@ async fn agent_hook(
     context: &Context,
     env: Option<&Arc<dyn ExecEnv>>,
     client: Option<&PebbleClient>,
-) -> Executed {
+) -> Execution {
     let Some(client) = client else {
-        return Executed::Unsupported("an agent hook needs the application's model client".into());
+        return Execution::of(Executed::Unsupported(
+            "an agent hook needs the application's model client".into(),
+        ));
     };
     let Some(env) = env else {
-        return Executed::Unsupported(
+        return Execution::of(Executed::Unsupported(
             "an agent hook runs its tools in the sandbox, and no sandbox environment is available \
              at this point"
                 .into(),
-        );
+        ));
     };
     let work = AgentWork {
         client:       client.clone(),
@@ -475,9 +535,68 @@ async fn agent_hook(
     let outcome = task.await;
     drop(guard);
     match outcome {
-        Ok(executed) => executed,
-        Err(error) => Executed::FailedOpen(format!("agent hook task failed: {error}")),
+        Ok(execution) => execution,
+        Err(error) => Execution::of(Executed::FailedOpen(format!(
+            "agent hook task failed: {error}"
+        ))),
     }
+}
+
+/// The hook agent's Petri event sink: every event the agent publishes, in
+/// order, kept for the hook's record, and the counts its usage wants. The
+/// driver's completion fence does not apply here; the agent's shutdown
+/// flushes the last events before the record is taken.
+#[derive(Default)]
+struct HookEvents {
+    events:     Mutex<Vec<Value>>,
+    requests:   AtomicU64,
+    tool_calls: AtomicU64,
+}
+
+#[async_trait::async_trait]
+impl EventSink for HookEvents {
+    async fn record(&self, event: &CodingAgentEvent) -> Result<(), EventSinkError> {
+        match &event.event {
+            CodingEvent::LlmRequestStarted { .. } => {
+                self.requests.fetch_add(1, Ordering::Relaxed);
+            }
+            CodingEvent::ToolCallStarted { .. } => {
+                self.tool_calls.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+        let value = serde_json::to_value(event)
+            .map_err(|e| EventSinkError::new("Could not encode Pebble event").with_source(e))?;
+        self.events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(value);
+        Ok(())
+    }
+}
+
+impl HookEvents {
+    /// The record so far: the events, and the usage with the counts filled
+    /// in.
+    fn finish(&self, outcome: Executed, mut usage: HookUsage) -> Execution {
+        usage.requests = self.requests.load(Ordering::Relaxed);
+        usage.tool_calls = self.tool_calls.load(Ordering::Relaxed);
+        let activity = mem::take(&mut *self.events.lock().unwrap_or_else(PoisonError::into_inner));
+        Execution {
+            outcome,
+            usage: Some(usage),
+            activity,
+        }
+    }
+}
+
+/// Add a settled prompt's accounting to the hook's usage.
+fn account(usage: &mut HookUsage, report: &PromptReport) {
+    let ms = |duration: Duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+    usage.tokens = Some(json!(report.usage));
+    usage.cost_usd_micros = report.cost_usd_micros;
+    usage.inference_ms = Some(ms(report.timing.inference));
+    usage.tool_ms = Some(ms(report.timing.tool));
 }
 
 /// One agent hook's work, owned by the task that runs it.
@@ -499,9 +618,11 @@ enum Interrupted {
 impl AgentWork {
     /// Run the agent to a verdict within the budget, unless `cancel` fires
     /// first. Whichever way it ends, the tool the agent may be running is
-    /// stopped and the agent's tasks are joined before this returns.
-    async fn run(self, cancel: CancellationToken) -> Executed {
+    /// stopped and the agent's tasks are joined before this returns, and the
+    /// record carries every event the agent produced up to then.
+    async fn run(self, cancel: CancellationToken) -> Execution {
         let kill = CancellationToken::new();
+        let events = Arc::new(HookEvents::default());
         let grace = self.env.grace();
         let cleanup = grace + CLEANUP_MARGIN;
         let timed_out = || {
@@ -510,17 +631,21 @@ impl AgentWork {
                 self.budget.as_millis()
             ))
         };
+        let mut usage = HookUsage::default();
         let deadline = sleep(self.budget);
         tokio::pin!(deadline);
         let mut agent = tokio::select! {
             biased;
             () = cancel.cancelled() => {
-                return Executed::FailedOpen("agent hook cancelled before it started".into());
+                return events.finish(
+                    Executed::FailedOpen("agent hook cancelled before it started".into()),
+                    usage,
+                );
             }
-            () = &mut deadline => return timed_out(),
-            started = self.start(&cancel, &kill) => match started {
+            () = &mut deadline => return events.finish(timed_out(), usage),
+            started = self.start(&cancel, &kill, events.clone()) => match started {
                 Ok(agent) => agent,
-                Err(message) => return Executed::FailedOpen(message),
+                Err(message) => return events.finish(Executed::FailedOpen(message), usage),
             },
         };
         let (text, reason) = {
@@ -534,6 +659,7 @@ impl AgentWork {
             };
             match ended {
                 Ok(report) => {
+                    account(&mut usage, &report);
                     let reason = if report.result.is_ok() {
                         ShutdownReason::Completed
                     } else {
@@ -550,10 +676,12 @@ impl AgentWork {
                     // tool gets a TERM, the grace, then a KILL, and its result
                     // is committed. The kill token is the last resort should
                     // even that outlive the bound; the prompt is then dropped
-                    // and `shutdown` finishes what it can.
+                    // and `shutdown` finishes what it can. An unwound prompt
+                    // still reports what it spent.
                     cancel.cancel();
-                    if timeout(cleanup, &mut prompt).await.is_err() {
-                        kill.cancel();
+                    match timeout(cleanup, &mut prompt).await {
+                        Ok(report) => account(&mut usage, &report),
+                        Err(_) => kill.cancel(),
                     }
                     let message = match why {
                         Interrupted::Cancelled => Err("agent hook cancelled".to_owned()),
@@ -566,22 +694,27 @@ impl AgentWork {
                 }
             }
         };
-        // Join the agent's tasks before the verdict is returned.
+        // Join the agent's tasks, flushing its last events to the sink,
+        // before the record is taken and the verdict returned.
         let _ = timeout(cleanup, agent.shutdown(reason)).await;
-        match text {
+        let outcome = match text {
             Ok(text) => match verdict(&text) {
                 Some(decision) => Executed::Decided(decision),
                 None => Executed::FailedOpen("the agent did not return a hook verdict".into()),
             },
             Err(message) => Executed::FailedOpen(message),
-        }
+        };
+        events.finish(outcome, usage)
     }
 
-    /// Probe the environment and start the agent with the coding tools.
+    /// Probe the environment and start the agent with the coding tools and
+    /// the hook's own event sink. The agent runs no tool-hook middleware:
+    /// hooks fire no hooks.
     async fn start(
         &self,
         cancel: &CancellationToken,
         kill: &CancellationToken,
+        events: Arc<HookEvents>,
     ) -> Result<CodingAgent, String> {
         let environment =
             PebbleEnvironment::prepare(self.env.clone(), cancel.clone(), kill.clone())
@@ -590,6 +723,7 @@ impl AgentWork {
         CodingAgent::builder(self.client.0.clone(), Arc::new(environment))
             .model(&self.model)
             .permission_level(PermissionLevel::Full)
+            .event_sink(events)
             .build()
             .await
             .map_err(|e| format!("agent hook could not start: {e}"))

@@ -24,7 +24,7 @@ use serde::Deserialize;
 use steps::{Step, StepCtx};
 
 use crate::checkout;
-use crate::hooks::{BLOCKED_CLASS, report_event, view_of};
+use crate::hooks::{BLOCKED_CLASS, record_report, view_of};
 use crate::outcome::Stage;
 
 pub const KIND: StepKindId = STAGE_KIND;
@@ -232,18 +232,15 @@ async fn start_hooks(
                 payload,
             })
             .await;
-        if !report.is_silent() {
-            let _ = ctx
-                .logs
-                .send(report_event(
-                    &ctx.node,
-                    ctx.firing,
-                    ctx.attempt,
-                    event,
-                    &report,
-                ))
-                .await;
-        }
+        record_report(
+            &ctx.logs,
+            &ctx.node,
+            ctx.firing,
+            ctx.attempt,
+            event,
+            &report,
+        )
+        .await;
         let admission = matches!(point, HookPoint::BeforeVisit | HookPoint::BeforeAttempt);
         match report.decision {
             HookDecision::Skip { .. } if admission => {

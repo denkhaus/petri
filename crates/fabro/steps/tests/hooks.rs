@@ -3,7 +3,7 @@
 //! four executor types, Fabro's decision rules, and the tool boundary of the
 //! native backend. Plus fidelity, threads and project memory on real runs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
+use execution::events::{EventBody, RunEvent, replay_run};
 use execution::hooks::{
     HookAdapter, HookDecision, HookPoint, HookReport, HookRequest, HookRun, HookService,
     HookServiceHandle,
@@ -25,10 +26,10 @@ use fabro_steps::{
 };
 use frontend::{CompileInputs, Lowered, MapFiles};
 use ir::{Graph, RunStatus, StepEvent, Value};
-use lithos_llm::types::{Role, Speed};
+use lithos_llm::types::{ErrorKind, Role, Speed};
 use pebble_coding_agent::test_support::{
-    ScriptedCall, ScriptedCompletion, ScriptedProvider, client_from, message_text, text_response,
-    tool_call_response,
+    ScriptedCall, ScriptedCompletion, ScriptedFailure, ScriptedProvider, client_from, message_text,
+    text_response, tool_call_response,
 };
 use runtime::driver::lifecycle::Note;
 use runtime::driver::{EventObserver, ExecutionReport};
@@ -77,6 +78,17 @@ impl Customs {
             .filter_map(|(node, value)| {
                 let note = Note::from_step_event(&StepEvent::Custom(value))?;
                 (note.kind == "hook").then_some((node, note.payload))
+            })
+            .collect()
+    }
+
+    /// The `hook.activity` notes: `(node, payload)`, in order.
+    fn hook_activity(&self) -> Vec<(String, Value)> {
+        self.all()
+            .into_iter()
+            .filter_map(|(node, value)| {
+                let note = Note::from_step_event(&StepEvent::Custom(value))?;
+                (note.kind == "hook.activity").then_some((node, note.payload))
             })
             .collect()
     }
@@ -320,6 +332,7 @@ impl HookService for HostService {
                 state:       "executed".into(),
                 duration_ms: Some(1),
                 message:     None,
+                usage:       None,
             });
         }
         report
@@ -332,6 +345,35 @@ impl HookService for HostService {
 
 fn workspace(dir: &RunDir) -> PathBuf {
     dir.path().join("scopes/scope-0/work")
+}
+
+/// The workspace of a run under the coordinator (`host::run_configured`).
+fn coordinated_workspace(dir: &RunDir) -> PathBuf {
+    dir.path().join("scopes/invocation-0-scope-0/work")
+}
+
+/// Run one graph under the coordinator, as the standalone host does, so the
+/// run dir replays (`replay_run` reads the coordinator log).
+async fn run_replayable(
+    dir: &RunDir,
+    graph: Graph,
+    client: Option<lithos_llm::Client>,
+) -> (ExecutionReport, Arc<Customs>) {
+    let (rt, customs) = runtime(dir, client);
+    let report = host::run_configured(&rt, HostRun::new(graph), |_, _| {})
+        .await
+        .expect("the run completes");
+    (report, customs)
+}
+
+/// The variant name of a Pebble event envelope's `event`: the one key of a
+/// variant with data, the string itself for a unit variant.
+fn variant(envelope: &Value) -> Option<String> {
+    match &envelope["event"] {
+        Value::String(name) => Some(name.clone()),
+        Value::Object(map) => map.keys().next().cloned(),
+        _ => None,
+    }
 }
 
 fn read(path: &Path) -> String {
@@ -972,6 +1014,102 @@ model = "test/model"
         .clone();
     assert_eq!(c["decision"]["reason"], "unsafe stage");
     assert_eq!(c["hooks"][0]["state"], "executed");
+    // Each verdict cost one request, whose usage is on the record: the
+    // scripted model bills ten input and five output tokens per answer.
+    let a = notes
+        .iter()
+        .find(|(n, r)| n == "a" && r["point"] == "before_attempt")
+        .expect("a")
+        .1
+        .clone();
+    for (node, report) in [("a", &a), ("b", &b), ("c", &c)] {
+        let usage = &report["hooks"][0]["usage"];
+        assert_eq!(usage["requests"], 1, "{node}: {report}");
+        assert_eq!(usage["tokens"]["input"], 10, "{node}: {report}");
+        assert_eq!(usage["tokens"]["output"], 5, "{node}: {report}");
+        assert_eq!(
+            usage["tool_calls"], 0,
+            "a prompt hook runs no tool: {report}"
+        );
+    }
+    assert!(
+        customs.hook_activity().is_empty(),
+        "a prompt hook has no agent"
+    );
+}
+
+/// A prompt hook whose request fails or never answers still records the
+/// request it made, with no tokens, beside its fail-open state.
+#[tokio::test]
+async fn prompt_hook_usage_records_a_failed_and_a_timed_out_request() {
+    let dir = RunDir::new("hooks-prompt-usage");
+    let (client, provider) = scripted(vec![], vec![
+        ScriptedCompletion::Failure(ScriptedFailure::terminal(ErrorKind::QuotaExceeded, "spent")),
+        ScriptedCompletion::Pending,
+    ]);
+    let graph = lower(
+        r#"digraph W {
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        a [shape=parallelogram, script="echo a > a.txt"]
+        b [shape=parallelogram, script="echo b > b.txt"]
+        start -> a -> b -> exit
+    }"#,
+        r#"
+[[run.hooks]]
+name = "guard"
+event = "stage_start"
+matcher = "^(a|b)$"
+prompt = "Should this stage proceed?"
+model = "test/model"
+timeout = "300ms"
+"#,
+    );
+    let (report, customs) = run(&dir, graph, Some(client)).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let ws = workspace(&dir);
+    assert!(
+        ws.join("a.txt").exists() && ws.join("b.txt").exists(),
+        "both fail open"
+    );
+    assert_eq!(provider.completion_requests().len(), 2);
+    let notes = customs.hook_notes();
+    let of = |node: &str| {
+        notes
+            .iter()
+            .find(|(n, r)| n == node && r["point"] == "before_attempt")
+            .map_or_else(|| panic!("{node}: {notes:?}"), |(_, r)| r.clone())
+    };
+    let a = of("a");
+    assert_eq!(a["hooks"][0]["state"], "failed_open", "{a}");
+    assert!(
+        a["hooks"][0]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("model call failed")),
+        "{a}"
+    );
+    assert_eq!(a["hooks"][0]["usage"]["requests"], 1, "{a}");
+    assert!(
+        a["hooks"][0]["usage"].get("tokens").is_none(),
+        "no answer, no tokens: {a}"
+    );
+    let b = of("b");
+    assert_eq!(b["hooks"][0]["state"], "failed_open", "{b}");
+    // The request's own deadline (the hook's timeout) or the hook's wrapper:
+    // whichever fires first, the hook fails open with the request on record.
+    assert!(
+        b["hooks"][0]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("timed out") || m.contains("deadline expired")),
+        "{b}"
+    );
+    assert_eq!(b["hooks"][0]["usage"]["requests"], 1, "{b}");
+    assert!(b["hooks"][0]["usage"].get("tokens").is_none(), "{b}");
 }
 
 /// An agent hook runs a Pebble agent with the coding tools in the sandbox:
@@ -1017,14 +1155,14 @@ event = "pre_tool_use"
 script = "echo tool-guard-ran >> tool-hooks.log"
 "#,
     );
-    let (report, customs) = run(&dir, graph, Some(client)).await;
+    let (report, customs) = run_replayable(&dir, graph, Some(client)).await;
     assert_eq!(
         report.status,
         RunStatus::Failed,
         "{:?}",
         report.state.errors()
     );
-    let ws = workspace(&dir);
+    let ws = coordinated_workspace(&dir);
     assert!(!ws.join("b.txt").exists());
     assert_eq!(provider.requests().len(), 2, "one tool round, one verdict");
     let sent = serde_json::to_string(&provider.requests()[1]).expect("request");
@@ -1044,6 +1182,216 @@ script = "echo tool-guard-ran >> tool-hooks.log"
         .expect("b");
     assert_eq!(b["decision"]["reason"], "marker says stop");
     assert_eq!(b["hooks"][0]["name"], "verify");
+    // What the hook's agent spent: two model turns and one tool call, the
+    // scripted model's ten-and-five per answer summed.
+    let usage = &b["hooks"][0]["usage"];
+    assert_eq!(usage["requests"], 2, "{b}");
+    assert_eq!(usage["tool_calls"], 1, "{b}");
+    assert_eq!(usage["tokens"]["input"], 20, "{b}");
+    assert_eq!(usage["tokens"]["output"], 10, "{b}");
+    assert!(
+        usage["inference_ms"].is_u64() && usage["tool_ms"].is_u64(),
+        "{b}"
+    );
+    // What it did, on the record under the hook's identity, attributed to
+    // the stage it guarded: Pebble's own events, the tool call among them,
+    // through to the session's end.
+    let activity = customs.hook_activity();
+    assert!(activity.iter().all(|(node, _)| node == "b"), "{activity:?}");
+    assert!(
+        activity.iter().all(|(_, a)| {
+            a["hook"] == json!({ "point": "before_attempt", "hook": "verify" })
+                && a["backend"] == "pebble"
+        }),
+        "{activity:?}"
+    );
+    let variants: Vec<String> = activity
+        .iter()
+        .filter_map(|(_, a)| variant(&a["envelope"]))
+        .collect();
+    assert!(
+        variants.contains(&"ToolCallStarted".to_owned()),
+        "{variants:?}"
+    );
+    assert!(
+        variants.contains(&"SessionEnded".to_owned()),
+        "{variants:?}"
+    );
+    let tool = activity
+        .iter()
+        .find(|(_, a)| a["envelope"]["event"].get("ToolCallStarted").is_some())
+        .expect("the tool call")
+        .1
+        .clone();
+    assert_eq!(
+        tool["envelope"]["event"]["ToolCallStarted"]["tool_name"],
+        "shell"
+    );
+    // The same facts through the public stream, replayed from the run dir:
+    // typed hook activity apart from any stage's own agent activity.
+    let events = replay_run(dir.path()).expect("replays");
+    let replayed: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e.body, EventBody::HookActivity { .. }))
+        .collect();
+    assert_eq!(replayed.len(), activity.len(), "{replayed:#?}");
+    assert!(replayed.iter().all(|e| {
+        e.subject.as_ref().is_some_and(|s| s.node.name == "b")
+            && matches!(
+                &e.body,
+                EventBody::HookActivity { hook, activity }
+                    if hook.hook == "verify" && activity.backend == "pebble" && activity.session.is_some()
+            )
+    }));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.body, EventBody::AgentActivity(_))),
+        "no stage ran an agent of its own"
+    );
+    let hook_note = events
+        .iter()
+        .find(|e| {
+            matches!(&e.body, EventBody::HostNote { kind, payload }
+            if kind == "hook" && payload["point"] == "before_attempt"
+                && e.subject.as_ref().is_some_and(|s| s.node.name == "b"))
+        })
+        .expect("the hook note on b");
+    let EventBody::HostNote { payload, .. } = &hook_note.body else {
+        unreachable!()
+    };
+    assert_eq!(payload["hooks"][0]["usage"]["requests"], 2);
+}
+
+/// A stage that runs its own native agent, guarded by an agent hook: the
+/// hook's model turns and tool call go on the record under the hook's
+/// identity, the stage's usage counts the stage's one turn alone, and the
+/// public stream keeps the two apart, live and after replay.
+#[tokio::test]
+async fn an_agent_hooks_activity_is_kept_apart_from_the_stages_own() {
+    let dir = RunDir::new("hooks-agent-apart");
+    let (client, provider) = scripted(
+        vec![
+            // The hook: one look, one verdict.
+            ScriptedCall::response(tool_call_response(
+                "shell",
+                "look",
+                json!({"command": "cat marker.txt"}),
+            )),
+            ScriptedCall::response(text_response(r#"{"ok": true}"#)),
+            // The stage's own agent: one answer.
+            ScriptedCall::response(text_response("Done.")),
+        ],
+        vec![],
+    );
+    let graph = lower(
+        r#"digraph W {
+        graph [backend="api", default_model="test/model"]
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        a [shape=parallelogram, script="echo go > marker.txt"]
+        b [prompt="Do the work."]
+        start -> a -> b -> exit
+    }"#,
+        r#"
+[[run.hooks]]
+name = "verify"
+event = "stage_start"
+matcher = "^b$"
+agent = "enabled"
+prompt = "Read marker.txt and decide."
+model = "test/model"
+"#,
+    );
+    let (report, customs) = run_replayable(&dir, graph, Some(client)).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert_eq!(provider.requests().len(), 3);
+    let events = replay_run(dir.path()).expect("replays");
+    let on_b = |e: &&RunEvent| e.subject.as_ref().is_some_and(|s| s.node.name == "b");
+    // The stage's own accounting: one prompt, one answer's tokens.
+    let finished = events
+        .iter()
+        .filter(on_b)
+        .find_map(|e| match &e.body {
+            EventBody::AttemptFinished { outcome, .. } => Some(outcome.clone()),
+            _ => None,
+        })
+        .expect("b's attempt");
+    assert_eq!(finished.metrics.custom["pebble.prompts"], 1);
+    assert_eq!(finished.metrics.custom["pebble.usage"]["input"], 10);
+    assert_eq!(finished.metrics.custom["pebble.usage"]["output"], 5);
+    // The hook's accounting, on the hook's record.
+    let hook_note = events
+        .iter()
+        .filter(on_b)
+        .find_map(|e| match &e.body {
+            EventBody::HostNote { kind, payload }
+                if kind == "hook" && payload["point"] == "before_attempt" =>
+            {
+                Some(payload.clone())
+            }
+            _ => None,
+        })
+        .expect("the hook note on b");
+    assert_eq!(hook_note["hooks"][0]["name"], "verify");
+    assert_eq!(hook_note["hooks"][0]["usage"]["requests"], 2);
+    assert_eq!(hook_note["hooks"][0]["usage"]["tool_calls"], 1);
+    assert_eq!(hook_note["hooks"][0]["usage"]["tokens"]["input"], 20);
+    // Two agents, two sessions, two event families: the stage's under
+    // `agent_activity`, the hook's under `hook_activity`, never mixed.
+    let stage_sessions: BTreeSet<String> = events
+        .iter()
+        .filter(on_b)
+        .filter_map(|e| match &e.body {
+            EventBody::AgentActivity(activity) => activity.session.clone(),
+            _ => None,
+        })
+        .collect();
+    let hook_sessions: BTreeSet<String> = events
+        .iter()
+        .filter(on_b)
+        .filter_map(|e| match &e.body {
+            EventBody::HookActivity { hook, activity } if hook.hook == "verify" => {
+                activity.session.clone()
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stage_sessions.len(), 1, "{stage_sessions:?}");
+    assert_eq!(hook_sessions.len(), 1, "{hook_sessions:?}");
+    assert!(stage_sessions.is_disjoint(&hook_sessions));
+    let stage_tool_calls = events
+        .iter()
+        .filter(on_b)
+        .filter(|e| {
+            matches!(&e.body, EventBody::AgentActivity(a)
+            if a.envelope["event"].get("ToolCallStarted").is_some())
+        })
+        .count();
+    assert_eq!(
+        stage_tool_calls, 0,
+        "the hook's tool call is not the stage's"
+    );
+    let hook_tool_calls = events
+        .iter()
+        .filter(|e| {
+            matches!(&e.body, EventBody::HookActivity { activity, .. }
+            if activity.envelope["event"].get("ToolCallStarted").is_some())
+        })
+        .count();
+    assert_eq!(hook_tool_calls, 1);
+    // Replay carries exactly what was recorded live.
+    let live = customs.hook_activity().len();
+    let replayed = events
+        .iter()
+        .filter(|e| matches!(e.body, EventBody::HookActivity { .. }))
+        .count();
+    assert_eq!(replayed, live);
 }
 
 /// A `pgrep -f` pattern for the tool process [`ticking_tool`] starts: the
@@ -1147,6 +1495,23 @@ timeout = "1500ms"
             .as_str()
             .is_some_and(|m| m.contains("timed out")),
         "{b}"
+    );
+    // The interrupted agent's record: the one model turn that asked for the
+    // tool, the tool call, and its events up to the session's end.
+    assert_eq!(b["hooks"][0]["usage"]["requests"], 1, "{b}");
+    assert_eq!(b["hooks"][0]["usage"]["tool_calls"], 1, "{b}");
+    let activity = customs.hook_activity();
+    assert!(
+        activity.iter().any(|(node, a)| node == "b"
+            && a["hook"]["hook"] == "slow"
+            && a["envelope"]["event"].get("ToolCallStarted").is_some()),
+        "{activity:?}"
+    );
+    assert!(
+        activity
+            .iter()
+            .any(|(_, a)| variant(&a["envelope"]).as_deref() == Some("SessionEnded")),
+        "the agent was shut down: {activity:?}"
     );
     assert!(
         line_count(&ws.join("ticks.log")) > 0,

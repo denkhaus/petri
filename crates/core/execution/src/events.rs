@@ -75,11 +75,13 @@ use ir::{
     LogStream, Metrics, NodeId, Outcome, RunStatus, Status, StepEvent, Token, Value,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use smol_str::SmolStr;
 use steps::{ANSWER_KEY, Question};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use crate::hooks::{HOOK_ACTIVITY_NOTE_KIND, HookActivity, HookOperation};
 use crate::host::EVENTS_FILE;
 use crate::store::execution_relative_dir;
 use crate::{
@@ -478,9 +480,18 @@ pub enum EventBody {
         uri:  String,
     },
     AgentActivity(AgentActivity),
+    /// A hook's own agent did something: the backend envelope a hook's agent
+    /// produced, attributed to the firing whose hook ran it and to the hook
+    /// operation, apart from the stage's own `agent_activity`. From a
+    /// `hook.activity` note.
+    HookActivity {
+        hook:     HookOperation,
+        activity: AgentActivity,
+    },
     /// A host extension recorded a fact (`driver::lifecycle::Note`). Kinds
     /// the driver writes: `result_prepared`, `transition`. Kinds the hook
-    /// adapter writes: `hook`.
+    /// adapter writes: `hook` (a hook service report, with each hook's
+    /// usage); its `hook.activity` notes project to `hook_activity`.
     HostNote {
         kind:    SmolStr,
         payload: Value,
@@ -711,15 +722,17 @@ impl Projection {
             CoordinatorEvent::RunPaused => (None, None, EventBody::RunPaused),
             CoordinatorEvent::RunUnpaused => (None, None, EventBody::RunUnpaused),
             // A run-level hook report: the same `host_note` a firing's hook
-            // report is, with no subject, since no firing owns it.
+            // report is (and a hook's agent activity the same
+            // `hook_activity`), with no subject, since no firing owns it.
             CoordinatorEvent::RunNote {
                 execution,
                 kind,
                 payload,
-            } => (None, *execution, EventBody::HostNote {
-                kind:    kind.clone(),
-                payload: payload.clone(),
-            }),
+            } => (
+                None,
+                *execution,
+                note_body(Note::new(kind.clone(), payload.clone())),
+            ),
             CoordinatorEvent::RunFinished { status } => {
                 (None, None, EventBody::RunFinished { status: *status })
             }
@@ -1449,6 +1462,17 @@ fn agent_activity(value: &Value) -> Option<AgentActivity> {
     })
 }
 
+/// A `hook.activity` note's payload as the operation and the backend
+/// activity it carries, read the way a stage's own envelope is.
+fn hook_activity(payload: &Value) -> Option<(HookOperation, AgentActivity)> {
+    let record: HookActivity = serde_json::from_value(payload.clone()).ok()?;
+    let activity = agent_activity(&json!({
+        BACKEND_EVENT_KIND_KEY: record.backend,
+        "event": record.envelope,
+    }))?;
+    Some((record.hook, activity))
+}
+
 // ── Live delivery ──────────────────────────────────────────────────────────
 
 /// Where projected events go. `deliver` is awaited per event, in order: a
@@ -1646,6 +1670,13 @@ impl ExecutionObserver for EventProjector {
 fn note_body(note: Note) -> EventBody {
     let budget = || serde_json::from_value::<BudgetNote>(note.payload.clone()).ok();
     match note.kind.as_str() {
+        HOOK_ACTIVITY_NOTE_KIND => match hook_activity(&note.payload) {
+            Some((hook, activity)) => EventBody::HookActivity { hook, activity },
+            None => EventBody::HostNote {
+                kind:    note.kind,
+                payload: note.payload,
+            },
+        },
         BUDGET_PAUSED_KIND => match budget() {
             Some(budget) => EventBody::BudgetPaused {
                 remaining_ms:      budget.remaining_ms,

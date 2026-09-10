@@ -65,7 +65,7 @@ use smol_str::SmolStr;
 use steps::{Step, StepCtx};
 
 use crate::blobs::{self, OutputStore};
-use crate::hooks::{report_event, step_view};
+use crate::hooks::{record_report, step_view};
 use crate::stage::record;
 use crate::workflow::ChildInvoker;
 
@@ -669,18 +669,15 @@ async fn parallel_start(ctx: &StepCtx, config: &ForkConfig) {
             payload: Value::Null,
         })
         .await;
-    if !report.is_silent() {
-        let _ = ctx
-            .logs
-            .send(report_event(
-                &ctx.node,
-                ctx.firing,
-                ctx.attempt,
-                HookEvent::ParallelStart,
-                &report,
-            ))
-            .await;
-    }
+    record_report(
+        &ctx.logs,
+        &ctx.node,
+        ctx.firing,
+        ctx.attempt,
+        HookEvent::ParallelStart,
+        &report,
+    )
+    .await;
 }
 
 /// Fabro's `parallel_complete`: every branch of `fork` is in, before the
@@ -704,18 +701,15 @@ pub async fn parallel_complete(ctx: &StepCtx, fork: &str, label: &str) {
             payload: serde_json::to_value(payload).unwrap_or(Value::Null),
         })
         .await;
-    if !report.is_silent() {
-        let _ = ctx
-            .logs
-            .send(report_event(
-                &ctx.node,
-                ctx.firing,
-                ctx.attempt,
-                HookEvent::ParallelComplete,
-                &report,
-            ))
-            .await;
-    }
+    record_report(
+        &ctx.logs,
+        &ctx.node,
+        ctx.firing,
+        ctx.attempt,
+        HookEvent::ParallelComplete,
+        &report,
+    )
+    .await;
 }
 
 pub struct FanInStep;

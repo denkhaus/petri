@@ -632,7 +632,12 @@ hook before any scope exists, a model hook with no client) is recorded as
 hook's tool and agent are stopped and joined the same way, even though the
 cancelled firing no longer waits for them. Hook output reaches the run log
 through the same event pipeline as every other step output, so Petri's
-secret masking applies to it.
+secret masking applies to it. What a prompt or agent hook spent is on its
+record (`usage` on the hook's entry of the `hook` note or `fabro.hook`
+event: requests, tool calls, tokens, cost, timings), and every event an
+agent hook's agent produced is recorded under the hook's identity as
+`hook_activity`, apart from the stage's own agent activity and usage
+(`crates/core/execution/HOOKS.md`, "Recording").
 
 What a decision does: `stage_start` `skip` skips the node, `block` fails it
 with class `hook_blocked`; `edge_selected` `override` routes to `edge_to`

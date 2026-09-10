@@ -24,7 +24,12 @@ where one exists, the selected routes at `RouteSelected`, and an opaque
 `payload` for the points that carry one (the tool boundary, `ScopeReady`,
 `ForkCompleted`, the two run-level points). `HookReport` carries the
 decision, one `HookRun` per hook that ran or could not run (`executed`,
-`skipped`, `failed_open`, `unsupported`), and fail-open warnings.
+`skipped`, `failed_open`, `unsupported`) with what the hook's own model and
+tool work cost (`HookUsage`: requests made, tool calls started, the
+backend's token counts, cost, timings), fail-open warnings, and the
+activity of the hooks' own agents (`HookActivity`: the hook operation, the
+backend, the backend's event envelope), which is not part of the report's
+own record but recorded beside it.
 `configured_hooks` names the hooks configured for a point, matcher aside; a
 caller that cannot serve a boundary (the ACP backend, which has no post-tool
 boundary and sees only the tool calls that ask for permission) uses it to
@@ -129,8 +134,30 @@ and return the inner notes, or the run-level hooks never run or never record.
 Every non-silent report is recorded as a `hook` note on the firing, so it is in
 the engine log, replayed, and visible as `host_note { kind: "hook" }` in the
 public event stream. The note carries the point, the decision, each hook's
-name, state, duration and message, and the fail-open warnings. Executed hooks
-and hooks that could not run are told apart by `HookRun::state`.
+name, state, duration, message and usage, and the fail-open warnings.
+Executed hooks and hooks that could not run are told apart by
+`HookRun::state`.
+
+A hook that runs an agent (the local agent hook) owns model requests, tool
+calls and an event stream of its own. They go on the record under the hook's
+identity, never as the stage's: `HookReport::notes` yields one
+`hook.activity` note per agent event (`HookActivity { hook: { point, hook },
+backend, envelope }`), then the `hook` note; the adapter records them at the
+driver's points, and a step that asks a point itself records the same
+activity notes before its `fabro.hook` event (`fabro_steps::hooks::record_report`).
+The projector derives a `hook_activity` event from each note, apart from the
+stage's own `agent_activity`, so a consumer summing a stage's agent activity
+or its `pebble.usage` never counts a hook's work, and `HookRun::usage` sums
+the hook's requests, tool calls, tokens, cost and timings (a prompt hook's
+one request; an agent hook's turns, from the prompt's report, including an
+interrupted prompt's). The local agent hook installs a Petri event sink for
+this; the agent's shutdown flushes the last events before the record is
+taken. The reference discards all of this; Petri records it as an
+observability improvement (readiness item 7). Fabro's hook-recursion rule
+holds: a hook's agent runs without the tool-hook middleware and under the
+recursion guard, so its own tool calls fire no hooks, and its activity is
+the hook's, not a stage's (`agent_hooks_investigate_the_workspace_then_decide`,
+`an_agent_hooks_activity_is_kept_apart_from_the_stages_own`).
 
 ## Timeouts, errors, cancellation
 

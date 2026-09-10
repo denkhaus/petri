@@ -23,7 +23,7 @@ use serde_json::json;
 use smol_str::SmolStr;
 use steps::ProgressSender;
 
-use super::{ToolPayload, report_event};
+use super::{ToolPayload, record_report};
 
 /// The middleware, bound to one node's firing.
 pub struct ToolHooks {
@@ -65,23 +65,20 @@ impl ToolHooks {
                 payload: serde_json::to_value(&payload).unwrap_or(Value::Null),
             })
             .await;
-        if !report.is_silent() {
-            let event = match point {
-                HookPoint::BeforeToolUse => HookEvent::PreToolUse,
-                HookPoint::AfterToolUse => HookEvent::PostToolUse,
-                _ => HookEvent::PostToolUseFailure,
-            };
-            let _ = self
-                .logs
-                .send(report_event(
-                    &self.node,
-                    self.firing,
-                    self.attempt,
-                    event,
-                    &report,
-                ))
-                .await;
-        }
+        let event = match point {
+            HookPoint::BeforeToolUse => HookEvent::PreToolUse,
+            HookPoint::AfterToolUse => HookEvent::PostToolUse,
+            _ => HookEvent::PostToolUseFailure,
+        };
+        record_report(
+            &self.logs,
+            &self.node,
+            self.firing,
+            self.attempt,
+            event,
+            &report,
+        )
+        .await;
         report.decision
     }
 }

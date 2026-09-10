@@ -37,7 +37,7 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc;
 use tokio::time;
 
-use crate::hooks::{ToolPayload, WARNING_EVENT, report_event, warning_event};
+use crate::hooks::{ToolPayload, WARNING_EVENT, record_report, warning_event};
 
 /// The backend name in hook warnings.
 pub const BACKEND: &str = "acp";
@@ -140,17 +140,15 @@ impl AcpHooks {
                 payload: serde_json::to_value(&payload).unwrap_or(Value::Null),
             })
             .await;
-        if !report.is_silent() {
-            let _ = logs
-                .send(report_event(
-                    &self.node,
-                    self.firing,
-                    self.attempt,
-                    HookEvent::PreToolUse,
-                    &report,
-                ))
-                .await;
-        }
+        record_report(
+            logs,
+            &self.node,
+            self.firing,
+            self.attempt,
+            HookEvent::PreToolUse,
+            &report,
+        )
+        .await;
         match report.decision {
             HookDecision::Block { reason } => Some(reason),
             _ => None,

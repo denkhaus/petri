@@ -488,6 +488,7 @@ impl HookService for FakeHooks {
                 state:       "executed".into(),
                 duration_ms: Some(3),
                 message:     None,
+                usage:       None,
             });
         }
         report

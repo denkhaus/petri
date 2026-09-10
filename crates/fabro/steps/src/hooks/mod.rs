@@ -35,17 +35,21 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use execution::hooks::{
-    ForkCompletedPayload, HookDecision, HookPoint, HookReport, HookRequest, HookRun, HookService,
-    RunFinishedPayload, ScopeReleasedPayload,
+    ForkCompletedPayload, HOOK_ACTIVITY_NOTE_KIND, HookActivity, HookDecision, HookOperation,
+    HookPoint, HookReport, HookRequest, HookRun, HookService, RunFinishedPayload,
+    ScopeReleasedPayload,
 };
 use executor::ExecEnv;
 use frontend_fabro::hooks::{HookDefinition, HookEvent};
 use frontend_fabro::kinds::GOAL_CHECK_NODE;
 use ir::{EdgeId, Outcome, RunStatus, Status, Value};
+use runtime::driver::lifecycle::Note;
 use runtime::driver::{BranchRole, FiringView};
 use runtime::engine::RouteDecision;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, json};
+use smol_str::SmolStr;
+use tokio::sync::mpsc;
 
 use crate::outcome::reported_outcome;
 use crate::pebble::PebbleClient;
@@ -363,6 +367,7 @@ impl LocalHooks {
                          so the hook does not run"
                             .into(),
                     ),
+                    usage:       None,
                 });
             }
             return (Decision::Proceed, report);
@@ -376,7 +381,11 @@ impl LocalHooks {
         let mut merged = Decision::Proceed;
         for hook in matched {
             let started = Instant::now();
-            let result = IN_HOOK
+            let executors::Execution {
+                outcome: result,
+                usage,
+                activity,
+            } = IN_HOOK
                 .scope(
                     true,
                     executors::execute(
@@ -389,11 +398,24 @@ impl LocalHooks {
                 )
                 .await;
             let duration = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            // The hook's own agent activity goes on the record under the
+            // hook's identity, apart from the stage's own agent.
+            report
+                .activity
+                .extend(activity.into_iter().map(|envelope| HookActivity {
+                    hook: HookOperation {
+                        point,
+                        hook: hook.definition.name.clone(),
+                    },
+                    backend: SmolStr::new(executors::AGENT_BACKEND),
+                    envelope,
+                }));
             let mut run = HookRun {
-                name:        hook.definition.name.clone(),
-                state:       "executed".into(),
+                name: hook.definition.name.clone(),
+                state: "executed".into(),
                 duration_ms: Some(duration),
-                message:     None,
+                message: None,
+                usage,
             };
             let decision = match result {
                 executors::Executed::Decided(decision) => decision,
@@ -777,6 +799,33 @@ impl LocalHooks {
 fn merge_report(report: &mut HookReport, extra: HookReport) {
     report.hooks.extend(extra.hooks);
     report.warnings.extend(extra.warnings);
+    report.activity.extend(extra.activity);
+}
+
+/// Record a report a step asked for itself on the step's progress channel:
+/// each entry of the hooks' agent activity as its own `hook.activity` note,
+/// as the adapter records them, then the report as a [`REPORT_EVENT`] when it
+/// says something.
+pub async fn record_report(
+    logs: &mpsc::Sender<ir::StepEvent>,
+    node: &str,
+    firing: ir::FiringId,
+    attempt: ir::Attempt,
+    event: HookEvent,
+    report: &HookReport,
+) {
+    for activity in &report.activity {
+        let note = Note::new(
+            HOOK_ACTIVITY_NOTE_KIND,
+            serde_json::to_value(activity).unwrap_or(Value::Null),
+        );
+        let _ = logs.send(note.to_step_event()).await;
+    }
+    if !report.is_silent() {
+        let _ = logs
+            .send(report_event(node, firing, attempt, event, report))
+            .await;
+    }
 }
 
 #[async_trait::async_trait]
