@@ -1599,6 +1599,179 @@ model = "test/model"
     );
 }
 
+/// One agent-hook budget case: a hook on `b` with `max_tool_rounds` set to
+/// `rounds` (or left at its default) and a model scripted with `calls`.
+/// Returns the run directory (alive, so the workspace can be read), the
+/// report, its records, and the provider.
+async fn run_bounded_agent_hook(
+    name: &str,
+    rounds: Option<u32>,
+    calls: Vec<ScriptedCall>,
+) -> (RunDir, ExecutionReport, Arc<Customs>, Arc<ScriptedProvider>) {
+    let dir = RunDir::new(name);
+    let (client, provider) = scripted(calls, vec![]);
+    let bound = rounds.map_or(String::new(), |n| format!("max_tool_rounds = {n}\n"));
+    let graph = lower(
+        r#"digraph W {
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        a [shape=parallelogram, script="echo go > marker.txt"]
+        b [shape=parallelogram, script="echo b > b.txt"]
+        start -> a -> b -> exit
+    }"#,
+        &format!(
+            r#"
+[[run.hooks]]
+name = "verify"
+event = "stage_start"
+matcher = "^b$"
+agent = "enabled"
+prompt = "Investigate, then decide."
+model = "test/model"
+{bound}"#
+        ),
+    );
+    let (report, customs) = run(&dir, graph, Some(client)).await;
+    (dir, report, customs, provider)
+}
+
+/// A scripted tool turn that leaves a mark for each round the agent ran.
+fn round_call() -> ScriptedCall {
+    ScriptedCall::response(tool_call_response(
+        "shell",
+        "round",
+        json!({"command": "echo round >> rounds.log"}),
+    ))
+}
+
+/// `max_tool_rounds` is the hard bound Fabro's loop has, not advice to the
+/// model: an agent that keeps asking for tools runs that many model turns,
+/// its tools run for all but the last, and the hook fails open with the
+/// reference's warning, with the exhausted prompt's usage and events on the
+/// record. Zero rounds asks the model nothing. A verdict inside the budget
+/// decides as usual, and an unset bound leaves the default's room.
+#[tokio::test]
+async fn agent_hook_tool_rounds_are_a_hard_bound_that_fails_open() {
+    let hook_note = |customs: &Customs| {
+        customs
+            .hook_notes()
+            .into_iter()
+            .find(|(n, r)| n == "b" && r["point"] == "before_attempt")
+            .map(|(_, r)| r)
+            .expect("b's admission report")
+    };
+    let exhausted = |report: &Value| {
+        report["hooks"][0]["state"] == "failed_open"
+            && report["hooks"][0]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("exhausted max tool rounds"))
+    };
+
+    // Zero rounds: no model call, no tool, proceed.
+    let (dir, report, customs, provider) =
+        run_bounded_agent_hook("hooks-rounds-zero", Some(0), vec![round_call(); 4]).await;
+    let ws = workspace(&dir);
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert!(ws.join("b.txt").exists(), "the hook proceeded");
+    assert_eq!(provider.requests().len(), 0, "no model call");
+    assert!(!ws.join("rounds.log").exists(), "no tool ran");
+    let b = hook_note(&customs);
+    assert!(exhausted(&b), "{b}");
+
+    // One round: one model turn, which asks for tools; none runs.
+    let (dir, report, customs, provider) =
+        run_bounded_agent_hook("hooks-rounds-one", Some(1), vec![round_call(); 4]).await;
+    let ws = workspace(&dir);
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert!(ws.join("b.txt").exists());
+    assert_eq!(provider.requests().len(), 1, "one model turn");
+    assert!(
+        !ws.join("rounds.log").exists(),
+        "the refused turn's tool never ran"
+    );
+    let b = hook_note(&customs);
+    assert!(exhausted(&b), "{b}");
+    assert_eq!(b["hooks"][0]["usage"]["requests"], 1, "{b}");
+    assert!(
+        customs
+            .hook_activity()
+            .iter()
+            .any(|(_, a)| variant(&a["envelope"]).as_deref() == Some("ToolRoundsExhausted")),
+        "the exhaustion is on the record"
+    );
+
+    // Several rounds: as many model turns as rounds, tools for all but the
+    // last, then proceed.
+    let (dir, report, customs, provider) =
+        run_bounded_agent_hook("hooks-rounds-three", Some(3), vec![round_call(); 6]).await;
+    let ws = workspace(&dir);
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert!(ws.join("b.txt").exists());
+    assert_eq!(provider.requests().len(), 3, "three model turns");
+    assert_eq!(line_count(&ws.join("rounds.log")), 2, "two tool rounds ran");
+    let b = hook_note(&customs);
+    assert!(exhausted(&b), "{b}");
+    assert_eq!(b["hooks"][0]["usage"]["requests"], 3, "{b}");
+    assert_eq!(b["hooks"][0]["usage"]["tool_calls"], 2, "{b}");
+
+    // A verdict inside the budget decides.
+    let (dir, report, customs, provider) =
+        run_bounded_agent_hook("hooks-rounds-verdict", Some(3), vec![
+            round_call(),
+            ScriptedCall::response(text_response(r#"{"ok": false, "reason": "no"}"#)),
+        ])
+        .await;
+    let ws = workspace(&dir);
+    assert_eq!(
+        report.status,
+        RunStatus::Failed,
+        "the block fails the stage"
+    );
+    assert!(!ws.join("b.txt").exists());
+    assert_eq!(provider.requests().len(), 2);
+    assert_eq!(line_count(&ws.join("rounds.log")), 1);
+    let b = hook_note(&customs);
+    assert_eq!(b["hooks"][0]["state"], "executed", "{b}");
+    assert_eq!(b["decision"]["reason"], "no", "{b}");
+
+    // Unset: the default's fifty rounds leave room for a longer look.
+    let (dir, report, customs, provider) =
+        run_bounded_agent_hook("hooks-rounds-default", None, vec![
+            round_call(),
+            round_call(),
+            round_call(),
+            ScriptedCall::response(text_response(r#"{"ok": true}"#)),
+        ])
+        .await;
+    let ws = workspace(&dir);
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert!(ws.join("b.txt").exists());
+    assert_eq!(provider.requests().len(), 4);
+    assert_eq!(line_count(&ws.join("rounds.log")), 3);
+    let b = hook_note(&customs);
+    assert_eq!(b["hooks"][0]["state"], "executed", "{b}");
+}
+
 // ── Tool hooks at the native boundary ──────────────────────────────────────
 
 /// A `pre_tool_use` command hook blocks a real tool call: the file the shell

@@ -37,7 +37,9 @@ use lithos_llm::types::{Message, Request, ResponseFormat, Role};
 use pebble_coding_agent::events::{
     CodingAgentEvent, CodingEvent, EventSink, EventSinkError, PermissionLevel, TokenUsage,
 };
-use pebble_coding_agent::{CodingAgent, PromptReport, ShutdownReason};
+use pebble_coding_agent::{
+    CodingAgent, CodingAgentOptions, Error as AgentError, PromptReport, ShutdownReason,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt as _;
@@ -52,6 +54,10 @@ use crate::pebble::environment::PebbleEnvironment;
 /// Fabro's prompt for its hook evaluator.
 const EVALUATOR_SYSTEM: &str = "You are a hook evaluator for a workflow engine. Given context \
                                 about a workflow event, evaluate the condition.";
+
+/// The reference's warning when an agent hook runs out of tool rounds: the
+/// hook proceeds.
+const ROUNDS_EXHAUSTED: &str = "agent hook exhausted max tool rounds, proceeding";
 
 /// How long an agent hook's cleanup may take beyond the sandbox's grace once
 /// the hook is out of time or cancelled. The environment gives a stopped tool
@@ -510,6 +516,16 @@ async fn agent_hook(
                 .into(),
         ));
     };
+    // Fabro runs at most `max_tool_rounds` model turns, executing the tools
+    // each asks for, and proceeds when the last one still asks for tools.
+    // Pebble's budget of `rounds` lets `rounds` tool turns run and refuses
+    // the next one without running its tools, so `max_tool_rounds - 1`
+    // reaches the same decision at the same turn and spares the last,
+    // useless tool execution. Zero rounds is Fabro's loop that never asks
+    // the model: proceed without an agent.
+    let Some(rounds) = max_tool_rounds.checked_sub(1) else {
+        return Execution::of(Executed::FailedOpen(ROUNDS_EXHAUSTED.into()));
+    };
     let work = AgentWork {
         client:       client.clone(),
         env:          env.clone(),
@@ -517,9 +533,10 @@ async fn agent_hook(
         instructions: format!(
             "{EVALUATOR_SYSTEM}\n\n{}\n\nWhen you have decided, reply with only a JSON object: \
              {{\"ok\": true}} or {{\"ok\": false, \"reason\": \"...\"}}. You may use at most \
-             {max_tool_rounds} tool calls.",
+             {max_tool_rounds} tool rounds.",
             evaluator_message(prompt, context)
         ),
+        rounds:       usize::try_from(rounds).unwrap_or(usize::MAX),
         budget:       hook.timeout(),
     };
     // The agent and its tool belong to a task of their own, not to this
@@ -605,6 +622,9 @@ struct AgentWork {
     env:          Arc<dyn ExecEnv>,
     model:        String,
     instructions: String,
+    /// Pebble's tool-round budget: how many tool turns may run before a turn
+    /// that asks for tools ends the prompt.
+    rounds:       usize,
     /// The hook's timeout: the whole of environment, agent start and prompt.
     budget:       Duration,
 }
@@ -665,10 +685,15 @@ impl AgentWork {
                     } else {
                         ShutdownReason::Error
                     };
-                    let text = report
-                        .result
-                        .map(|output| output.text.unwrap_or_default())
-                        .map_err(|e| format!("agent hook failed: {e}"));
+                    let text = match report.result {
+                        Ok(output) => Ok(output.text.unwrap_or_default()),
+                        // The bound Fabro's loop has: the last turn still
+                        // asked for tools, so the hook proceeds.
+                        Err(AgentError::ToolRoundsExhausted { .. }) => {
+                            Err(ROUNDS_EXHAUSTED.to_owned())
+                        }
+                        Err(error) => Err(format!("agent hook failed: {error}")),
+                    };
                     (text, reason)
                 }
                 Err(why) => {
@@ -722,6 +747,7 @@ impl AgentWork {
                 .map_err(|e| format!("agent hook environment: {e}"))?;
         CodingAgent::builder(self.client.0.clone(), Arc::new(environment))
             .model(&self.model)
+            .options(CodingAgentOptions::default().with_max_tool_rounds(self.rounds))
             .permission_level(PermissionLevel::Full)
             .event_sink(events)
             .build()

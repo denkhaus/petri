@@ -590,7 +590,15 @@ Fields: `id` (merge identity), `name`, `event`, `matcher`, `blocking`,
 `true`), and one transport: `script` or `command` (a command hook), `url`
 with `headers` and `tls = "no_verify"` (an HTTP hook), `prompt` with `model`
 (a prompt hook, default model `haiku`), or `agent = "enabled"` with `prompt`,
-`model` and `max_tool_rounds` (an agent hook, default 50 rounds). Events, as
+`model` and `max_tool_rounds` (an agent hook, default 50 rounds). The rounds
+are a hard bound, as in Fabro's loop, not advice to the model: the hook's
+agent may ask for tools in at most that many model turns (Pebble's
+`with_max_tool_rounds`, set one below, so the turn Fabro would run and then
+discard is refused without running its tools), and a turn past the bound that
+asks for tools again ends the hook, which fails open with the reference's
+warning `agent hook exhausted max tool rounds, proceeding` and its usage and
+events on the record; `max_tool_rounds = 0` proceeds without a model call, as
+Fabro's empty loop does. Events, as
 Fabro names them: `run_start`, `run_complete`, `run_failed`, `stage_start`,
 `stage_complete`, `stage_failed`, `stage_retrying`, `edge_selected`,
 `parallel_start`, `parallel_complete`, `sandbox_ready`, `sandbox_cleanup`,
