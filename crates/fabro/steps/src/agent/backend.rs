@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use execution::hooks::HookServiceHandle;
 use frontend_fabro::hooks::HookEvent;
+use frontend_fabro::kinds::RETRY_REQUESTED_CLASS;
 use ir::{Control, Value};
 use pebble_coding_agent::state::SessionRecord;
 use pebble_coding_agent::{CodingAgentExport, ShutdownReason};
@@ -57,14 +58,23 @@ impl AgentError {
     }
 }
 impl From<AcpError> for AgentError {
+    /// A turn that fails after the agent started asks for a retry. Fabro's
+    /// ACP backend turns every such failure (the process exits before the
+    /// protocol completes, a protocol error, a rejected request, a stop
+    /// reason other than `end_turn` or `refusal`) into a handler error
+    /// (`handler/llm/acp.rs::acp_error_to_workflow`), and its engine retries
+    /// a handler error while attempts remain (`handler/mod.rs::should_retry`
+    /// is `is_retryable`, true for the handler stage). The same failures
+    /// carry the `retry_requested` class here, so `max_retries` and
+    /// `retry_policy` apply to them; the message keeps what went wrong.
     fn from(error: AcpError) -> Self {
         match error {
             AcpError::Cancelled => Self::Cancelled,
             AcpError::StopReason(reason) => Self::failed(
-                format!("stop_reason:{reason}"),
+                RETRY_REQUESTED_CLASS,
                 format!("the agent stopped with `{reason}`"),
             ),
-            other => Self::failed("acp_protocol", other.to_string()),
+            other => Self::failed(RETRY_REQUESTED_CLASS, other.to_string()),
         }
     }
 }

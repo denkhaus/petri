@@ -420,7 +420,12 @@ the coordinator registers `fabro_steps::workflow::ChildInvoker`.
   model selector, and `reasoning_effort` configures the actual model request.
   The node's backend overrides the graph's backend; model stylesheets can also
   select it. Graph ACP configuration applies only to ACP nodes. Setting ACP
-  options directly on an API node is an error.
+  options directly on an API node is an error. An ACP turn that fails after
+  the agent started (the process exits before the protocol completes, a
+  protocol error, a rejected request, a stop reason other than `end_turn` or
+  `refusal`) is classed `retry_requested`, as Fabro's retryable handler error
+  is, so `max_retries` and `retry_policy` apply to it; a node with no attempts
+  left fails and routes on `outcome=failed` as before.
 - **`fabro/human`** asks through the core `Question` event and routes on the
   delivered answer. The host's interviewer answers: `petri run --interactive`
   from the terminal, `--auto-approve` with the first choice,
