@@ -527,8 +527,15 @@ names the decision record under `decisions/`; "gap" names the owner.
 6. Hosted CI's first run (2026-09-08) failed at its dependency setup: the
    private-dependency deploy keys did not exist. The owner made Pebble,
    lithos-llm, and sandbox-driver public and had the bundle files vendored,
-   so CI needs no key; a passing hosted run is still pending. The first
-   run's required results are listed under the readiness gate checklist.
+   so CI needs no key. The push run on `67f4cb0` (2026-09-09, run
+   34325364222) then passed all three jobs, as did the push runs on
+   `97fb247` (34379457228) and `2463979` (34394908040). The first scheduled
+   nightly, on `67f4cb0` (34351051790), failed on two defects fixed in
+   `ffdddda` and `fd806fc`; the nightly on `2463979` passed (34405186288 on
+   2026-09-09, 34476177672 on 2026-09-10). Those runs showed one blocked
+   cell, which the matrix declared at the time. No commit after `2463979`
+   has a hosted run yet; a passing earlier commit does not certify a later
+   one.
 7. Retired: a `for_each` fan-out emits `fork_started`, `branch_completed`
    and `fork_completed` with the identities a static fork has (the parallel
    node is the fork, the clones are members by item index, the fan-in is the
@@ -604,11 +611,11 @@ it.
 | Extended variations and repeated process-isolation runs in `check:nightly` | `mise run check:nightly` on every nightly runner: `test:fabro:blackbox:repeat` (three runs under different schedules), `test:long`, `test:fabro:differential`, `check:msrv`, `test:release`; the nightly workflow then runs `check:fabro:readiness` (the strict set, `test:fabro:blackbox:strict`, plus the readiness verdict) on the runners that have Docker, since the strict task requires a daemon | met |
 | Library changes run the owning repository's checks before Petri pins them | `README.md` "Library and repository gates", `DEVELOPING.md`; the "Pinned revisions" table above; `mise run check:pins` (the runner image included) | met; the batch is pinned |
 | Protocol retry, Pebble replay, Petri retry, and cross-layer cases distinct; a provider interruption after a non-idempotent tool effect | `llm_client.rs`, `fabro_fallback_blackbox::a_tool_effect_is_not_repeated_across_a_failover`, `client_retries_are_spent_before_the_chain_advances`, `a_workflow_retry_is_not_a_failover`, `fallback_events.rs` | met |
-| Required CI verifies the vendored bundles and the pinned twins, requires the corpus, fails on an absent asset, binary, scenario, or backend | `.github/workflows/ci.yml`; `PETRI_REQUIRE_*`; `tests/support/fabro/require.rs`; `mise run check:bundles` | partial: wired and verified locally; CI needs no private access; the first hosted run failed at the deploy-key setup that has since been removed, so a passing hosted run is pending |
-| Every required host scenario in routine CI; the Docker subset on Linux | `mise run check` runs the whole suite on both runners; Docker cases skip on macOS and are required on Linux; every planned cell of `matrix.json` has a test | met locally; hosted run pending |
-| The pinned Fabro comparison matrix as a required compatibility job; nightly adds repetitions | `fabro compatibility (ubuntu-24.04)`: cached pinned build, `test:fabro:differential` (five live cells, zero unresolved differences) | met locally; hosted run pending |
+| Required CI verifies the vendored bundles and the pinned twins, requires the corpus, fails on an absent asset, binary, scenario, or backend | `.github/workflows/ci.yml`; `PETRI_REQUIRE_*`; `tests/support/fabro/require.rs`; `mise run check:bundles` | met: the push runs on `67f4cb0` (34325364222), `97fb247` (34379457228) and `2463979` (34394908040) passed every job with no fetch and no key (2026-09-09) |
+| Every required host scenario in routine CI; the Docker subset on Linux | `mise run check` runs the whole suite on both runners; Docker cases skip on macOS and are required on Linux; every planned cell of `matrix.json` has a test | met; hosted on the runs above (Linux with Docker required, macOS host cells) |
+| The pinned Fabro comparison matrix as a required compatibility job; nightly adds repetitions | `fabro compatibility (ubuntu-24.04)`: cached pinned build, `test:fabro:differential` (five live cells, zero unresolved differences) | met; the compatibility job passed on the runs above and in the nightly on `2463979` (34405186288, 34476177672) |
 | A machine-readable record per scenario | `tests/support/fabro/record.rs`, one record per scenario cell, `compatibility.differential` from the engine records | met |
-| Full failure bundles and compact success results retained in CI | the two `actions/upload-artifact` steps per job; the job summary carries `coverage.md` | met (pending the first hosted run) |
+| Full failure bundles and compact success results retained in CI | the two `actions/upload-artifact` steps per job; the job summary carries `coverage.md` | met; artifacts and summaries on the runs above |
 | Coverage report with required, passed, failed, blocked, excluded; skips and exclusions never count | `scripts/fabro-coverage-report.py`, `--strict` in routine CI (a blocked cell is shown, not failed) and `--readiness` in `mise run check:fabro:readiness` (the final gate: every required cell passed, blocked cells included); with bundles fetched and every gate required: required 61 (the three readiness cells, the five differential cells and the five `acp` cells included), blocked 0 (the `implement/child-runs-successfully@docker/openrouter` cell has run in a container since 2026-09-10), excluded 6 (`fix-ci`). A pinned-Fabro assertion a decision record lists under `known_defects` counts as passed with a note naming the record; any other failed assertion fails the cell | met |
 | Every bundle materializes with verified dependencies and concrete inputs | `bundles.lock.json`, the fetcher (5 of 5 verified locally); concrete inputs per scenario | met; `implement-issue` runs as inline graphs of the bundle's shape on both backends (the pinned bundle's own verify node needs the Fabro toolchain) |
 | Every required scenario and backend cell passes with no skips, unmatched calls, unexpected interviews, or unused replies | the strict coverage report plus each record's `services[].unmatched_requests` and interview receipt | met; no blocked cell since 2026-09-10 |
@@ -619,14 +626,18 @@ it.
 | ACP agent backend | the `acp` scenario family of `fabro_scenarios_blackbox` (`acp_turn_and_directive`, `acp_turn_and_directive_docker`, `acp_exit_before_answer_is_retried`, `acp_permission_request_and_hook`, `acp_cancel_during_turn`): a scripted ACP agent (`scenarios/acp/fixtures/scripted_acp_agent.py`, committed into the fixture repository and started by `acp.command` in the run workspace) through the shipped binary on the host and in a Docker container: the turn's text, a routing directive with `context_updates` and `preferred_next_label`, a retry when the agent exits before answering (`max_retries`, two attempts in one firing), a `pre_tool_use` command hook answering `session/request_permission` with the rejecting option plus the `fabro.hook.warning` lines for the boundaries ACP does not offer, and a terminal cancel during a turn (`session/cancel` reaches the agent, nothing leaks). In-process: `petri-fabro-steps::agent` (`an_agent_that_exits_before_answering_is_retried_while_attempts_remain`, `an_agent_that_exits_early_fails_the_stage_routably`), `petri-fabro-steps::hooks::acp_tool_hooks_are_best_effort_with_explicit_warnings` | claimed for a scripted agent; not claimed: real ACP client products (Claude Code, Gemini CLI) and ACP as a differential cell against the pinned Fabro |
 | Additional cutover requirements (Daytona, crash resume) gated separately | out of the initial scope by decision; not claimed | not claimed |
 
-What the first passing hosted run must show, in order: "Verify the vendored
-Fabro bundles" passes on every job with no fetch and no key;
-the compatibility job restores or builds the pinned `fabro` binary and the
-"Build the pinned fabro binary" step reports its time; `test:fabro:differential`
-passes its five cells; every `check` job writes `coverage.md` to the summary
-with zero skipped, missing, failed, and blocked required cells;
-the `fabro-evidence-*` artifacts exist; `check (ubuntu-24.04)` stays inside
-its 90-minute budget.
+What a passing hosted run shows, in order: "Verify the vendored Fabro
+bundles" passes on every job with no fetch and no key; the compatibility job
+restores or builds the pinned `fabro` binary and the "Build the pinned fabro
+binary" step reports its time; `test:fabro:differential` passes its five
+cells; every `check` job writes `coverage.md` to the summary with zero
+skipped, missing, and failed required cells; the `fabro-evidence-*`
+artifacts exist; `check (ubuntu-24.04)` stays inside its 90-minute budget.
+The runs on `67f4cb0`, `97fb247` and `2463979` (2026-09-09) showed this with
+one blocked cell, which the matrix declared at the time. Since 2026-09-10
+the matrix has no blocked cell, so the next hosted run must show zero, and
+the nightly readiness gate enforces that on the Docker runners; no commit
+after `2463979` has a hosted run yet.
 
 ## Where things are
 
