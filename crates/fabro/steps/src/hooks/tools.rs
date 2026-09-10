@@ -21,7 +21,7 @@ use pebble_agent::{
 use runtime::driver::FiringView;
 use serde_json::json;
 use smol_str::SmolStr;
-use tokio::sync::mpsc;
+use steps::ProgressSender;
 
 use super::{ToolPayload, report_event};
 
@@ -29,7 +29,7 @@ use super::{ToolPayload, report_event};
 pub struct ToolHooks {
     service: Arc<dyn HookService>,
     view:    Arc<FiringView>,
-    logs:    mpsc::Sender<StepEvent>,
+    logs:    ProgressSender,
     node:    SmolStr,
     firing:  FiringId,
     attempt: Attempt,
@@ -39,7 +39,7 @@ impl ToolHooks {
     pub fn new(
         service: Arc<dyn HookService>,
         view: Arc<FiringView>,
-        logs: mpsc::Sender<StepEvent>,
+        logs: ProgressSender,
         node: SmolStr,
         firing: FiringId,
         attempt: Attempt,

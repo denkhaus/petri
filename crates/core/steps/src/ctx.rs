@@ -25,6 +25,7 @@ use smol_str::SmolStr;
 use tokio::sync::mpsc;
 
 use crate::caps::Capabilities;
+use crate::progress::ProgressSender;
 
 /// The step's config did not deserialize.
 pub(crate) const BAD_CONFIG_CLASS: FailureClass = FailureClass::new_static("bad_config");
@@ -50,8 +51,10 @@ pub struct StepCtx {
     /// Host services, looked up by type ([`StepCtx::capability`]). The core
     /// never names one.
     pub caps:    Capabilities,
-    /// Progress out: logs and artifacts, in arrival order.
-    pub logs:    mpsc::Sender<StepEvent>,
+    /// Progress out: logs, artifacts and step-defined events, in arrival
+    /// order. `send` queues; `send_acked` resolves once the record is durable
+    /// ([`ProgressSender`]).
+    pub logs:    ProgressSender,
     /// Control in. A `Cancel` starts the ladder.
     pub control: mpsc::Receiver<Control>,
 }

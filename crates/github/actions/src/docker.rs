@@ -18,8 +18,10 @@ use frontend_gha::exprs::{Sentinel, escape_sentinel_text};
 use ir::{FailureClass, Outcome, Value};
 use serde_json::Map;
 use smol_str::SmolStr;
-use steps::{Step, StepCtx, StepFailure, ValueOrSecretRef, ending_outcome, ladder, parse_outputs};
-use tokio::sync::mpsc;
+use steps::{
+    ProgressSender, Step, StepCtx, StepFailure, ValueOrSecretRef, ending_outcome, ladder,
+    parse_outputs,
+};
 use tokio::time;
 use tracing::field::Empty;
 use tracing::{Instrument as _, Span};
@@ -249,7 +251,7 @@ async fn execute(mut config: DockerActionConfig, mut ctx: StepCtx) -> Result<Out
 
     // The command sink watches the container's output for `::` commands, the
     // same contract every GitHub step gets.
-    let (tx, rx) = mpsc::channel(COMMAND_SINK_CAPACITY);
+    let (tx, rx) = ProgressSender::channel(COMMAND_SINK_CAPACITY);
     let sink = CommandSink::new(ctx.logs.clone(), ctx.secrets.masker(), allow_unsecure);
     let collected = sink.effects();
     let sink_task = tokio::spawn(sink.run(rx).instrument(Span::current()));

@@ -155,6 +155,10 @@ pub fn read_engine_log(path: &Path) -> Result<DecodedEngineLog, EngineLogError> 
 
 enum WriterMessage {
     Record(Box<EventRecord>),
+    /// Answer once every record queued before this message is written: the
+    /// writer is one thread over one FIFO queue, so reaching the marker means
+    /// the earlier records reached the file or a write failed.
+    Durable(oneshot::Sender<Result<(), ObserveError>>),
     Finish(oneshot::Sender<Result<(), ObserveError>>),
 }
 
@@ -163,6 +167,11 @@ enum WriterMessage {
 /// file, so serialization and filesystem latency do not block the driver event
 /// loop. The channel is unbounded because the observer contract is lossless;
 /// its queue cannot exceed the execution's finite event log.
+///
+/// [`EventObserver::durable`] is the acknowledgement a step's
+/// `send_acked` waits for: the record is written and flushed to the file, so a
+/// process crash cannot lose it. The first write failure is answered there and
+/// again at `finish`; later records are not written.
 pub struct JsonlEngineLog {
     path:       PathBuf,
     high_water: u64,
@@ -226,6 +235,13 @@ fn write_engine_records(mut file: File, path: &Path, rx: &Receiver<WriterMessage
                     failure = Some(message);
                 }
             }
+            WriterMessage::Durable(reply) => {
+                let result = match &failure {
+                    Some(message) => Err(ObserveError::new("execution events", message.clone())),
+                    None => Ok(()),
+                };
+                let _ = reply.send(result);
+            }
             WriterMessage::Finish(reply) => {
                 let result = match &failure {
                     Some(message) => Err(ObserveError::new("execution events", message.clone())),
@@ -257,18 +273,32 @@ impl EventObserver for JsonlEngineLog {
             .send(WriterMessage::Record(Box::new(record.clone())));
     }
 
+    async fn durable(&self, _seq: u64) -> Result<(), ObserveError> {
+        // The queue is FIFO: every record handed over before this call is
+        // ahead of the marker, whatever its seq.
+        let (reply, done) = oneshot::channel();
+        self.tx
+            .send(WriterMessage::Durable(reply))
+            .map_err(|_| self.dead())?;
+        done.await.unwrap_or_else(|_| Err(self.dead()))
+    }
+
     async fn finish(&self) -> Result<(), ObserveError> {
         let (reply, done) = oneshot::channel();
-        let dead = || {
-            ObserveError::new(
-                "execution events",
-                format!("the writer for `{}` stopped", self.path.display()),
-            )
-        };
         self.tx
             .send(WriterMessage::Finish(reply))
-            .map_err(|_| dead())?;
-        done.await.unwrap_or_else(|_| Err(dead()))
+            .map_err(|_| self.dead())?;
+        done.await.unwrap_or_else(|_| Err(self.dead()))
+    }
+}
+
+impl JsonlEngineLog {
+    /// The writer thread is gone: its queue closed before it answered.
+    fn dead(&self) -> ObserveError {
+        ObserveError::new(
+            "execution events",
+            format!("the writer for `{}` stopped", self.path.display()),
+        )
     }
 }
 
@@ -277,5 +307,62 @@ fn log_io(action: &'static str, path: &Path, source: io::Error) -> EngineLogErro
         action,
         path: path.to_path_buf(),
         source,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use engine::{Event, EventSource};
+    use ir::{CancelScopeId, Graph};
+    use testkit::RunDir;
+
+    use super::*;
+
+    fn record(seq: u64) -> EventRecord {
+        EventRecord {
+            seq,
+            source: EventSource::External,
+            event: Event::CancelRequested {
+                scope: CancelScopeId::ROOT,
+            },
+        }
+    }
+
+    /// `durable` answers once the record is in the file: the bytes read back
+    /// decode to the record before the acknowledgement is used for anything.
+    #[tokio::test]
+    async fn durable_answers_once_the_record_is_in_the_file() {
+        let dir = RunDir::new("engine-log-durable");
+        let path = dir.path().join("events.jsonl");
+        let log = JsonlEngineLog::create(&path).expect("created");
+        let state = EngineState::new(Graph::new());
+        log.on_record(&record(0), &state);
+        log.on_record(&record(1), &state);
+        log.durable(1).await.expect("both records written");
+
+        let decoded = decode_engine_log(&fs::read(&path).expect("read")).expect("decodes");
+        assert_eq!(decoded.log.records(), &[record(0), record(1)]);
+        assert!(!decoded.torn);
+        log.finish().await.expect("synced");
+    }
+
+    /// A write that fails is the acknowledgement's error — the step hears it
+    /// — and `finish` reports it again for the run's report.
+    #[tokio::test]
+    async fn a_failed_write_is_the_durable_answer_and_the_finish_report() {
+        let dir = RunDir::new("engine-log-write-fails");
+        let path = dir.path().join("events.jsonl");
+        // A read-only handle: every write fails as a full disk's would.
+        drop(JsonlEngineLog::create(&path).expect("created"));
+        let file = File::open(&path).expect("opened read-only");
+        let log = JsonlEngineLog::over(path.clone(), file, 0);
+        log.on_record(&record(0), &EngineState::new(Graph::new()));
+
+        let error = log.durable(0).await.expect_err("the write failed");
+        assert_eq!(error.observer, "execution events");
+        let error = log.finish().await.expect_err("reported again at finish");
+        assert_eq!(error.observer, "execution events");
+        let decoded = decode_engine_log(&fs::read(&path).expect("read")).expect("decodes");
+        assert!(decoded.log.is_empty(), "nothing reached the file");
     }
 }

@@ -47,8 +47,7 @@ use lithos_llm::types::ToolDefinition;
 use pebble_coding_agent::tools::{RegisteredTool, ToolContext, ToolError, ToolSource};
 use serde_json::json;
 use smol_str::SmolStr;
-use steps::StepCtx;
-use tokio::sync::mpsc;
+use steps::{ProgressSender, StepCtx};
 use tokio_util::sync::CancellationToken;
 
 /// The `kind` of the `StepEvent::Custom` payload for a server's lifecycle:
@@ -76,7 +75,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// so the tool executors need no borrow of it.
 #[derive(Clone)]
 pub(crate) struct Attribution {
-    logs:    mpsc::Sender<StepEvent>,
+    logs:    ProgressSender,
     node:    SmolStr,
     firing:  FiringId,
     attempt: Attempt,

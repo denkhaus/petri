@@ -120,6 +120,15 @@ acknowledgement gates the next step of the run:
 - `RunEventSink::deliver` is awaited per event; a slow sink delays and never
   drops, a failing sink stops the pump and the `ProjectionReceipt` counts the
   undelivered events; recovery is `replay_run`.
+- A step's progress is queued or acknowledged. `StepCtx::logs.send` orders
+  the event ahead of the attempt's outcome (the driver's completion fence
+  drains the queue before it records the outcome) without making it durable
+  on its own; `send_acked` returns only once the record is appended and every
+  observer's durable storage confirmed it (`EventObserver::durable`). The
+  native agent backend records every Pebble event acknowledged, so Pebble's
+  acknowledgement means the event is in Petri's log and a store that cannot
+  write stops the prompt. The at-least-once limit is the attempt: one whose
+  finish never landed is re-dispatched on resume and emits its events again.
 
 ## Compatibility versions
 

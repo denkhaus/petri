@@ -14,7 +14,9 @@ use pebble_coding_agent::environment::{Environment, ExecRequest};
 use pebble_coding_agent::test_support::{
     EnvironmentContract, ScriptedCall, scripted_client, text_response, tool_call_response,
 };
-use runtime::driver::{DeliverDisposition, EventObserver, ExecutionReport, RunHandle};
+use runtime::driver::{
+    DeliverDisposition, EventObserver, ExecutionReport, ObserveError, RunHandle,
+};
 use runtime::engine::{EngineState, Event, EventRecord, ReplayMismatch};
 use runtime::executor::sandbox::HostExecutor;
 use runtime::executor::{AcquireContext, Executor, Retention, ScopeOutcome, ScopeSpec};
@@ -399,6 +401,53 @@ async fn steering_and_attributed_events_reach_the_native_session() {
         events
             .iter()
             .any(|event| event["event"]["event"].get("ToolCallCompleted").is_some())
+    );
+}
+
+/// A durable store that refuses every write.
+struct RefusingStore;
+
+#[async_trait::async_trait]
+impl EventObserver for RefusingStore {
+    fn on_record(&self, _: &EventRecord, _: &EngineState) {}
+
+    async fn durable(&self, _seq: u64) -> Result<(), ObserveError> {
+        Err(ObserveError::new("refusing-store", "the write failed"))
+    }
+}
+
+/// Pebble's events are recorded acknowledged: a store that cannot write them
+/// fails the acknowledgement, and the session stops with that failure — here
+/// at its first event, before any model request — instead of running on with
+/// nothing recording it. The stage's failure names the store and the cause.
+#[tokio::test]
+async fn a_durable_store_failure_stops_the_native_session() {
+    let dir = RunDir::new("pebble-durable-failure");
+    let (client, provider) = scripted_client(vec![ScriptedCall::response(text_response(
+        "never recorded",
+    ))]);
+    let report = runtime(&dir, client)
+        .observe(Arc::new(RefusingStore))
+        .run(graph(""))
+        .await
+        .expect("replay");
+    let failure = report
+        .state
+        .history()
+        .iter()
+        .find(|row| row.name == "a")
+        .and_then(|row| row.outcome.status.failure_info().cloned())
+        .expect("the agent node failed");
+    assert_eq!(failure.class.as_str(), "pebble_config");
+    assert!(
+        failure.message.contains("did not reach durable storage")
+            && failure.message.contains("refusing-store: the write failed"),
+        "the store's failure is the node's: {}",
+        failure.message
+    );
+    assert!(
+        provider.requests().is_empty(),
+        "the session stopped before its first model request"
     );
 }
 

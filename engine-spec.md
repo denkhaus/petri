@@ -472,7 +472,13 @@ fresh per fork) — with the post-apply `EngineState` alongside, so a consumer
 resolves a firing to its node, name and `meta` in place
 (`EngineState::firing_node`, which searches live firings and history both). A
 callback, deliberately not a broadcast channel: broadcast drops on lag, and a
-store ingest must never lose a record.
+store ingest must never lose a record. `EventObserver::durable(seq)` is the
+acknowledgement seam beside it: a step's acknowledged progress send
+(`StepCtx::logs.send_acked`) resolves after the driver's append once every
+observer confirms its durable storage holds the record, and a store's write
+failure is the sender's error; an observer that stores nothing answers at
+once. A plain send is queued, ordered by the completion fence ahead of the
+attempt's outcome, and not yet durable.
 
 **Public event contract.** An observer sees records; a host projects events.
 `execution::events` (`crates/core/execution/EVENTS.md`, versioned) derives one

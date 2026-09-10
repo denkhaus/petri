@@ -25,7 +25,7 @@ use fabro_steps::{WORKFLOW_KIND, WorkflowStep};
 use ir::{Attempt, Control, FailureInfo, FiringId, Outcome, RunStatus, ScopeId, Status, Value};
 use serde_json::json;
 use smol_str::SmolStr;
-use steps::{Capabilities, Step, StepCtx};
+use steps::{Capabilities, ProgressSender, Step, StepCtx};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time;
@@ -187,7 +187,7 @@ async fn run(
     attempt: Attempt,
     config: Value,
 ) -> (JoinHandle<Outcome>, Fixture) {
-    let (logs, mut log_rx) = mpsc::channel(64);
+    let (logs, mut log_rx) = ProgressSender::channel(64);
     tokio::spawn(async move { while log_rx.recv().await.is_some() {} });
     let (control_tx, control) = mpsc::channel(8);
     let invoker: Arc<dyn InvocationClient> = client.clone();

@@ -10,6 +10,7 @@ mod drain;
 mod noop;
 mod outputs;
 mod process;
+mod progress;
 pub mod question;
 
 pub use caps::{CAPABILITY_UNAVAILABLE_CLASS, Capabilities, CapabilitiesBuilder};
@@ -23,6 +24,7 @@ pub use process::{
     WORKSPACE_CLASS, check_misplaced_secret, ending_outcome, ladder, resolve_env_refs,
     run_resolved, stringify,
 };
+pub use progress::{Progress, ProgressAck, ProgressError, ProgressSender};
 pub use question::{
     ANSWER_KEY, ANSWER_SECRET_PREFIX, Answer, QUESTION_KEY, Question, QuestionOption,
     QuestionReference, STEER_KEY, Steer,

@@ -23,7 +23,9 @@ use ir::{
     eval,
 };
 use smol_str::SmolStr;
-use steps::{Capabilities, Registry, StepCtx};
+use steps::{
+    Capabilities, Progress, ProgressAck, ProgressError, ProgressSender, Registry, StepCtx,
+};
 use tokio::runtime::Handle;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::task::{AbortHandle, JoinHandle, JoinSet};
@@ -370,9 +372,13 @@ enum Signal {
         ctl:    Control,
         ack:    DeliverAck,
     },
+    /// A step's progress event, with the durable acknowledgement its sender
+    /// asked for, if any: answered once the record is appended and every
+    /// observer's durable storage has it.
     Progress {
         firing: FiringId,
         event:  StepEvent,
+        ack:    Option<ProgressAck>,
     },
     Finished {
         firing:  FiringId,
@@ -1142,10 +1148,15 @@ impl Driver {
             }
             Signal::Inject(event) => self.feed(event),
             Signal::Deliver { firing, ctl, ack } => self.on_deliver(firing, ctl, ack),
-            Signal::Progress { firing, event } => {
+            Signal::Progress { firing, event, ack } => {
                 let event = self.mask_progress(firing, event).await;
                 self.note_question(firing, &event);
+                // The External record `feed` appends takes the next seq.
+                let seq = self.engine.log.len() as u64;
                 self.feed(Event::StepProgress { firing, ev: event });
+                if let Some(ack) = ack {
+                    self.acknowledge_durable(seq, ack);
+                }
             }
             Signal::Finished {
                 firing,
@@ -1601,6 +1612,31 @@ impl Driver {
                 let _ = tx.send(signal).await;
             });
         }
+    }
+
+    /// Answer an acknowledged progress send once the record at `seq` is in
+    /// every observer's durable storage. The wait runs off the driver task:
+    /// a store's write latency must not stall the loop. The step awaits the
+    /// answer before it continues, so its later sends and its outcome still
+    /// follow this record.
+    fn acknowledge_durable(&mut self, seq: u64, ack: ProgressAck) {
+        if self.observers.is_empty() {
+            let _ = ack.send(Ok(()));
+            return;
+        }
+        let observers = self.observers.clone();
+        self.background.spawn(async move {
+            let mut result = Ok(());
+            for observer in &observers {
+                if let Err(error) = observer.durable(seq).await {
+                    result = Err(ProgressError::NotDurable {
+                        source: Box::new(error),
+                    });
+                    break;
+                }
+            }
+            let _ = ack.send(result);
+        });
     }
 
     /// Append-then-apply, then dispatch whatever the core asked for.
@@ -2303,7 +2339,7 @@ impl Driver {
             step_kind = %kind,
         );
 
-        let (log_tx, mut log_rx) = mpsc::channel::<StepEvent>(256);
+        let (log_tx, mut log_rx) = ProgressSender::channel(256);
         let (control_tx, control_rx) = mpsc::channel::<Control>(CONTROL_CHANNEL_CAPACITY);
 
         // The firing's serialized forwarder: the one place that awaits control
@@ -2344,11 +2380,13 @@ impl Driver {
                         continue;
                     }
                 };
-                let Some(event) = event else {
+                let Some(Progress { event, ack }) = event else {
                     break;
                 };
+                // A driver that is gone drops the acknowledgement with the
+                // signal, and the sender hears `Closed`.
                 if progress_tx
-                    .send(Signal::Progress { firing, event })
+                    .send(Signal::Progress { firing, event, ack })
                     .await
                     .is_err()
                 {

@@ -120,6 +120,22 @@ failed and closed, and their summed usage by session) under `custom`.
   identities; delivery is at-least-once, deduplicated by `EventId`. A
   projector attached at resume is built with `EventProjector::primed`, which
   folds the on-disk prefix into its state without delivering it.
+- A step's progress event is queued or acknowledged. `StepCtx::logs.send`
+  resolves once the event is queued: it is ordered behind the attempt's
+  earlier sends and ahead of its outcome, because the driver's completion
+  fence drains the queue before it records `StepFinished`, so a durable
+  outcome implies its earlier events are durable. Queueing alone is not
+  durability: a crash between the queue and the append loses the event.
+  `send_acked` resolves only after the driver appended the record and every
+  observer's durable storage confirmed it (`EventObserver::durable`; the run
+  dir's writer answers once the record is written and flushed to
+  `events.jsonl`), and a store's write failure is the sender's error. The
+  native agent backend records every Pebble event acknowledged, so Pebble's
+  own acknowledgement means the event is in Petri's log. What a crash still
+  repeats is the attempt: an attempt whose finish never landed is
+  re-dispatched on resume and emits its events again, so an acknowledged
+  record can appear twice; a consumer deduplicates delivery by `EventId` and
+  agent activity by Pebble's `(stream_id, seq)`.
 - Every event is derived from a durable record, output lines included. The
   one live-only field on a derived event is `observed_at` (milliseconds since
   the epoch when the projector saw the record), absent on replay. A backend's
@@ -187,8 +203,10 @@ backend payloads survive the round trip exactly because the workspace's
 
 ## Known backend limits
 
-- The native agent backend (`pebble`) records every `CodingAgentEvent` as a
-  `StepEvent::Custom`; it is in the log and therefore durable. Compaction of
+- The native agent backend (`pebble`) records every `CodingAgentEvent` as an
+  acknowledged `StepEvent::Custom`: Pebble's `record` returns only once the
+  record is in the durable log, so an event Pebble treats as recorded survives
+  a crash, and a store that cannot write stops the prompt. Compaction of
   the agent's context appears in that stream as Pebble's `CompactionStarted`,
   `CompactionCompleted`, `CompactionFailed` and `CompactionCancelled`. Those
   events carry no usage, so the Fabro backend adds one `step_custom` per

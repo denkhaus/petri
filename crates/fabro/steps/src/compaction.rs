@@ -36,7 +36,7 @@ use pebble_coding_agent::{CodingAgent, CodingAgentBuilder, CodingAgentOptions};
 use serde::Deserialize;
 use serde_json::json;
 use smol_str::SmolStr;
-use tokio::sync::mpsc;
+use steps::ProgressSender;
 
 /// The `compaction` object of an agent node's config, as the frontend lowers
 /// it. Absent values are Fabro's.
@@ -96,7 +96,7 @@ pub fn install(
 
 /// Where a session's compaction events are attributed.
 pub struct Attribution {
-    pub sender:  mpsc::Sender<StepEvent>,
+    pub sender:  ProgressSender,
     pub node:    SmolStr,
     pub firing:  FiringId,
     pub attempt: Attempt,

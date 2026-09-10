@@ -32,6 +32,19 @@ pub trait EventObserver: Send + Sync {
     /// [`EventObserver::finish`].
     fn on_record(&self, record: &EventRecord, state: &EngineState);
 
+    /// Resolve once every record this observer has been handed through `seq`
+    /// is in its durable storage — past the point where a process crash can
+    /// lose it. This answers a step's acknowledged progress send
+    /// (`steps::ProgressSender::send_acked`): the driver awaits it off its own
+    /// task after the append, and the error reaches the step as
+    /// `ProgressError::NotDurable`. An observer that stores nothing keeps the
+    /// default and answers at once; a store answers only after its write, and
+    /// reports a failed write here as well as from [`EventObserver::finish`].
+    async fn durable(&self, seq: u64) -> Result<(), ObserveError> {
+        let _ = seq;
+        Ok(())
+    }
+
     /// Awaited by `Driver::run` after the last record, before the report: drain
     /// queues, flush files, report what failed. Failures land in
     /// `ExecutionReport::observer_errors` and never change the run status — a
