@@ -699,6 +699,10 @@ async fn http_and_sandbox_transports_reach_a_server_on_a_port() {
         .kill_on_drop(true)
         .spawn()
         .expect("the remote server starts");
+    // Pebble connects to an `http` server once, with no readiness probe (only
+    // an `Environment` placement polls until `startup_timeout`), so wait for
+    // the server to listen: on the macOS runner the connect raced its start.
+    wait_for_port(http_port).await;
     let (client, provider) = scripted_client(vec![
         call(
             "remote",
