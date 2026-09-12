@@ -634,7 +634,7 @@ fails when any of them disagree. The row names are the keys of a record's
 |---|---|---|---|
 | `pebble` | `222d17f17d7384545d3782f3b315210ad2cb0cfe` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
 | `lithos_llm` | `a1e3fd37b7153870411701327ac117606753fe90` | `lithoscomputer/lithos-llm` (public) | provider transport and request retries |
-| `sandbox_driver` | `5b9f9dae506560f030ca4ef43d0facbe7baa99dc` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
+| `sandbox_driver` | `a92c0db6b6a122ca9b6df75de6615544f53c0d47` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `fedab8e6b9b8e2577bee7d93812a318d6adb4aa4` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
 | `fabro_reference` | `b6482910e517d00dfc3c4a2f2d3e417c9348f7f6` | `fabro-sh/fabro` (public, `refs/pull/844/head`) | the reference Fabro the corpus, oracle, bundles, and differential matrix use |
 | `runner_image` | `506a3433f7af` | `lithoscomputer/sandbox-images` (public) | the default runner images (`ghcr.io/lithoscomputer/ubuntu-*`) Docker and Daytona scopes start from (`RUNNER_PIN` in `crates/core/executor-sandbox/src/backend.rs`; PyYAML present since `df708f910111`) |
@@ -642,8 +642,9 @@ fails when any of them disagree. The row names are the keys of a record's
 A change to Pebble, lithos-llm, or an MCP client library runs the owning
 repository's required checks before Petri moves its pin; then this table, the
 manifests, and the affected evidence records move together. The library batch
-the readiness work asked for is pinned (Pebble `6b7d26e0`, sandbox-driver
-`5b9f9da`); the twins are pinned in both test crates that serve them.
+the readiness work asked for is inside the pinned revisions (Pebble `222d17f`,
+sandbox-driver `a92c0db6`); the twins are pinned in both test crates that
+serve them.
 
 ## Readiness gate checklist
 

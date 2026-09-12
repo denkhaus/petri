@@ -81,10 +81,10 @@ executor-sandbox = { package = "petri-executor-sandbox", path = "crates/core/exe
 # revision. To develop the two together, point these at the sibling checkout
 # with a `[patch]` section in a local, untracked Cargo config, and move the pin
 # forward once the matching sandbox-driver commit is pushed.
-sandbox-driver = { git = "https://github.com/lithoscomputer/sandbox-driver.git", rev = "5b9f9dae506560f030ca4ef43d0facbe7baa99dc" }
-sandbox-driver-protocol = { git = "https://github.com/lithoscomputer/sandbox-driver.git", rev = "5b9f9dae506560f030ca4ef43d0facbe7baa99dc" }
-sandbox-driver-docker-config = { git = "https://github.com/lithoscomputer/sandbox-driver.git", rev = "5b9f9dae506560f030ca4ef43d0facbe7baa99dc" }
-sandbox-driver-daytona-config = { git = "https://github.com/lithoscomputer/sandbox-driver.git", rev = "5b9f9dae506560f030ca4ef43d0facbe7baa99dc" }
+sandbox-driver = { git = "https://github.com/lithoscomputer/sandbox-driver.git", rev = "a92c0db6b6a122ca9b6df75de6615544f53c0d47" }
+sandbox-driver-protocol = { git = "https://github.com/lithoscomputer/sandbox-driver.git", rev = "a92c0db6b6a122ca9b6df75de6615544f53c0d47" }
+sandbox-driver-docker-config = { git = "https://github.com/lithoscomputer/sandbox-driver.git", rev = "a92c0db6b6a122ca9b6df75de6615544f53c0d47" }
+sandbox-driver-daytona-config = { git = "https://github.com/lithoscomputer/sandbox-driver.git", rev = "a92c0db6b6a122ca9b6df75de6615544f53c0d47" }
 steps = { package = "petri-steps", path = "crates/core/steps" }
 driver = { package = "petri-driver", path = "crates/core/driver" }
 execution = { package = "petri-execution", path = "crates/core/execution" }
