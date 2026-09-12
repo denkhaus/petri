@@ -576,19 +576,19 @@ names the decision record under `decisions/`; "gap" names the owner.
 
 ## Library pin
 
-Pebble is pinned at `d34fea9743f8c397a5bc892392135c21a189a057`, the tip of
-Pebble branch `embedder-failover-and-followup`: Pebble `main` `4c00633` plus
-two commits. The first grows `CodingEvent::RouteFailover` with the failed
-route's `usage`, `cost_usd_micros`, `inference_ms`, `tool_ms` and a
-`continuation` (`replay_prompt` or `continue_turn`), and adds
+Pebble is pinned at `430740f1114f859d6d173683f25b5007cf2023ca`, which is
+Pebble `main`. That commit is Pebble PR #12 (`embedder-failover-and-followup`)
+on top of `4c00633`. PR #12 grows `CodingEvent::RouteFailover` with the
+failed route's `usage`, `cost_usd_micros`, `inference_ms`, `tool_ms` and a
+`continuation` (`replay_prompt` or `continue_turn`), adds
 `CodingEvent::RouteFailoverStopped { route, attempt, reason, error }` with
 `reason` `ineligible` or `exhausted` for a prompt Pebble did not fail over
-although routes were named. The second gives the steering bus a follow-up
-delivery mode (`SteerableSession::follow_up`, `SteeringBus::follow_up` and
+although routes were named, and gives the steering bus a follow-up delivery
+mode (`SteerableSession::follow_up`, `SteeringBus::follow_up` and
 `follow_up_to`; a message buffered before a session attaches keeps its
-mode). Petri runs its model failover in Pebble on those events
-(`crates/fabro/steps/src/{fallback,pebble}.rs`).
-Pebble `main` `4c0063327394cd0f1e9fee2c24541b829b93a8f7` is the
+mode). Petri runs its model failover in Pebble on those events and delivers
+human text through the bus (`crates/fabro/steps/src/{fallback,pebble}.rs`).
+`4c0063327394cd0f1e9fee2c24541b829b93a8f7` is the
 `embedder-concerns` batch (Pebble PR #9)
 plus Pebble PR #10 and PR #11. PR #11 adds `CodingEvent::McpServerDisconnected`
 (a server's closed connection, reported once by the call that first found
@@ -613,9 +613,10 @@ profile's filenames Pebble's own), the environment helpers
 ledger now reads, fallback routes as a builder option, MCP servers as a tool
 source, a steering bus, and the command line as a library. Petri takes the
 first four here, MCP servers as a tool source (`fabro_steps::pebble::mcp`),
-and fallback routes (`fabro_steps::fallback` plans, Pebble runs; the
-session's sink mirrors `RouteFailover` and `RouteFailoverStopped`); the
-steering bus and the command line library are pinned but not adopted.
+fallback routes (`fabro_steps::fallback` plans, Pebble runs; the session's
+sink mirrors `RouteFailover` and `RouteFailoverStopped`) and the steering
+bus (one per node run; deliveries are follow-ups, buffered until the session
+attaches); the command line library is pinned but not adopted.
 `petri-readiness-gaps` added the two capabilities the
 readiness review's G07 and G14 asked for and changed no existing behavior:
 `CodingAgentOptions::with_max_tool_rounds` (a prompt ends with
@@ -655,7 +656,7 @@ fails when any of them disagree. The row names are the keys of a record's
 
 | Pin | Revision | Repository | Role |
 |---|---|---|---|
-| `pebble` | `d34fea9743f8c397a5bc892392135c21a189a057` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
+| `pebble` | `430740f1114f859d6d173683f25b5007cf2023ca` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
 | `lithos_llm` | `a1e3fd37b7153870411701327ac117606753fe90` | `lithoscomputer/lithos-llm` (public) | provider transport and request retries |
 | `sandbox_driver` | `a92c0db6b6a122ca9b6df75de6615544f53c0d47` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `fedab8e6b9b8e2577bee7d93812a318d6adb4aa4` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |

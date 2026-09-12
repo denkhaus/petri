@@ -760,7 +760,11 @@ totals from the `agent_activity` events (`AssistantMessage` payloads of
 sessions with a parent).
 
 `Control::Deliver` accepts a string or `{ "text": "..." }` and queues a
-follow-up. A delivered core `Answer` naming one of the session's open
+follow-up: a new user turn once the current answer is reached. Deliveries
+ride Pebble's steering bus, one per node run, in its follow-up mode
+(`SteeringBus::follow_up`); text delivered while the session is still being
+built waits on the bus and reaches the session when it attaches, in the same
+mode. A delivered core `Answer` naming one of the session's open
 questions answers it instead (below). Cancellation settles the active prompt
 and shuts down its session.
 Kill stops active tool processes immediately. A driver hard abort can discard

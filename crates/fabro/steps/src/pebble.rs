@@ -15,6 +15,13 @@
 //! model error qualifies; the sink mirrors each move as the events
 //! [`crate::fallback`] defines. A prompt's model error stays typed
 //! ([`AgentError::Model`]) so the stage reports its class.
+//!
+//! Text a host delivers to the node (`Control::Deliver`) that is not an
+//! answer to the agent's question is a follow-up: it runs as its own user
+//! turn once the current answer is reached. Deliveries ride Pebble's
+//! steering bus, one per node run: text that arrives before the session is
+//! built waits on the bus and reaches the session when it attaches, in the
+//! same mode.
 
 pub mod environment;
 pub mod mcp;
@@ -37,6 +44,7 @@ use pebble_coding_agent::events::{
     AgentProfileKind, CodingAgentEvent, EventSink, EventSinkError, PermissionLevel, TokenUsage,
 };
 use pebble_coding_agent::extensions::Redactor;
+use pebble_coding_agent::steering::SteeringBus;
 use pebble_coding_agent::{
     CodingAgent, CodingAgentBuilder, CodingAgentExport, CodingAgentOptions, CodingInput,
     MemoryDiscovery, PromptReport, ShutdownReason,
@@ -93,6 +101,9 @@ pub(crate) struct NativeSession {
     /// each prompt on the route it ended on.
     events:          Arc<PetriEvents>,
     questions:       Arc<AgentQuestions>,
+    /// The node run's steering bus, with this session attached under the
+    /// node's name: every delivered follow-up goes through it.
+    steering:        SteeringBus<SmolStr>,
     compaction:      compaction::Accounting,
     attribution:     compaction::Attribution,
     cancel:          CancellationToken,
@@ -323,7 +334,9 @@ impl NativeSession {
                 .map_err(|e| AgentError::failed("pebble_config", chain(&e)))
         };
         tokio::pin!(build);
-        let mut pending = Vec::new();
+        // Text delivered before the session exists waits on the bus, as a
+        // follow-up, and reaches the session when it attaches below.
+        let steering = SteeringBus::new();
         let mut closed = false;
         let agent = loop {
             tokio::select! {
@@ -331,7 +344,7 @@ impl NativeSession {
                 control = ctx.control.recv(), if !closed => {
                     match control {
                         Some(Control::Deliver(value)) if !cancel.is_cancelled() => {
-                            if !questions.answer(&value) && let Some(text) = steering_text(&value) { pending.push(text); }
+                            if !questions.answer(&value) && let Some(text) = steering_text(&value) { follow_up(&steering, text); }
                         },
                         Some(Control::Kill) => { kill.cancel(); cancel.cancel(); },
                         Some(Control::Cancel) => cancel.cancel(),
@@ -354,6 +367,7 @@ impl NativeSession {
             agent,
             events,
             questions,
+            steering,
             cancel: cancel.clone(),
             kill: kill.clone(),
             _cancel_on_drop: guard,
@@ -368,8 +382,24 @@ impl NativeSession {
             session.shutdown(ShutdownReason::Cancelled).await?;
             return Err(AgentError::Cancelled);
         }
-        for text in pending {
-            session.agent.queue_follow_up(text);
+        // The bus keys the attachment by the node; the control handle
+        // follows the agent through any failover Pebble runs, so one
+        // attachment serves the node run. Attaching drains what waited.
+        let key = ctx.node.clone();
+        if let Err(error) = session.steering.attach(
+            key.clone(),
+            session.session_id(),
+            Arc::new(session.agent.control_handle()),
+        ) {
+            session.shutdown(ShutdownReason::Error).await?;
+            return Err(AgentError::failed("pebble_config", error.to_string()));
+        }
+        let drained = session.steering.drain_pending_into(&key);
+        if !drained.dropped.is_empty() {
+            tracing::warn!(
+                dropped = drained.dropped.len(),
+                "follow-ups delivered before the session was built were dropped"
+            );
         }
         Ok(session)
     }
@@ -383,7 +413,6 @@ impl NativeSession {
         prompt: &str,
         control: &mut mpsc::Receiver<Control>,
     ) -> Result<String, AgentError> {
-        let handle = self.agent.control_handle();
         let questions = self.questions.clone();
         let cancel = self.cancel.clone();
         let kill = self.kill.clone();
@@ -398,7 +427,7 @@ impl NativeSession {
                     biased;
                     message = control.recv(), if !closed => match message {
                         Some(Control::Deliver(value)) if !cancel.is_cancelled() => {
-                            if !questions.answer(&value) && let Some(text) = steering_text(&value) { handle.queue_follow_up(text); }
+                            if !questions.answer(&value) && let Some(text) = steering_text(&value) { follow_up(&self.steering, text); }
                         },
                         Some(Control::Kill) => { kill.cancel(); cancel.cancel(); },
                         Some(Control::Cancel) => cancel.cancel(),
@@ -484,6 +513,10 @@ impl NativeSession {
     }
 
     pub(crate) async fn shutdown(&mut self, reason: ShutdownReason) -> Result<(), AgentError> {
+        // The session leaves the bus first: a delivery that lands during
+        // the shutdown waits there and is dropped with the bus, as the
+        // agent could not run it.
+        self.steering.detach(&self.events.node, &self.session_id());
         // The MCP servers Pebble started; it closes them with the agent, after
         // its last tool call and before this returns, so before the node
         // returns and the scope's environment is released.
@@ -531,6 +564,20 @@ fn steering_text(value: &Value) -> Option<String> {
         .as_str()
         .or_else(|| value.get("text").and_then(Value::as_str))
         .map(str::to_owned)
+}
+
+/// Queue delivered text on the node run's bus as a follow-up: on the
+/// attached session, to run as its own turn once the current answer is
+/// reached, or on the bus itself while no session is attached yet. A full
+/// queue evicts its oldest message; the bus reports what it dropped.
+fn follow_up(bus: &SteeringBus<SmolStr>, text: String) {
+    let delivery = bus.follow_up(text.into());
+    if !delivery.dropped.is_empty() {
+        tracing::warn!(
+            dropped = delivery.dropped.len(),
+            "a follow-up queue was full; the oldest follow-up was dropped"
+        );
+    }
 }
 
 struct PetriRedactor(Masker);
