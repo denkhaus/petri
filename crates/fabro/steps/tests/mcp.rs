@@ -24,7 +24,7 @@ use runtime::executor::Retention;
 use runtime::{RunOptions, Runtime};
 use serde_json::json;
 use testkit::{RunDir, log_lines, output_of};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command as TokioCommand;
 use tokio::time::{sleep, timeout};
 
@@ -750,6 +750,95 @@ async fn http_and_sandbox_transports_reach_a_server_on_a_port() {
     );
     let pid = pid_in(&requests[2]);
     wait_gone(&pid).await;
+    let remote_ready = &customs.server_events("remote", "ready")[0];
+    assert_eq!(remote_ready["placement"], "remote");
+    assert_eq!(remote_ready["transport"], "http");
+    let scoped_ready = &customs.server_events("scoped", "ready")[0];
+    assert_eq!(scoped_ready["placement"], "scope");
+    assert_eq!(scoped_ready["transport"], "sandbox");
+    assert_eq!(
+        customs
+            .phases("scoped")
+            .into_iter()
+            .map(|(_, p)| p)
+            .collect::<Vec<_>>(),
+        ["starting", "ready", "stopped"]
+    );
+    let _ = remote.kill().await;
+}
+
+/// Wait until a server the test spawned accepts connections on `port`.
+async fn wait_for_port(port: u16) {
+    timeout(Duration::from_secs(15), async {
+        while TcpStream::connect(("127.0.0.1", port)).await.is_err() {
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the server listens");
+}
+
+/// `protocol = "sse"`, as Fabro accepts it: an `http` server the run does not
+/// own is reached over the older SSE transport at its URL, and a `sandbox`
+/// server that speaks it is launched in the scope and reached at `/sse`
+/// under the route to its port, where Fabro reaches one. Both answer a call
+/// through Pebble's tool path; the owned one stops with the session.
+#[tokio::test]
+async fn sse_servers_are_reached_at_their_stream_over_http_and_under_a_sandbox_route() {
+    let dir = RunDir::new("mcp-sse");
+    let http_port = free_port().await;
+    let sandbox_port = free_port().await;
+    let mut remote = TokioCommand::new("python3")
+        .arg(server_script())
+        .args(["--sse", &http_port.to_string()])
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("the remote server starts");
+    wait_for_port(http_port).await;
+    let (client, provider) = scripted_client(vec![
+        call(
+            "remote",
+            "mcp__remote__echo",
+            json!({"message": "over sse"}),
+        ),
+        call("scope", "mcp__scoped__echo", json!({"message": "__pid__"})),
+        ScriptedCall::response(text_response("Reached both.")),
+    ]);
+    let log = dir.path().join("mcp.log");
+    let toml = format!(
+        "[run.agent.mcps.remote]\ntype = \"http\"\nprotocol = \"sse\"\nurl = \"http://127.0.0.1:{http_port}/sse\"\nheaders = {{ X-Case = \"mcp-sse\" }}\n\n[run.agent.mcps.scoped]\ntype = \"sandbox\"\nprotocol = \"sse\"\ncommand = [\"python3\", {:?}, \"--sse\", \"{sandbox_port}\"]\nport = {sandbox_port}\nenv = {{ MCP_TEST_LOG = {:?} }}\nstartup_timeout = \"15s\"\n",
+        server_script().display().to_string(),
+        log.display().to_string()
+    );
+    let graph = lower(&agent_dot(""), &toml);
+    let (report, customs) = run(&dir, graph, client).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let requests = requests_text(&provider);
+    assert!(requests[1].contains("over sse"), "{}", requests[1]);
+    assert_eq!(
+        customs.pebble_completed_tool_names(),
+        ["mcp__remote__echo", "mcp__scoped__echo"],
+        "server events: {:?}",
+        customs.server_events("scoped", "failed")
+    );
+    assert_eq!(
+        customs.tool_statuses(),
+        ["ok", "ok"],
+        "scoped server events: {:?}; tool events: {:?}; server log: {:?}",
+        customs.server_events("scoped", "failed"),
+        customs.tool_events(),
+        read(&log)
+    );
+    // The owned server answered on its stream and stopped with the session.
+    let pid = pid_in(&requests[2]);
+    wait_gone(&pid).await;
+    assert_eq!(read(&log), "started\ninitialize\ncall echo\n");
     let remote_ready = &customs.server_events("remote", "ready")[0];
     assert_eq!(remote_ready["placement"], "remote");
     assert_eq!(remote_ready["transport"], "http");

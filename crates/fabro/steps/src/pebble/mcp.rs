@@ -15,15 +15,18 @@
 //! Placement follows Fabro: a `stdio` server is a child process of Petri's
 //! host (Fabro's run worker), never of the sandbox; its working directory is
 //! the scope's workspace when the scope shares the host filesystem, else
-//! Petri's own. An `http` server is reached from the host. A `sandbox` server
-//! is launched in the scope's execution environment and reached over HTTP
-//! through the environment's route to its port (`ExecEnv::preview_url`, handed
-//! to Pebble as sandbox-driver's `PreviewUrls` facet by
-//! [`super::environment::PortRoutes`]): the host's own loopback, the Docker
-//! plugin's forward into the container, or Daytona's preview link with its
-//! token header. Pebble releases the route when the server stops. Secrets in
-//! `env` and `headers` are resolved here, when the servers are named, and
-//! never written down.
+//! Petri's own. An `http` server is reached from the host, over streamable
+//! HTTP or, with `protocol = "sse"`, the older SSE transport. A `sandbox`
+//! server is launched in the scope's execution environment and reached over
+//! the same two protocols through the environment's route to its port
+//! (`ExecEnv::preview_url`, handed to Pebble as sandbox-driver's
+//! `PreviewUrls` facet by [`super::environment::PortRoutes`]): the host's own
+//! loopback, the Docker plugin's forward into the container, or Daytona's
+//! preview link with its token header. A streamable HTTP server is reached
+//! at the route itself; an SSE server serves its event stream at `/sse`
+//! under it ([`SSE_PATH`]), where Fabro has always reached one. Pebble
+//! releases the route when the server stops. Secrets in `env` and `headers`
+//! are resolved here, when the servers are named, and never written down.
 //!
 //! Failure behavior follows Fabro: a server that does not start (a spawn
 //! error, a handshake timeout, a protocol error, an unavailable secret) is
@@ -49,15 +52,23 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use executor::{ExecEnv, Masker, SecretProvider};
-use frontend_fabro::mcps::{McpServer, McpTransport, McpValue, parse_qualified_name};
+use frontend_fabro::mcps::{
+    McpHttpProtocol, McpServer, McpTransport, McpValue, parse_qualified_name,
+};
 use ir::{Attempt, FiringId, LogStream, StepEvent, Value};
 use pebble_coding_agent::events::{CodingEvent, ToolErrorKind};
-use pebble_coding_agent::mcp::{McpHttpProtocol, McpPlacement, McpServer as PebbleServer};
+use pebble_coding_agent::mcp::{
+    McpHttpProtocol as PebbleProtocol, McpPlacement, McpServer as PebbleServer,
+};
 use serde_json::json;
 use smol_str::SmolStr;
 use steps::{ProgressError, ProgressSender, StepCtx};
 
 use super::environment::elapsed_ms;
+
+/// Where a sandbox-hosted SSE server serves its event stream, under the
+/// environment's route to its port: the path Fabro reaches one at.
+pub const SSE_PATH: &str = "/sse";
 
 /// The `kind` of the `StepEvent::Custom` payload for a server's lifecycle:
 /// `{ kind, node, firing, attempt, server, transport, placement, phase,
@@ -135,12 +146,17 @@ fn pebble_server(
                 .then(|| PathBuf::from(env.workspace_path())),
             clear_env:   false,
         },
-        McpTransport::Http { url, headers } => McpPlacement::Http {
+        McpTransport::Http {
+            protocol,
+            url,
+            headers,
+        } => McpPlacement::Http {
             url:      url.clone(),
             headers:  resolve_values(headers, secrets, "headers")?,
-            protocol: McpHttpProtocol::StreamableHttp,
+            protocol: pebble_protocol(*protocol),
         },
         McpTransport::Sandbox {
+            protocol,
             command,
             port,
             env: vars,
@@ -148,13 +164,20 @@ fn pebble_server(
             command:  command.clone(),
             port:     *port,
             env:      resolve_values(vars, secrets, "env")?,
-            protocol: McpHttpProtocol::StreamableHttp,
-            path:     None,
+            protocol: pebble_protocol(*protocol),
+            path:     matches!(protocol, McpHttpProtocol::Sse).then(|| SSE_PATH.to_owned()),
         },
     };
     Ok(PebbleServer::new(server.name.clone(), placement)
         .with_startup_timeout(Duration::from_millis(server.startup_timeout_ms))
         .with_tool_timeout(Duration::from_millis(server.tool_timeout_ms)))
+}
+
+fn pebble_protocol(protocol: McpHttpProtocol) -> PebbleProtocol {
+    match protocol {
+        McpHttpProtocol::StreamableHttp => PebbleProtocol::StreamableHttp,
+        McpHttpProtocol::Sse => PebbleProtocol::Sse,
+    }
 }
 
 fn resolve_values(
@@ -364,5 +387,152 @@ impl Mirror {
         self.logs
             .send_acked(StepEvent::Custom(self.masker.mask_value(&payload)))
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::slice;
+
+    use executor::{EnvError, MapSecrets, ProcessHandle, ProcessSpec};
+
+    use super::*;
+
+    /// An environment that runs nothing and shares no filesystem: the
+    /// mapping needs only its workspace answers.
+    #[derive(Debug)]
+    struct NoEnv;
+
+    #[async_trait::async_trait]
+    impl ExecEnv for NoEnv {
+        async fn spawn(&self, _spec: ProcessSpec) -> Result<Box<dyn ProcessHandle>, EnvError> {
+            Err(EnvError::backend("none", "spawn", "runs nothing"))
+        }
+
+        fn workspace_path(&self) -> &'static str {
+            "/work"
+        }
+
+        async fn read_file(&self, _relative: &Path) -> Result<Option<Vec<u8>>, EnvError> {
+            Ok(None)
+        }
+
+        async fn write_file(&self, _relative: &Path, _: &[u8]) -> Result<(), EnvError> {
+            Ok(())
+        }
+
+        fn grace(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+    }
+
+    fn server(name: &str, transport: McpTransport) -> McpServer {
+        McpServer {
+            name: name.to_owned(),
+            transport,
+            startup_timeout_ms: 1_000,
+            tool_timeout_ms: 2_000,
+            source: "workflow.toml".to_owned(),
+        }
+    }
+
+    fn placement_of(server: &McpServer) -> McpPlacement {
+        let prepared = pebble_servers(slice::from_ref(server), &NoEnv, &MapSecrets::empty());
+        assert!(
+            prepared.unavailable.is_empty(),
+            "{:?}",
+            prepared.unavailable
+        );
+        assert_eq!(prepared.servers.len(), 1);
+        assert_eq!(prepared.servers[0].name(), server.name);
+        assert_eq!(
+            prepared.servers[0].startup_timeout(),
+            Duration::from_secs(1)
+        );
+        assert_eq!(prepared.servers[0].tool_timeout(), Duration::from_secs(2));
+        prepared.servers[0].placement().clone()
+    }
+
+    /// An `http` server keeps its protocol: SSE is Pebble's `Sse` at the
+    /// configured URL, with no path of Petri's added.
+    #[test]
+    fn an_http_server_maps_to_pebbles_protocol_at_its_url() {
+        let sse = server("legacy", McpTransport::Http {
+            protocol: McpHttpProtocol::Sse,
+            url:      "http://127.0.0.1:1/sse".into(),
+            headers:  BTreeMap::from([("X-Case".to_owned(), McpValue::Literal("sse".into()))]),
+        });
+        match placement_of(&sse) {
+            McpPlacement::Http {
+                url,
+                headers,
+                protocol,
+            } => {
+                assert_eq!(url, "http://127.0.0.1:1/sse");
+                assert_eq!(
+                    headers,
+                    BTreeMap::from([("X-Case".to_owned(), "sse".to_owned())])
+                );
+                assert_eq!(protocol, PebbleProtocol::Sse);
+            }
+            other => panic!("expected an http placement, got {other:?}"),
+        }
+        let current = server("current", McpTransport::Http {
+            protocol: McpHttpProtocol::StreamableHttp,
+            url:      "http://127.0.0.1:1/mcp".into(),
+            headers:  BTreeMap::new(),
+        });
+        match placement_of(&current) {
+            McpPlacement::Http { protocol, .. } => {
+                assert_eq!(protocol, PebbleProtocol::StreamableHttp);
+            }
+            other => panic!("expected an http placement, got {other:?}"),
+        }
+    }
+
+    /// A `sandbox` server is an environment placement; an SSE one serves its
+    /// stream at `/sse` under the route to its port, as Fabro reaches it, and
+    /// a streamable HTTP one is reached at the route itself.
+    #[test]
+    fn a_sandbox_server_maps_to_an_environment_placement_with_fabros_sse_path() {
+        let sse = server("browser", McpTransport::Sandbox {
+            protocol: McpHttpProtocol::Sse,
+            command:  vec!["npx".into(), "@playwright/mcp".into()],
+            port:     3100,
+            env:      BTreeMap::from([("MODE".to_owned(), McpValue::Literal("test".into()))]),
+        });
+        match placement_of(&sse) {
+            McpPlacement::Environment {
+                command,
+                port,
+                env,
+                protocol,
+                path,
+            } => {
+                assert_eq!(command, ["npx", "@playwright/mcp"]);
+                assert_eq!(port, 3100);
+                assert_eq!(
+                    env,
+                    BTreeMap::from([("MODE".to_owned(), "test".to_owned())])
+                );
+                assert_eq!(protocol, PebbleProtocol::Sse);
+                assert_eq!(path.as_deref(), Some(SSE_PATH));
+            }
+            other => panic!("expected an environment placement, got {other:?}"),
+        }
+        let current = server("plain", McpTransport::Sandbox {
+            protocol: McpHttpProtocol::StreamableHttp,
+            command:  vec!["server".into()],
+            port:     3200,
+            env:      BTreeMap::new(),
+        });
+        match placement_of(&current) {
+            McpPlacement::Environment { protocol, path, .. } => {
+                assert_eq!(protocol, PebbleProtocol::StreamableHttp);
+                assert!(path.is_none(), "reached at the route itself: {path:?}");
+            }
+            other => panic!("expected an environment placement, got {other:?}"),
+        }
     }
 }

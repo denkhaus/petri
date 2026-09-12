@@ -664,8 +664,9 @@ async fn a_secret_reaches_the_server_environment_and_stays_masked() {
     twin.stop();
 }
 
-/// A catalog reference and the legacy `sse` protocol are refused before any
-/// node runs, with the specific diagnostics; a malformed entry is an error.
+/// A catalog reference is refused before any node runs, with the specific
+/// diagnostic; a malformed entry (here, both `script` and `command`, and a
+/// `protocol` that is neither of Fabro's two) is an error.
 #[tokio::test]
 async fn unsupported_mcp_settings_are_refused_before_the_run() {
     let provider = Provider::OpenAi;
@@ -676,13 +677,13 @@ async fn unsupported_mcp_settings_are_refused_before_the_run() {
             "unsupported.workflow_toml.run.agent.mcps.reference",
         ),
         (
-            "mcp-sse",
-            "[run.agent.mcps.legacy]\ntype = \"http\"\nurl = \"http://127.0.0.1:1/sse\"\nprotocol = \"sse\"\n",
-            "unsupported.workflow_toml.run.agent.mcps.protocol",
-        ),
-        (
             "mcp-malformed",
             "[run.agent.mcps.files]\ntype = \"stdio\"\nscript = \"a\"\ncommand = [\"b\"]\n",
+            "fabro.mcps.entry",
+        ),
+        (
+            "mcp-protocol",
+            "[run.agent.mcps.legacy]\ntype = \"http\"\nurl = \"http://127.0.0.1:1/mcp\"\nprotocol = \"websocket\"\n",
             "fabro.mcps.entry",
         ),
     ] {
