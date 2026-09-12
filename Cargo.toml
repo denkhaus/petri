@@ -121,14 +121,6 @@ tokio-util = "0.7"
 # the frontends it serves validate at parse time, so this is a language-compatibility
 # decision, not a binary-size one.
 regex = "1"
-# The MCP client library for `[run.agent.mcps]`: the official Rust SDK, at the
-# exact version the pinned Fabro reference locks, so protocol behavior matches
-# the reference. Neither Pebble nor lithos-llm carries an MCP client.
-rmcp = { version = "=1.7.0", default-features = false, features = [
-    "client",
-    "transport-child-process",
-    "transport-streamable-http-client-reqwest",
-] }
 # HTTP hooks post the event context from the host; the same client stack `lithos-llm` already links.
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
 tokio = { version = "1", features = [

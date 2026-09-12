@@ -20,7 +20,7 @@ crates/github/actions    the GitHub Actions step kinds: run, action, checkout
 crates/github/objects    the ObjectService: cache, artifacts, and tool-cache storage
 crates/github/acceptance the acceptance battery: corpus harness and end-to-end runs
 crates/fabro/frontend    the Fabro frontend: lowers Graphviz DOT workflows to the IR
-crates/fabro/steps       the Fabro step kinds: command, wait, human, agent over ACP or native Pebble, prompt, nested workflow, the stage step, the local hook service, MCP servers as Pebble tools (`mcp`, over the `rmcp` client), fidelity preambles, retained threads, project memory, Fabro's skill directories, context compaction, the output store, and the stub registry
+crates/fabro/steps       the Fabro step kinds: command, wait, human, agent over ACP or native Pebble, prompt, nested workflow, the stage step, the local hook service, MCP servers as Pebble tool sources (`pebble::mcp`), fidelity preambles, retained threads, project memory, Fabro's skill directories, context compaction, the output store, and the stub registry
 crates/fabro/acceptance  the Fabro battery: corpus harness, runs under stubs, the Fabro oracle, real steps, the compatibility contract and bundle manifest
 crates/petri/lib       the distribution: core plus every component
 crates/petri/cli       the shipped `petri` binary: the distribution handed to core's CLI
@@ -262,9 +262,8 @@ revisions. The readiness checklist with each item's evidence source is the
 
 #### Library and repository gates
 
-Pebble owns the agent loop and coding-agent behavior, `lithos-llm` owns
-provider transport and request retries, and an MCP client library owns its
-protocol. A change to any of them runs the owning repository's required checks
+Pebble owns the agent loop, coding-agent behavior, and the MCP client;
+`lithos-llm` owns provider transport and request retries. A change to either runs the owning repository's required checks
 before Petri moves its pin; then the manifests, the contract's pin table, and
 the affected evidence records move together, and the relevant Petri scenarios
 run again through the shipped binary. A library test pass never replaces a

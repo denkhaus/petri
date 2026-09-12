@@ -1,12 +1,15 @@
 //! Pebble tools act through the firing's execution scope, never host paths.
+//! The same scope is the route to a sandbox-hosted MCP server's port
+//! ([`PortRoutes`]).
 
 use std::fmt::Write as _;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use executor::{ExecEnv, OutputMode, ProcessHandle, ProcessSpec, Sig};
+use executor::{EnvError, ExecEnv, OutputMode, ProcessHandle, ProcessSpec, Sig};
 use globset::{GlobBuilder, GlobMatcher};
 use ir::LogStream;
 use pebble_coding_agent::environment::support::{
@@ -18,6 +21,7 @@ use pebble_coding_agent::environment::{
 };
 use pebble_coding_agent::events::CommandTermination;
 use pebble_coding_agent::tools::OutputCaptureStats;
+use sandbox_driver::{Capability, PreviewUrl, PreviewUrls};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
@@ -442,4 +446,44 @@ fn io_error(cause: executor::EnvError) -> EnvironmentError {
 }
 pub(super) fn elapsed_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The route from Petri to a port inside the scope, as Pebble reaches a
+/// sandbox-hosted MCP server: sandbox-driver's [`PreviewUrls`] facet over
+/// [`ExecEnv::preview_url`]. The provider answers (the host's own loopback,
+/// the forward the Docker plugin opens into the container, Daytona's preview
+/// link with its token header); an environment with no route to its ports
+/// reports the capability as unsupported, which Pebble makes the server's
+/// failure reason.
+pub struct PortRoutes(Arc<dyn ExecEnv>);
+
+impl PortRoutes {
+    pub fn new(env: Arc<dyn ExecEnv>) -> Self {
+        Self(env)
+    }
+}
+
+#[async_trait]
+impl PreviewUrls for PortRoutes {
+    async fn preview_url(&self, port: u16) -> sandbox_driver::Result<PreviewUrl> {
+        match self.0.preview_url(port).await {
+            Ok(Some(route)) => {
+                let mut preview = PreviewUrl::new(route.url);
+                preview.headers = route.headers;
+                Ok(preview)
+            }
+            Ok(None) => Err(sandbox_driver::Error::unsupported(Capability::PreviewUrls)),
+            Err(error) => Err(route_error(error)),
+        }
+    }
+
+    async fn release_preview_url(&self, port: u16) -> sandbox_driver::Result<()> {
+        self.0.release_preview_url(port).await.map_err(route_error)
+    }
+}
+
+/// The environment's refusal as the driver's error, its message kept: Pebble
+/// reports it as the reason the server has no route.
+fn route_error(error: EnvError) -> sandbox_driver::Error {
+    sandbox_driver::Error::io(error.to_string(), io::Error::other(error))
 }

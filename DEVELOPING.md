@@ -94,8 +94,8 @@ secrets, step output, and environment values are never captured.
 
 ## Library and repository gates
 
-Pebble, `lithos-llm`, and any MCP client library are pinned by revision. A
-change to one of them runs that repository's required checks first; only then
+Pebble and `lithos-llm` are pinned by revision; the MCP client is Pebble's
+dependency. A change to one of them runs that repository's required checks first; only then
 does Petri move the pin, update the "Pinned revisions" table in
 `crates/fabro/acceptance/CONTRACT.md`, and rerun the affected black box
 scenarios. `mise run check:pins` fails while the citations disagree. A library

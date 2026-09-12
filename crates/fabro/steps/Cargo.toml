@@ -15,10 +15,15 @@ workspace = true
 name = "fabro_steps"
 
 [dependencies]
-pebble-coding-agent = { workspace = true }
+# `mcp`: the run's `[run.agent.mcps]` servers are Pebble's tool sources.
+pebble-coding-agent = { workspace = true, features = ["mcp"] }
 pebble-agent = { workspace = true }
+# HTTP hooks post the event context from the host.
 reqwest = { workspace = true }
-rmcp = { workspace = true }
+# The `PreviewUrls` facet Pebble takes the route to a sandbox-hosted MCP
+# server's port as, implemented over the node's `ExecEnv`. The same revision
+# Pebble pins, so the trait object crosses the crate boundary.
+sandbox-driver = { workspace = true }
 regex = { workspace = true }
 lithos-llm = { workspace = true, features = ["runtime"] }
 tokio-util = { workspace = true }

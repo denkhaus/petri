@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{env, fs};
 
-use fabro_steps::mcp::{SERVER_EVENT, TOOL_EVENT};
 use fabro_steps::pebble::PebbleClient;
+use fabro_steps::pebble::mcp::{SERVER_EVENT, TOOL_EVENT};
 use fabro_steps::register;
 use frontend::{CompileInputs, MapFiles};
 use ir::{CancelScopeId, Graph, RunStatus, StepEvent, Value};
@@ -237,8 +237,8 @@ async fn free_port() -> u16 {
     listener.local_addr().expect("address").port()
 }
 
-/// A configured `stdio` server starts before the agent, its tools are
-/// registered under Fabro's qualified names with their MCP source, a call
+/// A configured `stdio` server starts while the agent is built, its tools
+/// are registered under Fabro's qualified names with their MCP source, a call
 /// writes into the scope's workspace, the result reaches the model, and the
 /// server stops with the session, before the scope is released.
 #[tokio::test]
@@ -314,7 +314,6 @@ async fn a_stdio_server_exposes_tools_that_act_on_the_workspace_and_stops_with_t
         "mcp__notes__write_file",
     ]);
     assert_eq!(ready["tools"][5]["original_name"], "write_file");
-    assert!(ready["duration_ms"].is_u64());
     let tools = customs.tool_events();
     assert_eq!(customs.tool_statuses(), ["ok", "ok", "ok"]);
     assert_eq!(tools[0].0, "agent");
@@ -399,9 +398,9 @@ script = "echo post:$FABRO_NODE_ID >> tool-hooks.log"
 
 /// A result the server marks as an error, a call that outlives the tool
 /// timeout, and a call a crashed server cannot answer each reach the model
-/// with their reason; the crash is reported as a disconnection and later
-/// calls to that server fail at once. The slow call goes to its own server:
-/// a timed-out call leaves the scripted server busy until it finishes.
+/// with their reason, and later calls to the crashed server fail at once.
+/// The slow call goes to its own server: a timed-out call leaves the
+/// scripted server busy until it finishes.
 #[tokio::test]
 async fn error_results_timeouts_and_a_crashed_server_reach_the_model_with_reasons() {
     let dir = RunDir::new("mcp-failures");
@@ -449,20 +448,36 @@ async fn error_results_timeouts_and_a_crashed_server_reach_the_model_with_reason
         "{}",
         requests[4]
     );
+    // A timeout is an error result: the model and the event both get
+    // Pebble's reason.
     assert_eq!(customs.tool_statuses(), [
-        "error", "timeout", "failed", "failed"
+        "error", "error", "failed", "failed"
     ]);
     let tools = customs.tool_events();
     assert_eq!(tools[0].1["error"], "disk full");
-    assert!(tools[1].1["error"].is_null());
+    assert!(
+        tools[1].1["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("did not answer within 1s")),
+        "{}",
+        tools[1].1
+    );
+    assert!(
+        tools[2].1["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("failed the call to `crash`")),
+        "{}",
+        tools[2].1
+    );
+    assert!(
+        tools.iter().all(|(_, event)| event["duration_ms"].is_u64()),
+        "{tools:?}"
+    );
     assert_eq!(customs.phases("notes"), [
         ("agent".to_owned(), "starting".to_owned()),
         ("agent".to_owned(), "ready".to_owned()),
-        ("agent".to_owned(), "disconnected".to_owned()),
         ("agent".to_owned(), "stopped".to_owned()),
     ]);
-    let disconnected = &customs.server_events("notes", "disconnected")[0];
-    assert!(disconnected["error"].is_string());
     assert_eq!(
         read(&log),
         "started\ninitialize\ncall fail\ncall crash\ncrash\n"
