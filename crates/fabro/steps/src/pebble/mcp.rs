@@ -33,18 +33,24 @@
 //! reported and skipped, and the session proceeds with the tools of the
 //! servers that started. A tool result the server marks `isError` reaches
 //! the model as the tool's error text; a transport failure, a timeout or a
-//! cancellation reaches it as a failed call with a reason.
+//! cancellation reaches it as a failed call with a reason. A server whose
+//! connection closes during the session is reported `disconnected` once, by
+//! the call that first found it closed (Pebble's `McpServerDisconnected`,
+//! before that call's own failure), and every later call to it fails at
+//! once. When Pebble's build fails after the servers started, Pebble shuts
+//! them down before it reports the failure, so nothing leaks; the node has
+//! emitted `starting` for each and reports the build's error as its own.
 //!
 //! Every fact is a `StepEvent::Custom` payload attributed to the node,
 //! firing and attempt: [`SERVER_EVENT`] for the server lifecycle and
 //! [`TOOL_EVENT`] for every proxied call, mirrored from Pebble's
-//! `McpServerReady`, `McpServerFailed`, `ToolCallStarted` and
-//! `ToolCallCompleted` events by the session's sink, each sent acknowledged
-//! so that when Pebble's own event is confirmed recorded, Petri's derived one
-//! is too. A retained session's
-//! successor node names the same servers again, so Pebble starts its own and
-//! registers the same tool names, and the conversation's earlier tool calls
-//! stay valid (`crate::sessions`).
+//! `McpServerReady`, `McpServerFailed`, `McpServerDisconnected`,
+//! `ToolCallStarted` and `ToolCallCompleted` events by the session's sink,
+//! each sent acknowledged so that when Pebble's own event is confirmed
+//! recorded, Petri's derived one is too. A retained session's successor node
+//! names the same servers again, so Pebble starts its own and registers the
+//! same tool names, and the conversation's earlier tool calls stay valid
+//! (`crate::sessions`).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -72,10 +78,16 @@ pub const SSE_PATH: &str = "/sse";
 
 /// The `kind` of the `StepEvent::Custom` payload for a server's lifecycle:
 /// `{ kind, node, firing, attempt, server, transport, placement, phase,
-/// tools?, tool_count?, error? }`. `phase` is `starting` (the server is named
-/// to the builder; Pebble starts it while the agent is built), `ready` (with
-/// `tools` as `[{ name, original_name }]` sorted by `name` and `tool_count`),
-/// `failed` (with `error`), or `stopped` (Pebble closed it with the agent).
+/// tools?, tool_count?, duration_ms?, error? }`. `phase` is `starting` (the
+/// server is named to the builder; Pebble starts it while the agent is
+/// built), `ready` (with `tools` as `[{ name, original_name }]` sorted by
+/// `name`, `tool_count`, and `duration_ms`, Pebble's `startup_ms`: launch to
+/// tools listed), `failed` (with `error`, and `duration_ms` when Pebble
+/// reported the failure: launch to the failure; a server never named to
+/// Pebble because its secret is unavailable has none), `disconnected` (with
+/// `error`; once, when a call first finds the connection closed, before that
+/// call's own [`TOOL_EVENT`]), or `stopped` (Pebble closed it with the
+/// agent; no `duration_ms`, Pebble reports no timing for the shutdown).
 /// `placement` is `host` (stdio), `remote` (http) or `scope` (sandbox).
 pub const SERVER_EVENT: &str = "fabro.mcp.server";
 
@@ -83,10 +95,11 @@ pub const SERVER_EVENT: &str = "fabro.mcp.server";
 /// `{ kind, node, firing, attempt, server, name, tool, tool_call_id, status,
 /// duration_ms, error? }`. `name` is the qualified name the model called,
 /// `tool` the server's own name. `status` is `ok` (a result), `error` (a
-/// result the server marked as an error, or no answer within the tool
-/// timeout; the model sees the text in `error`), `failed` (the call did not
-/// reach the server, or came back malformed) or `cancelled`. `duration_ms`
-/// is the time between Pebble's `ToolCallStarted` and `ToolCallCompleted`.
+/// result the server marked as an error; the model sees the text in
+/// `error`), `timeout` (no answer within the tool timeout; `error` carries
+/// Pebble's reason), `failed` (the call did not reach the server, or came
+/// back malformed) or `cancelled`. `duration_ms` is the time between
+/// Pebble's `ToolCallStarted` and `ToolCallCompleted`.
 pub const TOOL_EVENT: &str = "fabro.mcp.tool";
 
 /// Fabro's entries as Pebble's servers, in configuration order, their
@@ -256,8 +269,14 @@ impl Mirror {
     }
 
     /// The server did not start: the event, and the line on the node's
-    /// stderr.
-    pub(super) async fn failed(&self, server: &str, error: &str) -> Result<(), ProgressError> {
+    /// stderr. `duration_ms` is Pebble's launch-to-failure time when Pebble
+    /// reported the failure; a server Petri never named to Pebble has none.
+    pub(super) async fn failed(
+        &self,
+        server: &str,
+        error: &str,
+        duration_ms: Option<u64>,
+    ) -> Result<(), ProgressError> {
         tracing::error!(server, error, "MCP server failed to start");
         let line = format!("mcp server `{server}` failed to start: {error}");
         self.logs
@@ -266,8 +285,12 @@ impl Mirror {
                 line:   self.masker.mask(&line),
             })
             .await?;
-        self.server(server, "failed", json!({ "error": error }))
-            .await
+        self.server(
+            server,
+            "failed",
+            json!({ "error": error, "duration_ms": duration_ms }),
+        )
+        .await
     }
 
     /// Pebble closed the server with the agent.
@@ -279,7 +302,11 @@ impl Mirror {
     /// events.
     pub(super) async fn observe(&self, event: &CodingEvent) -> Result<(), ProgressError> {
         match event {
-            CodingEvent::McpServerReady { server, tools } => {
+            CodingEvent::McpServerReady {
+                server,
+                tools,
+                startup_ms,
+            } => {
                 {
                     let mut known = self.tools.lock().unwrap_or_else(PoisonError::into_inner);
                     for tool in tools {
@@ -292,11 +319,25 @@ impl Mirror {
                 self.server(
                     server,
                     "ready",
-                    json!({ "tool_count": tools.len(), "tools": tools }),
+                    json!({
+                        "tool_count": tools.len(),
+                        "tools": tools,
+                        "duration_ms": startup_ms,
+                    }),
                 )
                 .await
             }
-            CodingEvent::McpServerFailed { server, error } => self.failed(server, error).await,
+            CodingEvent::McpServerFailed {
+                server,
+                error,
+                startup_ms,
+            } => self.failed(server, error, Some(*startup_ms)).await,
+            // Once per server, by the call that first found the connection
+            // closed; that call's own tool event follows.
+            CodingEvent::McpServerDisconnected { server, error } => {
+                self.server(server, "disconnected", json!({ "error": error }))
+                    .await
+            }
             CodingEvent::ToolCallStarted {
                 tool_name,
                 tool_call_id,
@@ -327,6 +368,7 @@ impl Mirror {
                 let status = match (*is_error, error_kind) {
                     (false, _) => "ok",
                     (true, Some(ToolErrorKind::Cancelled)) => "cancelled",
+                    (true, Some(ToolErrorKind::Timeout)) => "timeout",
                     (true, Some(ToolErrorKind::Unavailable)) => "failed",
                     // Refused before it reached the server: a hook's block, or
                     // arguments Pebble rejected. Not a proxied call.

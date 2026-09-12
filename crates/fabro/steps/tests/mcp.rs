@@ -324,6 +324,8 @@ async fn a_stdio_server_exposes_tools_that_act_on_the_workspace_and_stops_with_t
         "mcp__notes__write_file",
     ]);
     assert_eq!(ready["tools"][5]["original_name"], "write_file");
+    // Pebble's launch-to-tools-listed time rides on `ready`.
+    assert!(ready["duration_ms"].is_u64(), "{ready}");
     let tools = customs.tool_events();
     assert_eq!(customs.tool_statuses(), ["ok", "ok", "ok"]);
     assert_eq!(tools[0].0, "agent");
@@ -408,9 +410,10 @@ script = "echo post:$FABRO_NODE_ID >> tool-hooks.log"
 
 /// A result the server marks as an error, a call that outlives the tool
 /// timeout, and a call a crashed server cannot answer each reach the model
-/// with their reason, and later calls to the crashed server fail at once.
-/// The slow call goes to its own server: a timed-out call leaves the
-/// scripted server busy until it finishes.
+/// with their reason; the crash is reported as a disconnection once and
+/// later calls to that server fail at once. The slow call goes to its own
+/// server: a timed-out call leaves the scripted server busy until it
+/// finishes.
 #[tokio::test]
 async fn error_results_timeouts_and_a_crashed_server_reach_the_model_with_reasons() {
     let dir = RunDir::new("mcp-failures");
@@ -458,10 +461,10 @@ async fn error_results_timeouts_and_a_crashed_server_reach_the_model_with_reason
         "{}",
         requests[4]
     );
-    // A timeout is an error result: the model and the event both get
+    // A timeout has its own status; the model and the event both get
     // Pebble's reason.
     assert_eq!(customs.tool_statuses(), [
-        "error", "error", "failed", "failed"
+        "error", "timeout", "failed", "failed"
     ]);
     let tools = customs.tool_events();
     assert_eq!(tools[0].1["error"], "disk full");
@@ -483,10 +486,37 @@ async fn error_results_timeouts_and_a_crashed_server_reach_the_model_with_reason
         tools.iter().all(|(_, event)| event["duration_ms"].is_u64()),
         "{tools:?}"
     );
+    // The crash is one `disconnected`, from the call that found the
+    // connection closed, before that call's own tool event.
     assert_eq!(customs.phases("notes"), [
         ("agent".to_owned(), "starting".to_owned()),
         ("agent".to_owned(), "ready".to_owned()),
+        ("agent".to_owned(), "disconnected".to_owned()),
         ("agent".to_owned(), "stopped".to_owned()),
+    ]);
+    let disconnected = &customs.server_events("notes", "disconnected")[0];
+    assert!(disconnected["error"].is_string(), "{disconnected}");
+    let order: Vec<(String, String)> = customs
+        .all()
+        .into_iter()
+        .filter(|(_, v)| {
+            (v["kind"] == SERVER_EVENT && v["server"] == "notes" && v["phase"] == "disconnected")
+                || (v["kind"] == TOOL_EVENT && v["tool_call_id"] == "crash")
+        })
+        .map(|(_, v)| {
+            (
+                v["kind"].as_str().unwrap_or("?").to_owned(),
+                v["phase"]
+                    .as_str()
+                    .or(v["status"].as_str())
+                    .unwrap_or("?")
+                    .to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(order, [
+        (SERVER_EVENT.to_owned(), "disconnected".to_owned()),
+        (TOOL_EVENT.to_owned(), "failed".to_owned()),
     ]);
     assert_eq!(
         read(&log),
@@ -656,6 +686,15 @@ async fn a_server_that_fails_to_start_is_reported_and_the_others_serve() {
             .as_str()
             .expect("error")
             .contains("did not complete the MCP handshake within 1s"),
+        "{slow}"
+    );
+    // Pebble reported each failure with its launch-to-failure time; the
+    // handshake timeout took at least its `startup_timeout`.
+    for failed in [broken, missing, slow] {
+        assert!(failed["duration_ms"].is_u64(), "{failed}");
+    }
+    assert!(
+        slow["duration_ms"].as_u64().is_some_and(|ms| ms >= 1_000),
         "{slow}"
     );
     assert_eq!(
