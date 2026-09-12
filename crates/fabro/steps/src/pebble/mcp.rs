@@ -36,7 +36,9 @@
 //! firing and attempt: [`SERVER_EVENT`] for the server lifecycle and
 //! [`TOOL_EVENT`] for every proxied call, mirrored from Pebble's
 //! `McpServerReady`, `McpServerFailed`, `ToolCallStarted` and
-//! `ToolCallCompleted` events by the session's sink. A retained session's
+//! `ToolCallCompleted` events by the session's sink, each sent acknowledged
+//! so that when Pebble's own event is confirmed recorded, Petri's derived one
+//! is too. A retained session's
 //! successor node names the same servers again, so Pebble starts its own and
 //! registers the same tool names, and the conversation's earlier tool calls
 //! stay valid (`crate::sessions`).
@@ -53,7 +55,7 @@ use pebble_coding_agent::events::{CodingEvent, ToolErrorKind};
 use pebble_coding_agent::mcp::{McpHttpProtocol, McpPlacement, McpServer as PebbleServer};
 use serde_json::json;
 use smol_str::SmolStr;
-use steps::{ProgressSender, StepCtx};
+use steps::{ProgressError, ProgressSender, StepCtx};
 
 use super::environment::elapsed_ms;
 
@@ -190,7 +192,9 @@ fn placement(transport: &McpTransport) -> &'static str {
 /// Petri's record of the servers' lifecycle and calls, from Pebble's events.
 /// The session's sink hands every event to [`Mirror::observe`]; the session
 /// itself says when the servers were named ([`Mirror::starting`]) and when
-/// Pebble closed them ([`Mirror::stopped`]).
+/// Pebble closed them ([`Mirror::stopped`]). Every event is sent
+/// acknowledged: a method returns once the record is durable, and an error
+/// says the driver stopped taking progress or a store failed.
 pub(super) struct Mirror {
     logs:    ProgressSender,
     masker:  Masker,
@@ -224,34 +228,33 @@ impl Mirror {
     }
 
     /// The server is named to the builder; Pebble starts it next.
-    pub(super) async fn starting(&self, server: &str) {
-        self.server(server, "starting", json!({})).await;
+    pub(super) async fn starting(&self, server: &str) -> Result<(), ProgressError> {
+        self.server(server, "starting", json!({})).await
     }
 
     /// The server did not start: the event, and the line on the node's
     /// stderr.
-    pub(super) async fn failed(&self, server: &str, error: &str) {
+    pub(super) async fn failed(&self, server: &str, error: &str) -> Result<(), ProgressError> {
         tracing::error!(server, error, "MCP server failed to start");
         let line = format!("mcp server `{server}` failed to start: {error}");
-        let _ = self
-            .logs
-            .send(StepEvent::Log {
+        self.logs
+            .send_acked(StepEvent::Log {
                 stream: LogStream::Stderr,
                 line:   self.masker.mask(&line),
             })
-            .await;
+            .await?;
         self.server(server, "failed", json!({ "error": error }))
-            .await;
+            .await
     }
 
     /// Pebble closed the server with the agent.
-    pub(super) async fn stopped(&self, server: &str) {
-        self.server(server, "stopped", json!({})).await;
+    pub(super) async fn stopped(&self, server: &str) -> Result<(), ProgressError> {
+        self.server(server, "stopped", json!({})).await
     }
 
     /// What `event` says about the servers and their calls, as Petri's
     /// events.
-    pub(super) async fn observe(&self, event: &CodingEvent) {
+    pub(super) async fn observe(&self, event: &CodingEvent) -> Result<(), ProgressError> {
         match event {
             CodingEvent::McpServerReady { server, tools } => {
                 {
@@ -268,7 +271,7 @@ impl Mirror {
                     "ready",
                     json!({ "tool_count": tools.len(), "tools": tools }),
                 )
-                .await;
+                .await
             }
             CodingEvent::McpServerFailed { server, error } => self.failed(server, error).await,
             CodingEvent::ToolCallStarted {
@@ -280,6 +283,7 @@ impl Mirror {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .insert(tool_call_id.clone(), Instant::now());
+                Ok(())
             }
             CodingEvent::ToolCallCompleted {
                 tool_name,
@@ -290,7 +294,7 @@ impl Mirror {
                 ..
             } => {
                 let Some(parsed) = parse_qualified_name(tool_name) else {
-                    return;
+                    return Ok(());
                 };
                 let began = self
                     .calls
@@ -304,7 +308,7 @@ impl Mirror {
                     // Refused before it reached the server: a hook's block, or
                     // arguments Pebble rejected. Not a proxied call.
                     (true, Some(ToolErrorKind::Denied | ToolErrorKind::InvalidArguments)) => {
-                        return;
+                        return Ok(());
                     }
                     (true, _) => "error",
                 };
@@ -332,13 +336,13 @@ impl Mirror {
                     "duration_ms": began.map(|began| elapsed_ms(began.elapsed())),
                     "error": error,
                 }))
-                .await;
+                .await
             }
-            _ => {}
+            _ => Ok(()),
         }
     }
 
-    async fn server(&self, server: &str, phase: &str, extra: Value) {
+    async fn server(&self, server: &str, phase: &str, extra: Value) -> Result<(), ProgressError> {
         let transport = self.servers.get(server);
         let mut payload = json!({
             "kind": SERVER_EVENT,
@@ -353,13 +357,12 @@ impl Mirror {
         if let (Value::Object(map), Value::Object(extra)) = (&mut payload, extra) {
             map.extend(extra);
         }
-        self.send(payload).await;
+        self.send(payload).await
     }
 
-    async fn send(&self, payload: Value) {
-        let _ = self
-            .logs
-            .send(StepEvent::Custom(self.masker.mask_value(&payload)))
-            .await;
+    async fn send(&self, payload: Value) -> Result<(), ProgressError> {
+        self.logs
+            .send_acked(StepEvent::Custom(self.masker.mask_value(&payload)))
+            .await
     }
 }

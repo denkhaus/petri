@@ -98,11 +98,21 @@ impl Customs {
 
     /// Pebble's own `ToolCallStarted` tool names, in order.
     fn pebble_tool_names(&self) -> Vec<String> {
+        self.pebble_tool_event_names("ToolCallStarted")
+    }
+
+    /// Pebble's own `ToolCallCompleted` tool names, in order: the calls the
+    /// session finished, which the mirrored tool events are derived from.
+    fn pebble_completed_tool_names(&self) -> Vec<String> {
+        self.pebble_tool_event_names("ToolCallCompleted")
+    }
+
+    fn pebble_tool_event_names(&self, variant: &str) -> Vec<String> {
         self.all()
             .into_iter()
             .filter(|(_, v)| v["kind"] == "pebble")
             .filter_map(|(_, v)| {
-                v["event"]["event"]["ToolCallStarted"]["tool_name"]
+                v["event"]["event"][variant]["tool_name"]
                     .as_str()
                     .map(str::to_owned)
             })
@@ -673,7 +683,10 @@ async fn a_server_that_fails_to_start_is_reported_and_the_others_serve() {
 
 /// The `http` transport reaches a server the run does not own, and the
 /// `sandbox` transport launches one in the scope and reaches it on its port;
-/// the owned one stops with the session.
+/// the owned one stops with the session. The run has ended when the events
+/// are read, and each mirrored tool event is checked against the Pebble
+/// completion it was derived from: the previous MCP client's test lost a
+/// tool event to timing on macOS CI.
 #[tokio::test]
 async fn http_and_sandbox_transports_reach_a_server_on_a_port() {
     let dir = RunDir::new("mcp-http");
@@ -713,8 +726,15 @@ async fn http_and_sandbox_transports_reach_a_server_on_a_port() {
     );
     let requests = requests_text(&provider);
     assert!(requests[1].contains("over http"), "{}", requests[1]);
-    // Before reading the pid: a scoped call that failed leaves no pid in the
-    // request, and the server events and the tool statuses say why.
+    // Both calls completed on Pebble's side...
+    assert_eq!(
+        customs.pebble_completed_tool_names(),
+        ["mcp__remote__echo", "mcp__scoped__echo"],
+        "server events: {:?}",
+        customs.server_events("scoped", "failed")
+    );
+    // ...and before reading the pid: a scoped call that failed leaves no pid
+    // in the request, and the server events and the tool statuses say why.
     assert_eq!(
         customs.tool_statuses(),
         ["ok", "ok"],

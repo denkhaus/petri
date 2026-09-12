@@ -270,11 +270,13 @@ impl NativeSession {
             // it builds the agent and reports each one on the sink; a server
             // whose secret the run cannot supply is reported here instead.
             let servers = mcp::pebble_servers(&mcps, env.as_ref(), secrets.as_ref());
+            // A send that fails here means the driver stopped taking this
+            // attempt's progress; the build's own outcome reports that.
             for server in &mcps {
-                session_events.mcp.starting(&server.name).await;
+                let _ = session_events.mcp.starting(&server.name).await;
             }
             for (server, error) in &servers.unavailable {
-                session_events.mcp.failed(server, error).await;
+                let _ = session_events.mcp.failed(server, error).await;
             }
             // Fabro's project documents for the model's profile, from the
             // Git root down to the working directory: Pebble names the
@@ -524,7 +526,7 @@ impl NativeSession {
             .map(|_| ())
             .map_err(|e| AgentError::failed("pebble_shutdown", e.to_string()));
         for server in started {
-            self.events.mcp.stopped(&server).await;
+            let _ = self.events.mcp.stopped(&server).await;
         }
         result
     }
@@ -600,7 +602,12 @@ impl EventSink for PetriEvents {
             ))
             .await
             .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))?;
-        self.mcp.observe(&event.event).await;
+        // Acknowledged like the envelope: Pebble's confirmation covers the
+        // events Petri derived from its event too.
+        self.mcp
+            .observe(&event.event)
+            .await
+            .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))?;
         // The directories Pebble searched are Petri's record, with the
         // convention behind each; a skipped file or directory is Pebble's
         // report and the diagnostic is Petri's.
