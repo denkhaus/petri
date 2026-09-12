@@ -929,7 +929,9 @@ preview link with its token header, which rides on the request. Pebble polls
 that route with an HTTP request until the server answers, within
 `startup_timeout`, because a forward accepts a connection before the port
 inside does, and releases the route when the server stops
-(`access/preview_release`). An environment that offers no preview URL fails
+(`access/preview_release`). An `http` server is probed the same way before
+the handshake, so one that nothing answers at fails after `startup_timeout`
+rather than at once. An environment that offers no preview URL fails
 the server with Pebble's reason (`no route to port <port> in the
 environment: capability preview_urls is not supported ...`).
 
@@ -944,9 +946,15 @@ Petri and never named to Pebble. A result the server marks `isError` reaches
 the model as the tool's error text. A call with no answer within
 `tool_timeout`, a call the agent cancelled, and a call to a server whose
 connection closed each reach the model as a failed call with a reason; the
-protocol's `notifications/cancelled` is sent for the first two. A server that
-exits mid-session fails every later call at once; nothing reconnects within a
-session. A retained thread's next node names the same servers again, so
+protocol's `notifications/cancelled` is sent for the first two. A server whose
+connection closes mid-session is reported `disconnected` once, by the call
+that first found it closed (Pebble's `McpServerDisconnected`, before that
+call's own failure), and every later call to it fails at once; nothing
+reconnects within a session. When Pebble's build fails after the servers
+started, Pebble shuts them down before it reports the failure, so a server
+launched in the environment does not outlive the node; the node has emitted
+`starting` for each server and reports the build's error as its own, with no
+`ready`, `failed` or `stopped`. A retained thread's next node names the same servers again, so
 Pebble starts its own and registers the same names, and the conversation's
 earlier tool calls stay valid; a resumed run starts every thread again
 anyway. Secrets in `env` and `headers` are resolved when the servers are
@@ -961,8 +969,8 @@ sink mirrors the rest from Pebble's events:
 
 | `kind` | Fields | When |
 |---|---|---|
-| `fabro.mcp.server` | `server`, `transport` (`stdio`, `http`, `sandbox`), `placement` (`host`, `remote`, `scope`), `phase`; `ready` adds `tool_count` and `tools` (`[{ name, original_name }]` sorted by `name`); `failed` adds `error` | `starting` once the servers are named to the builder, before the agent is built; then `ready` or `failed` (Pebble's `McpServerReady` / `McpServerFailed`, on the stream once the agent is up); `stopped` after the agent's shutdown closed the server |
-| `fabro.mcp.tool` | `server`, `name` (the qualified name the model called), `tool` (the server's own name), `tool_call_id`, `status` (`ok`, `error`, `failed`, `cancelled`), `duration_ms` (between Pebble's `ToolCallStarted` and `ToolCallCompleted`), `error` (the `isError` text or the failure reason; `null` otherwise) | on Pebble's `ToolCallCompleted` for an `mcp__<server>__<tool>` name: `ok` for a result, `error` for a result the server marked as an error or a call with no answer within `tool_timeout`, `failed` for a call that did not reach the server or came back malformed, `cancelled` for a call the agent cancelled |
+| `fabro.mcp.server` | `server`, `transport` (`stdio`, `http`, `sandbox`), `placement` (`host`, `remote`, `scope`), `phase`; `ready` adds `tool_count`, `tools` (`[{ name, original_name }]` sorted by `name`) and `duration_ms` (Pebble's `startup_ms`: launch to tools listed); `failed` adds `error` and `duration_ms` (launch to the failure; `null` for a server Petri never named to Pebble because its secret is unavailable); `disconnected` adds `error`; `stopped` adds nothing (Pebble reports no timing for the shutdown) | `starting` once the servers are named to the builder, before the agent is built; then `ready` or `failed` (Pebble's `McpServerReady` / `McpServerFailed`, on the stream once the agent is up); `disconnected` once, when a call first finds the connection closed (Pebble's `McpServerDisconnected`, before that call's `fabro.mcp.tool`); `stopped` after the agent's shutdown closed the server |
+| `fabro.mcp.tool` | `server`, `name` (the qualified name the model called), `tool` (the server's own name), `tool_call_id`, `status` (`ok`, `error`, `timeout`, `failed`, `cancelled`), `duration_ms` (between Pebble's `ToolCallStarted` and `ToolCallCompleted`), `error` (the `isError` text or the failure reason; `null` otherwise) | on Pebble's `ToolCallCompleted` for an `mcp__<server>__<tool>` name: `ok` for a result, `error` for a result the server marked as an error, `timeout` for a call with no answer within `tool_timeout` (Pebble's `ToolErrorKind::Timeout`; `error` carries the reason), `failed` for a call that did not reach the server or came back malformed, `cancelled` for a call the agent cancelled |
 
 A consumer accounts for a run's MCP activity from these alone: every server a
 node configured has a `starting` and a `ready` or `failed`, and every server
@@ -972,11 +980,9 @@ envelope carry the same qualified name and call id. A hook that blocks an MCP
 call, or arguments Pebble refuses before the call, produce Pebble's
 `ToolCallCompleted` (`error_kind` `denied` or `invalid_arguments`) and the
 hook's own event, and no `fabro.mcp.tool`, because the call never reached the
-server. Compared with the events Petri emitted from its own MCP client: there
-is no `disconnected` phase (Pebble reports a closed connection through each
-failed call, not as a server event), no `duration_ms` on the server phases,
-and a timeout is `status = "error"` with the reason in `error` rather than a
-status of its own.
+server. These are the events Petri emitted from its own MCP client, with one
+difference: `stopped` carries no `duration_ms`, because Pebble reports no
+timing for a server's shutdown.
 ### Skills
 
 A skill is a `<dir>/<name>/SKILL.md` file: a frontmatter block with `name:`

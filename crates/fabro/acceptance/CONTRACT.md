@@ -369,7 +369,7 @@ default model before the first stage) and `fallback-repeated-tool-effect`
 | Workflow secrets | `{{ secrets.NAME }}` resolves from `PETRI_SECRET_NAME` in the standalone runner; an embedding host supplies its own `SecretProvider` | the platform vault |
 | Output references | `blob://sha256/<hex>` in a local store under `<run_dir>/blobs`, replaceable through the `OutputStore` capability; a structured value's reference carries `#json`. Below Fabro's 100 KiB threshold, a fork also offloads the `for_each` source list (any size) and other fork snapshot values above 4 KiB from every branch child's context, and a fan-in publishes `parallel.results` above 4 KiB as a reference; the agent and prompt preambles and a nested workflow's start context put those back, `stdin_source` and prompted fan-ins read them back, and a condition sees the reference text | `blob://sha256/<hex>` in platform storage, materialized as `file://…/blobs/<hex>.json` for handlers; nothing under 100 KiB is ever a reference |
 | Prompt events | `StepEvent::Custom` with `kind = "fabro.prompt"` / `"fabro.prompt.completed"` (see `crates/fabro/FORMAT.md`) | `stage.prompt` / `prompt.completed` |
-| MCP events | `StepEvent::Custom` with `kind = "fabro.mcp.server"` (`starting`, `ready`, `failed`, `stopped`; `ready` and `failed` mirror Pebble's `McpServerReady` and `McpServerFailed`) and `"fabro.mcp.tool"` (one per proxied call, derived from Pebble's `ToolCallCompleted`, with `status` and `duration_ms`); the failure line `mcp server \`<name>\` failed to start: ...` on the node's stderr | `agent.mcp.ready` / `agent.mcp.failed`; tool activity only through the generic tool events |
+| MCP events | `StepEvent::Custom` with `kind = "fabro.mcp.server"` (`starting`, `ready`, `failed`, `disconnected`, `stopped`; `ready` and `failed` mirror Pebble's `McpServerReady` and `McpServerFailed` and carry its `startup_ms` as `duration_ms`, `disconnected` mirrors `McpServerDisconnected` once per closed connection) and `"fabro.mcp.tool"` (one per proxied call, derived from Pebble's `ToolCallCompleted`, with `status` (`ok`, `error`, `timeout`, `failed`, `cancelled`) and `duration_ms`); the failure line `mcp server \`<name>\` failed to start: ...` on the node's stderr | `agent.mcp.ready` / `agent.mcp.failed`; tool activity only through the generic tool events |
 | MCP catalog references | `[run.agent.mcps.<name>] id = "..."` is refused at load: the standalone runner has no server-managed catalog | resolved from the server's catalog |
 | MCP secrets | `{{ secrets.NAME }}` resolves as a whole `env` or `headers` value only, from `PETRI_SECRET_NAME` (or the host's provider) at launch; a token inside a command, script or URL is refused at load | resolved anywhere in the transport strings at the run boundary from the vault |
 | MCP `sandbox` transport | launched through the scope's execution environment and reached through the provider's preview URL (the host's loopback, the Docker plugin's port forward into the container, Daytona's preview link with its token header); a provider without preview URLs fails the server with a named reason | a Daytona preview URL; local sandboxes fall back to localhost |
@@ -576,10 +576,19 @@ names the decision record under `decisions/`; "gap" names the owner.
 
 ## Library pin
 
-Pebble is pinned at `222d17f17d7384545d3782f3b315210ad2cb0cfe`, which is
+Pebble is pinned at `4c0063327394cd0f1e9fee2c24541b829b93a8f7`, which is
 Pebble `main`. That commit is the `embedder-concerns` batch (Pebble PR #9)
-plus Pebble PR #10. PR #10 moves the sandbox-driver pin under Pebble's `mcp`
-feature to `a92c0db6b6a122ca9b6df75de6615544f53c0d47`; Petri pins the same
+plus Pebble PR #10 and PR #11. PR #11 adds `CodingEvent::McpServerDisconnected`
+(a server's closed connection, reported once by the call that first found
+it), `startup_ms` on `McpServerReady` and `McpServerFailed` (launch to tools
+listed, or to the failure), `ToolErrorKind::Timeout` for a call with no
+answer within `tool_timeout`, the shutdown of started MCP servers when
+`build()` fails after they started, and a readiness probe for an `http`
+server until its `startup_timeout` before the handshake; Petri mirrors the
+first three as the `disconnected` phase, `duration_ms` on `ready` and
+`failed`, and `status = "timeout"` (`crates/fabro/FORMAT.md`, "MCP
+servers"). PR #10 moves the sandbox-driver pin under Pebble's `mcp` feature
+to `a92c0db6b6a122ca9b6df75de6615544f53c0d47`; Petri pins the same
 revision and enables the feature, so the `PreviewUrls` trait object crosses
 the crate boundary. The `embedder-concerns` batch sits on top of
 `petri-readiness-gaps` `6b7d26e0f791edf3381b110b78db1c5507c94f66`, which sat
@@ -632,7 +641,7 @@ fails when any of them disagree. The row names are the keys of a record's
 
 | Pin | Revision | Repository | Role |
 |---|---|---|---|
-| `pebble` | `222d17f17d7384545d3782f3b315210ad2cb0cfe` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
+| `pebble` | `4c0063327394cd0f1e9fee2c24541b829b93a8f7` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
 | `lithos_llm` | `a1e3fd37b7153870411701327ac117606753fe90` | `lithoscomputer/lithos-llm` (public) | provider transport and request retries |
 | `sandbox_driver` | `a92c0db6b6a122ca9b6df75de6615544f53c0d47` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `fedab8e6b9b8e2577bee7d93812a318d6adb4aa4` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
@@ -642,7 +651,7 @@ fails when any of them disagree. The row names are the keys of a record's
 A change to Pebble or lithos-llm runs the owning
 repository's required checks before Petri moves its pin; then this table, the
 manifests, and the affected evidence records move together. The library batch
-the readiness work asked for is inside the pinned revisions (Pebble `222d17f`,
+the readiness work asked for is inside the pinned revisions (Pebble `4c00633`,
 sandbox-driver `a92c0db6`); the twins are pinned in both test crates that
 serve them.
 

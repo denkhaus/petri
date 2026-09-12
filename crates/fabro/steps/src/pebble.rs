@@ -276,7 +276,7 @@ impl NativeSession {
                 let _ = session_events.mcp.starting(&server.name).await;
             }
             for (server, error) in &servers.unavailable {
-                let _ = session_events.mcp.failed(server, error).await;
+                let _ = session_events.mcp.failed(server, error, None).await;
             }
             // Fabro's project documents for the model's profile, from the
             // Git root down to the working directory: Pebble names the
