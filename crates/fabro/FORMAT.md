@@ -800,7 +800,10 @@ compaction summary call, which Pebble bills to the prompt that compacted;
 `[run.model.fallbacks]` is applied by the native agent and prompt steps
 (`fabro_steps::fallback`). A stage runs on a *plan*: the canonical route its
 `model` and `provider` resolve to, then the targets the chain keyed by that
-canonical model id lists, in order. The chain is resolved once per run as
+canonical model id lists, in order. Petri builds the plan; on a native agent
+node Pebble runs it (the plan's remaining routes are the builder's
+`fallback_routes`), and the session mirrors Pebble's failover events as the
+`fabro.fallback.*` events below. The chain is resolved once per run as
 Fabro's server resolves it at run start: a key that names a provider, a
 provider-qualified key, two keys that resolve to one model, or an unknown key
 fail the first LLM stage with class `bad_config`; a candidate on a provider
@@ -819,17 +822,21 @@ a target whose catalog row advertises no levels keeps the request. `speed`
 and `max_tokens` travel unchanged. The original route is filtered out of its
 own chain.
 
-A model error moves the plan when it is eligible and a target remains:
-eligible are the kinds the reference retries (`rate_limit`, `server`,
-`network`, `stream_decode`, `provider`, `response_decode`), provider
-availability failures (`authentication`, `access_denied`, `not_found`,
-`quota_exceeded`), a `timeout`, and a `content_filter` whose provider code is
-`refusal`. `invalid_request`, `context_length`, any other `content_filter`,
-`configuration`, `model_selection`, `resource_limit`, `middleware`, and an
+A model error moves the plan when it is eligible and a target remains.
+Eligibility is `lithos-llm`'s `failover_eligible`, the rule Pebble applies:
+a failure the client classifies as retryable (whatever its kind), the
+provider-local kinds `rate_limit`, `server`, `network`, `stream_decode`,
+`timeout`, `authentication`, `access_denied`, `not_found` and
+`quota_exceeded`, and a `content_filter` whose provider code is `refusal`.
+`invalid_request`, `context_length`, any other `content_filter`,
+`configuration`, `model_selection`, `resource_limit`, `middleware`, a
+`provider` or `response_decode` failure the client would not retry, and an
 unknown kind end the stage with class `llm:<kind>`. Cancellation, the
 driver's attempt budget, and any non-LLM agent error (a tool failure, a
-missing skill) never start fallback. The mapping is written before the
-implementation in `.ai/reviews/fabro-unified/task12-fallback.md`.
+missing skill) never start fallback. The reference's own mapping, written in
+`.ai/reviews/fabro-unified/task12-fallback.md`, differs on two classes: it
+moved a `provider` or `response_decode` failure whatever the retry class,
+and never moved a retryable failure of another kind.
 
 The plan is fixed when the stage opens. An output-repair turn runs on the
 route the plan reached; advancing to a target never activates the target's
@@ -838,29 +845,30 @@ continues on the route reached (position and all) and builds no plan of its
 own; a workflow retry (a new firing) builds a new plan at position 0. ACP
 agents have no plan: the command owns their model.
 
-A native session keeps its conversation across the change: the failed
-session's durable record resumes on the next route with Pebble's
-`ResumeMode::UseModel`, the same session id continuing. Two continuations
-exist. When the failed request carried the prompt itself (the record ends
-with that user turn), the turn is dropped from the record and the prompt is
-sent again on the new route (`replay_prompt`). When work happened first (the
-record ends with tool results or an assistant turn), the next model continues
-that unfinished turn with no new input (`continue_turn`, Pebble's
-`continue_prompt`): it answers the committed tool results as they stand, and
-the tool that ran is not run again. Fabro rebuilds the session from the
-original prompt on every failover, which would repeat the tool; this is an
-accepted difference. A prompt node re-sends its
+A native session keeps its conversation across the change: Pebble resumes
+the failed session's durable record on the next route with
+`ResumeMode::UseModel`, the same session id continuing, and carries the
+prompt on from the history as it stands. Two continuations exist, and Pebble
+names the one it took on its `RouteFailover` event. When nothing this prompt
+committed is in the conversation (the failed request carried the prompt
+itself), the prompt is asked again on the new route (`replay_prompt`). When
+work happened first (the conversation holds tool results or an assistant
+turn this prompt committed), the next model continues that unfinished turn
+with no new input (`continue_turn`): it answers the committed tool results as
+they stand, and the tool that ran is not run again. Fabro rebuilds the
+session from the original prompt on every failover, which would repeat the
+tool; this is an accepted difference. A prompt node re-sends its
 messages, repair history included, on the next route (`replay_prompt`).
 
 Three retry mechanisms exist and each has one owner: the client's own
 same-route retries (`PETRI_LLM_RETRY_ATTEMPTS`, default 3), Pebble's turn
-replay after a broken response stream (`PETRI_AGENT_TURN_REPLAY_ATTEMPTS`,
-unset keeps Pebble's default), and this chain, which starts only once both
-are spent. `PETRI_LLM_TIMEOUT_MS` bounds one client call, retries included;
-its expiry is a `timeout` and eligible. Both same-route mechanisms report on
-the agent's own event stream as Pebble's `LlmRetry` event, with `phase`
-`open` for a client retry and `consume` for a turn replay: Petri installs
-Pebble's `RetryEventObserver` on the client it builds.
+replay after a broken response stream (Pebble's default policy), and this
+chain, which Pebble starts only once both are spent. `PETRI_LLM_TIMEOUT_MS`
+bounds one client call, retries included; its expiry is a `timeout` and
+eligible. Both same-route mechanisms report on the agent's own event stream
+as Pebble's `LlmRetry` event, with `phase` `open` for a client retry and
+`consume` for a turn replay: Petri installs Pebble's `RetryEventObserver` on
+the client it builds.
 
 Recovery: nothing of a plan is durable. A run resumed after a crash starts
 the interrupted node's attempt again with a new plan at position 0, on the
@@ -886,6 +894,24 @@ ends the stage (`reason` `ineligible` or `exhausted`, the route, `error`). A
 cancellation emits no stop. The stage metrics carry `fallback.position`,
 `fallback.route` and `fallback.original`. `crates/petri/lib/tests/fallback_events.rs`
 rebuilds a stage's outcome and per-route accounting from the public stream.
+
+On a native agent node the plan and the first `route` are Petri's own facts;
+the rest mirror Pebble's events (`fabro_steps::fallback::Mirror`, in the
+session's event sink, each sent acknowledged). Pebble's `RouteFailover`
+becomes the failed route's `usage` with `outcome = "error"` (the event's
+`usage`, `cost_usd_micros`, `inference_ms` and `tool_ms`: what the prompt
+spent on that route since it began or since the previous failover), then
+`failover` (the event's `error` as the typed error, its `message` Pebble's
+one-line rendering of the error and its causes; `eligible` is true, Pebble
+moved on it; `continuation` is the event's), the `model fallback: ...` line
+on the node's stderr, and `route` for the new route (`reused = false`,
+`session` the event's session id). The `usage` of the route a prompt ends on
+is the prompt report less what the failed routes reported, so the positions
+sum to the report. `stop` mirrors Pebble's `RouteFailoverStopped` (`reason`
+`ineligible` or `exhausted`), with the typed error from the prompt's own
+model error, after the final `usage`; Pebble publishes that event only when
+the plan named a fallback route, so a single-route plan derives the same
+reason from the error's eligibility. A prompt node emits all five itself.
 
 ### MCP servers
 

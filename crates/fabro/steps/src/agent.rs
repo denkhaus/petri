@@ -13,14 +13,15 @@
 //!
 //! A native node runs on a fallback plan ([`crate::fallback`]): the route
 //! its model and provider resolve to, then the targets `[run.model.fallbacks]`
-//! configures for that model. A provider-local model error moves the
-//! conversation to the next route; a retained thread carries its plan to the
-//! next node.
+//! configures for that model. Pebble runs the plan's remaining routes: a
+//! provider-local model error moves the conversation to the next route, and
+//! the session mirrors each move as Petri's events; a retained thread
+//! carries its plan, at the route reached, to the next node.
 
 pub(crate) mod backend;
 use std::collections::BTreeMap;
 use std::env;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub use backend::AgentBackend;
 use backend::{AgentError, Session};
@@ -373,21 +374,28 @@ impl Step for AgentStep {
             .await;
         // A retained thread continues on its own plan, at the route it
         // reached; a fresh session starts this node's plan at its original.
-        let (mut plan, resume) = match (retained, planned) {
-            (Some(kept), _) => (kept.plan, Resume::Export(Box::new(kept.export))),
+        // Pebble runs the routes after the one reached; the session's plan
+        // is read back once the node's turns are done.
+        let (plan, resume) = match (retained, planned) {
+            (Some(kept), _) => {
+                let plan = kept.plan.clone();
+                (kept.plan, Resume::Export {
+                    export: Box::new(kept.export),
+                    plan,
+                })
+            }
             (None, Some(Planned { plan, notices })) => {
                 fallback::Stage::of(&ctx).plan(&plan, &notices).await;
-                let route = plan.current().clone();
-                (plan, Resume::Fresh(route))
+                (plan.clone(), Resume::Fresh(plan))
             }
             (None, None) => {
-                let route = Route {
+                let plan = Plan::single(Route {
                     provider:         "acp".into(),
                     model:            config.model.clone().unwrap_or_default(),
                     reasoning_effort: None,
                     speed:            None,
-                };
-                (Plan::single(route.clone()), Resume::Fresh(route))
+                });
+                (plan.clone(), Resume::Fresh(plan))
             }
         };
         let open = Box::pin(Session::open(&config, &mut ctx, resume));
@@ -411,9 +419,10 @@ impl Step for AgentStep {
             &mut ctx,
             &mut session,
             &mut turns,
-            &mut plan,
         ))
         .await;
+        // The route the plan reached, after any failover Pebble ran.
+        let plan = session.plan().unwrap_or(plan);
         let reason = match &result {
             Ok(_) => ShutdownReason::Completed,
             Err(AgentError::Cancelled) => ShutdownReason::Cancelled,
@@ -471,10 +480,6 @@ impl Step for AgentStep {
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one stage's fixed inputs; a struct would name them once more"
-)]
 async fn run_session(
     config: &AgentConfig,
     fidelity: Fidelity,
@@ -483,14 +488,21 @@ async fn run_session(
     ctx: &mut StepCtx,
     session: &mut Session,
     turn_count: &mut u64,
-    plan: &mut Plan,
 ) -> Result<Stage, AgentError> {
     let mut prompt = config.assemble(fidelity, run_id, contract);
     let mut repairs = 0_u64;
     let (outcome, text) = loop {
         // Every turn, the repair turns included, runs on the same plan: a
-        // provider-local failure moves the conversation to the next route.
-        let text = Box::pin(fallback::prompt(session, plan, config, ctx, &prompt)).await?;
+        // provider-local failure moves the conversation to the next route,
+        // inside Pebble, and the session reports the move.
+        let text = session
+            .prompt(
+                &prompt,
+                &mut ctx.control,
+                ctx.env.grace(),
+                config.timeout_ms.map(Duration::from_millis),
+            )
+            .await?;
         ctx.log(LogStream::Stdout, text.clone()).await;
         *turn_count += 1;
         match validate(contract, &text) {

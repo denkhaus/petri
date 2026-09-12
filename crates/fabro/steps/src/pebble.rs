@@ -8,12 +8,13 @@
 //! to the new stage; the predecessor was shut down after it exported. Per
 //! stage metrics start at zero for each node.
 //!
-//! A session opens on a route ([`Resume::Fresh`]), continues a retained
-//! export on the export's route ([`Resume::Export`]), or resumes a failed
-//! session's record on another route ([`Resume::Failover`], Pebble's
-//! `ResumeMode::UseModel`): the fallback chain in [`crate::fallback`] drives
-//! the third. A prompt's model error stays typed ([`AgentError::Model`]) so
-//! that chain can read it.
+//! A session opens on a plan's route ([`Resume::Fresh`]) or continues a
+//! retained export on the export's route with the plan the thread carries
+//! ([`Resume::Export`]). Either way the plan's remaining routes are named to
+//! Pebble as its fallback routes, and Pebble moves the conversation when a
+//! model error qualifies; the sink mirrors each move as the events
+//! [`crate::fallback`] defines. A prompt's model error stays typed
+//! ([`AgentError::Model`]) so the stage reports its class.
 
 pub mod environment;
 pub mod mcp;
@@ -22,8 +23,6 @@ pub mod questions;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::error::Error;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,10 +37,9 @@ use pebble_coding_agent::events::{
     AgentProfileKind, CodingAgentEvent, EventSink, EventSinkError, PermissionLevel, TokenUsage,
 };
 use pebble_coding_agent::extensions::Redactor;
-use pebble_coding_agent::state::SessionRecord;
 use pebble_coding_agent::{
     CodingAgent, CodingAgentBuilder, CodingAgentExport, CodingAgentOptions, CodingInput,
-    MemoryDiscovery, PromptReport, ResumeMode, ShutdownReason,
+    MemoryDiscovery, PromptReport, ShutdownReason,
 };
 use questions::AgentQuestions;
 use serde_json::json;
@@ -53,7 +51,7 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 use crate::agent::AgentConfig;
 use crate::agent::backend::AgentError;
 use crate::compaction::{self, CompactionPolicyHandle};
-use crate::fallback::{self, Disposition, Route};
+use crate::fallback::{self, Disposition, Plan};
 use crate::hooks::tools::ToolHooks;
 use crate::hooks::{self};
 use crate::skills;
@@ -65,17 +63,17 @@ use crate::subagents::{self, Ledger};
 #[derive(Clone)]
 pub struct PebbleClient(pub Client);
 
-/// Where a native session's conversation comes from.
+/// Where a native session's conversation comes from. Either carries the
+/// node's fallback plan at the route reached: Pebble runs the routes after
+/// it.
 pub(crate) enum Resume {
-    /// A new conversation on `route`.
-    Fresh(Route),
-    /// A retained thread's warm export, on the export's own route.
-    Export(Box<CodingAgentExport>),
-    /// A failed session's record, continued on another route: the
-    /// fallback chain's handoff.
-    Failover {
-        record: SessionRecord,
-        route:  Route,
+    /// A new conversation on the plan's current route.
+    Fresh(Plan),
+    /// A retained thread's warm export, on the export's own route, with the
+    /// plan the thread carries.
+    Export {
+        export: Box<CodingAgentExport>,
+        plan:   Plan,
     },
 }
 
@@ -91,7 +89,8 @@ pub struct TurnUsage {
 pub(crate) struct NativeSession {
     agent:           CodingAgent,
     /// The node's sink, kept so the MCP mirror can say `stopped` once the
-    /// agent has closed its servers.
+    /// agent has closed its servers, and so the fallback mirror can settle
+    /// each prompt on the route it ended on.
     events:          Arc<PetriEvents>,
     questions:       Arc<AgentQuestions>,
     compaction:      compaction::Accounting,
@@ -106,7 +105,6 @@ pub(crate) struct NativeSession {
     inference:       Duration,
     tool:            Duration,
     prompts:         u64,
-    last_turn:       Option<TurnUsage>,
 }
 
 /// The Pebble profile the model selector resolves to, from the catalog's
@@ -204,13 +202,14 @@ impl NativeSession {
         };
         // A routed open runs on the route's model and controls; an export
         // keeps its own route and takes the node's controls.
-        let selector = match &resume {
-            Resume::Fresh(route) | Resume::Failover { route, .. } => {
+        let (selector, plan) = match &resume {
+            Resume::Fresh(plan) => {
+                let route = plan.current();
                 reasoning = route.reasoning_effort;
                 speed = route.speed;
-                route.selector()
+                (route.selector(), plan.clone())
             }
-            Resume::Export(_) => selector,
+            Resume::Export { plan, .. } => (selector, plan.clone()),
         };
         let hook_service = ctx.capability::<HookServiceHandle>();
         let compaction_policy = ctx.capability::<CompactionPolicyHandle>();
@@ -221,14 +220,15 @@ impl NativeSession {
         // Pebble discovers and reports, the sink attributes.
         let (skill_discovery, skill_labels) = skills::for_node(config, ctx);
         let events = Arc::new(PetriEvents {
-            sender:  ctx.logs.clone(),
-            masker:  ctx.secrets.masker(),
-            firing:  ctx.firing,
-            attempt: ctx.attempt,
-            scope:   ctx.scope,
-            node:    ctx.node.clone(),
-            skills:  skill_labels,
-            mcp:     mcp::Mirror::new(ctx, &config.mcps),
+            sender:   ctx.logs.clone(),
+            masker:   ctx.secrets.masker(),
+            firing:   ctx.firing,
+            attempt:  ctx.attempt,
+            scope:    ctx.scope,
+            node:     ctx.node.clone(),
+            skills:   skill_labels,
+            mcp:      mcp::Mirror::new(ctx, &config.mcps),
+            fallback: fallback::Mirror::new(ctx, plan.clone()),
         });
         let ledger = Arc::new(Ledger::default());
         let sink = subagents::observe(events.clone(), ledger.clone());
@@ -288,26 +288,22 @@ impl NativeSession {
                 .with_memory_discovery(MemoryDiscovery::from_git_root())
                 .with_skill_discovery(skill_discovery);
             let options = compaction::options(options, &config.compaction);
-            let options = fallback::configure_options(options);
-            // A resumed export keeps its route and its conversation; a
-            // failed session's record keeps the conversation and takes the
-            // next route; the builder binds this node's services either way.
+            // A resumed export keeps its route and its conversation; the
+            // builder binds this node's services either way, and names the
+            // plan's remaining routes for Pebble to fail over to, in order,
+            // each with its own controls (an export starts with none of its
+            // own).
             let mut builder: CodingAgentBuilder = match resume {
-                Resume::Export(export) => {
+                Resume::Export { export, .. } => {
                     CodingAgent::resume_from_export(client.0.clone(), environment, *export)
                 }
-                Resume::Failover { record, route } => CodingAgent::resume(
-                    client.0.clone(),
-                    environment,
-                    record,
-                    ResumeMode::UseModel(route.selector()),
-                ),
                 Resume::Fresh(_) => {
                     CodingAgent::builder(client.0.clone(), environment).model(&selector)
                 }
             };
             builder = builder
                 .options(options)
+                .fallback_routes(plan.pebble_routes(config.max_tokens))
                 .permission_level(PermissionLevel::Full)
                 .event_sink(sink)
                 .redactor(redactor)
@@ -367,7 +363,6 @@ impl NativeSession {
             inference: Duration::ZERO,
             tool: Duration::ZERO,
             prompts: 0,
-            last_turn: None,
         };
         if cancel.is_cancelled() {
             session.shutdown(ShutdownReason::Cancelled).await?;
@@ -380,27 +375,12 @@ impl NativeSession {
     }
 
     /// One prompt turn. A model error comes back typed as
-    /// [`AgentError::Model`].
+    /// [`AgentError::Model`]. Pebble runs the plan's remaining routes inside
+    /// the turn; the sink mirrors each move, and the route the prompt ended
+    /// on is settled here.
     pub(crate) async fn prompt(
         &mut self,
         prompt: &str,
-        control: &mut mpsc::Receiver<Control>,
-    ) -> Result<String, AgentError> {
-        self.run(Some(CodingInput::text(prompt)), control).await
-    }
-
-    /// Continue the prompt the conversation left unfinished (a failover after
-    /// committed tool results), with no new input.
-    pub(crate) async fn continue_prompt(
-        &mut self,
-        control: &mut mpsc::Receiver<Control>,
-    ) -> Result<String, AgentError> {
-        self.run(None, control).await
-    }
-
-    async fn run(
-        &mut self,
-        input: Option<CodingInput>,
         control: &mut mpsc::Receiver<Control>,
     ) -> Result<String, AgentError> {
         let handle = self.agent.control_handle();
@@ -408,10 +388,9 @@ impl NativeSession {
         let cancel = self.cancel.clone();
         let kill = self.kill.clone();
         let report = {
-            let prompt: Pin<Box<dyn Future<Output = PromptReport> + Send + '_>> = match input {
-                Some(input) => Box::pin(self.agent.prompt_with_cancellation(input, &cancel)),
-                None => Box::pin(self.agent.continue_prompt_with_cancellation(&cancel)),
-            };
+            let prompt = self
+                .agent
+                .prompt_with_cancellation(CodingInput::text(prompt), &cancel);
             tokio::pin!(prompt);
             let mut closed = false;
             loop {
@@ -435,6 +414,10 @@ impl NativeSession {
         self.compaction
             .settle(&session, &report, &self.attribution)
             .await;
+        // The route the prompt ended on gets the report less what the
+        // failed routes spent; an interrupted turn is accounted like any
+        // other, with no stop decision after it.
+        self.events.fallback.settle(&report).await;
         if cancel.is_cancelled() {
             return Err(AgentError::Cancelled);
         }
@@ -442,7 +425,10 @@ impl NativeSession {
             Ok(output) => Ok(output.text.unwrap_or_default()),
             Err(error) => Err(match fallback::classify(&error) {
                 Disposition::Cancelled => AgentError::Cancelled,
-                Disposition::Model(failure) => AgentError::Model(failure),
+                Disposition::Model(failure) => {
+                    self.events.fallback.stop(&failure).await;
+                    AgentError::Model(failure)
+                }
                 // A skill reference that does not expand keeps the skills
                 // module's class and reason; any other agent error is what
                 // the classifier said.
@@ -464,22 +450,12 @@ impl NativeSession {
         }
         self.inference = self.inference.saturating_add(report.timing.inference);
         self.tool = self.tool.saturating_add(report.timing.tool);
-        self.last_turn = Some(TurnUsage {
-            usage:           json!(report.usage),
-            cost_usd_micros: report.cost_usd_micros,
-            inference_ms:    elapsed_ms(report.timing.inference),
-            tool_ms:         elapsed_ms(report.timing.tool),
-        });
     }
 
-    /// The last prompt turn's accounting.
-    pub(crate) fn last_turn(&self) -> Option<TurnUsage> {
-        self.last_turn.clone()
-    }
-
-    /// The durable record of the conversation so far, for a failover.
-    pub(crate) fn record(&self) -> SessionRecord {
-        self.agent.to_record()
+    /// The fallback plan at the route reached, after any failover Pebble
+    /// ran.
+    pub(crate) fn plan(&self) -> Plan {
+        self.events.fallback.plan()
     }
 
     pub(crate) fn session_id(&self) -> String {
@@ -577,19 +553,22 @@ impl Redactor for PetriRedactor {
 /// `(stream_id, seq)` in the nested envelope is the idempotency key.
 ///
 /// Beside the envelope, the sink derives Petri's own events from what Pebble
-/// reports: the skill directories it searched, and the MCP servers' lifecycle
-/// and calls ([`mcp::Mirror`]).
+/// reports: the skill directories it searched, the MCP servers' lifecycle
+/// and calls ([`mcp::Mirror`]), and the fallback routes the prompt moved
+/// through ([`fallback::Mirror`]).
 struct PetriEvents {
-    sender:  ProgressSender,
-    masker:  Masker,
-    firing:  FiringId,
-    attempt: Attempt,
-    scope:   ScopeId,
-    node:    SmolStr,
+    sender:   ProgressSender,
+    masker:   Masker,
+    firing:   FiringId,
+    attempt:  Attempt,
+    scope:    ScopeId,
+    node:     SmolStr,
     /// What names the skill directories Pebble reports having searched.
-    skills:  skills::Labels,
+    skills:   skills::Labels,
     /// The MCP server and tool events, from Pebble's.
-    mcp:     mcp::Mirror,
+    mcp:      mcp::Mirror,
+    /// The fallback events, from Pebble's, and the route the plan reached.
+    fallback: fallback::Mirror,
 }
 #[async_trait::async_trait]
 impl EventSink for PetriEvents {
@@ -606,6 +585,10 @@ impl EventSink for PetriEvents {
         // events Petri derived from its event too.
         self.mcp
             .observe(&event.event)
+            .await
+            .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))?;
+        self.fallback
+            .observe(event)
             .await
             .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))?;
         // The directories Pebble searched are Petri's record, with the

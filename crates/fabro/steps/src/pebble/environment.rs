@@ -444,7 +444,7 @@ fn error(kind: EnvironmentErrorKind, message: impl Into<String>) -> EnvironmentE
 fn io_error(cause: executor::EnvError) -> EnvironmentError {
     EnvironmentError::with_source(EnvironmentErrorKind::Io, cause.to_string(), cause)
 }
-pub(super) fn elapsed_ms(duration: Duration) -> u64 {
+pub(crate) fn elapsed_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 

@@ -149,7 +149,7 @@ crates/petri/cli/tests/fabro_fallback_blackbox.rs  readiness item 9a (milestone 
 crates/petri/cli/tests/llm_client.rs         the client `petri::llm_client` builds, against a twin: its same-route retries and its call budget
 crates/petri/lib/tests/fallback_events.rs    readiness item 9a: a stage's fallback plan, routes, failover decision, per-route usage and outcome rebuilt from public `RunEvent`s alone
 crates/petri/cli/tests/fabro_hooks_blackbox.rs  readiness item 5 through the binary: a configured hook blocks a real tool effect of a native agent (`a_configured_hook_blocks_a_real_tool_effect_in_the_native_backend`); two `full` nodes share one conversation
-crates/fabro/steps/src/fallback.rs (unit)     readiness item 9a: chain resolution keyed by the canonical model, refused keys, skipped candidates with Fabro's notices, per-target reasoning effort with `NoNearbyReasoningLevel` and `ChainEmpty`, the plan's positions, the error mapping for every `lithos-llm` kind and every Pebble error
+crates/fabro/steps/src/fallback.rs (unit)     readiness item 9a: chain resolution keyed by the canonical model, refused keys, skipped candidates with Fabro's notices, per-target reasoning effort with `NoNearbyReasoningLevel` and `ChainEmpty`, the plan's positions, the typed failure's eligibility (`lithos-llm`'s `failover_eligible`) for every `lithos-llm` kind and from Pebble's failover events, and every Pebble error's class
 crates/fabro/steps/tests/skills.rs           readiness item 9c: Fabro's skill directories in order on real scopes, precedence across the three, the reference prompt section and tool definition, `/name` expansion, `[run.agent] skills`, malformed and missing skills diagnosed (fixtures `crates/fabro/acceptance/testdata/skills`)
 crates/petri/cli/tests/fabro_skills_blackbox.rs  readiness item 9c through the binary: precedence and the reference prompt and tool on both vocabularies, a hook blocking a skill-driven tool call, a `for_each` branch keeping its loaded skill, the warnings on the terminal and in the event log
 crates/fabro/steps/tests/compaction.rs         readiness item 9e: Fabro's compaction on the native backend against a scripted model: the trigger below, at and above the 80 percent threshold, continuation and thread reuse across the boundary, tool pairing, a host `CompactionPolicy`, a failed summary, cancellation, the lost-thread fallback, and the public events and usage
@@ -1193,13 +1193,12 @@ Three retry mechanisms exist and each has one owner. `PETRI_LLM_RETRY_ATTEMPTS`
 (default 3; `1` disables) is the client's own budget for sending one request
 again on the same route after a retryable failure, with exponential backoff and
 the provider's `Retry-After` honored; `PETRI_LLM_TIMEOUT_MS` bounds one call,
-retries included. `PETRI_AGENT_TURN_REPLAY_ATTEMPTS` is Pebble's budget for
-replaying a model turn whose response stream broke (unset keeps Pebble's
-default). Both report on the agent's event stream as Pebble's `LlmRetry`.
-Fabro's `[run.model.fallbacks]` chain is Petri's and starts only once both
-are spent; see "Model fallback" in `crates/fabro/FORMAT.md`. A
-workflow retry (`retries` on a node) is a new attempt with a new plan and is
-none of these.
+retries included. Pebble replays a model turn whose response stream broke, on
+its default policy. Both report on the agent's event stream as Pebble's
+`LlmRetry`. Fabro's `[run.model.fallbacks]` chain is planned by Petri and run
+by Pebble, and starts only once both are spent; see "Model fallback" in
+`crates/fabro/FORMAT.md`. A workflow retry (`retries` on a node) is a new
+attempt with a new plan and is none of these.
 
 **Workflow secrets.** A Fabro `workflow.toml` environment value written as
 `{{ secrets.NAME }}` is a secret reference. The standalone runner resolves it
