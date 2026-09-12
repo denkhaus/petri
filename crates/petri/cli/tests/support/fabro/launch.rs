@@ -112,6 +112,19 @@ impl Case {
             .env("PETRI_LOG", "warn");
         if let Some(docker) = &self.docker_link {
             command.env("PETRI_SANDBOX_DOCKER_PLUGIN", docker);
+            // The daemon this test process was pointed at, so the binary's
+            // plugin reaches the same one: the variables Petri forwards to
+            // the Docker plugin. Unset, the plugin uses the default socket.
+            for name in [
+                "DOCKER_HOST",
+                "DOCKER_TLS_VERIFY",
+                "DOCKER_CERT_PATH",
+                "DOCKER_API_VERSION",
+            ] {
+                if let Some(value) = env::var_os(name) {
+                    command.env(name, value);
+                }
+            }
         }
         command
     }
