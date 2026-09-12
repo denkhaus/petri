@@ -577,20 +577,23 @@ names the decision record under `decisions/`; "gap" names the owner.
 
 ## Library pin
 
-Pebble is pinned at `29da922597873afba3d9ae8c2fb73425685eda9e` (the
-`embedder-concerns` batch, on top of `petri-readiness-gaps`
-`6b7d26e0f791edf3381b110b78db1c5507c94f66`, which sat on the readiness
-batch's `408638fe982ace5b570e04ba808be3a32d4001f7`). The `embedder-concerns`
-batch moves concerns both embedders wrote into Pebble: memory and skill
-discovery (`MemoryDiscovery`, `SkillDiscovery`, with the profile's filenames
-Pebble's own), the environment helpers (`environment::support`), compaction
-accounting on the prompt report (`PromptReport::compactions`), the
-`SessionProjection` fold Petri's sub-agent ledger now reads, fallback
-routes as a builder option, MCP servers as a tool source, a steering bus,
-and the command line as a library. Petri takes the first four here; the
-rest are pinned but not yet adopted (`fallback.rs` still drives the
-failover, `mcp/` still starts the servers at the sandbox-driver revision
-Petri pins). `petri-readiness-gaps` added the two capabilities the
+Pebble is pinned at `222d17f17d7384545d3782f3b315210ad2cb0cfe`, which is
+Pebble `main`. That commit is the `embedder-concerns` batch (Pebble PR #9)
+plus Pebble PR #10. PR #10 moves the sandbox-driver pin under Pebble's `mcp`
+feature to `a92c0db6b6a122ca9b6df75de6615544f53c0d47`, a feature Petri does
+not enable yet. The `embedder-concerns` batch sits on top of
+`petri-readiness-gaps` `6b7d26e0f791edf3381b110b78db1c5507c94f66`, which sat
+on the readiness batch's `408638fe982ace5b570e04ba808be3a32d4001f7`. The
+`embedder-concerns` batch moves concerns both embedders wrote into Pebble:
+memory and skill discovery (`MemoryDiscovery`, `SkillDiscovery`, with the
+profile's filenames Pebble's own), the environment helpers
+(`environment::support`), compaction accounting on the prompt report
+(`PromptReport::compactions`), the `SessionProjection` fold Petri's sub-agent
+ledger now reads, fallback routes as a builder option, MCP servers as a tool
+source, a steering bus, and the command line as a library. Petri takes the
+first four here; the rest are pinned but not yet adopted (`fallback.rs` still
+drives the failover, `mcp/` still starts the servers at the sandbox-driver
+revision Petri pins). `petri-readiness-gaps` added the two capabilities the
 readiness review's G07 and G14 asked for and changed no existing behavior:
 `CodingAgentOptions::with_max_tool_rounds` (a prompt ends with
 `Error::ToolRoundsExhausted` and a `ToolRoundsExhausted` event when the
@@ -629,7 +632,7 @@ fails when any of them disagree. The row names are the keys of a record's
 
 | Pin | Revision | Repository | Role |
 |---|---|---|---|
-| `pebble` | `29da922597873afba3d9ae8c2fb73425685eda9e` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
+| `pebble` | `222d17f17d7384545d3782f3b315210ad2cb0cfe` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
 | `lithos_llm` | `a1e3fd37b7153870411701327ac117606753fe90` | `lithoscomputer/lithos-llm` (public) | provider transport and request retries |
 | `sandbox_driver` | `5b9f9dae506560f030ca4ef43d0facbe7baa99dc` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `fedab8e6b9b8e2577bee7d93812a318d6adb4aa4` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
