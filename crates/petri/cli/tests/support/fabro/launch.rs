@@ -112,6 +112,19 @@ impl Case {
             .env("PETRI_LOG", "warn");
         if let Some(docker) = &self.docker_link {
             command.env("PETRI_SANDBOX_DOCKER_PLUGIN", docker);
+            // The daemon this test process was pointed at, so the binary's
+            // plugin reaches the same one: the variables Petri forwards to
+            // the Docker plugin. Unset, the plugin uses the default socket.
+            for name in [
+                "DOCKER_HOST",
+                "DOCKER_TLS_VERIFY",
+                "DOCKER_CERT_PATH",
+                "DOCKER_API_VERSION",
+            ] {
+                if let Some(value) = env::var_os(name) {
+                    command.env(name, value);
+                }
+            }
         }
         command
     }
@@ -150,7 +163,7 @@ impl Case {
     /// Point `provider` at a base URL nothing listens on.
     pub(crate) fn redirect_to_nothing(&mut self, provider: Provider, base_url: &str) {
         self.layers.push(format!(
-            "schema_version = 1\n[providers.{}]\nbase_url = {base_url:?}\n",
+            "schema_version = 1\n[providers.{}]\nbase_url = {base_url:?}\nenabled = true\n",
             provider.id()
         ));
         self.providers.push(provider.id());

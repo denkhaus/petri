@@ -39,7 +39,7 @@ a run will execute.
 | `[run.environment]` `id` over `[environments.<id>]` | `provider` selects the sandbox backend when `--backend` is not given: `local` is the host, `docker` the Docker plugin, `daytona` the Daytona plugin. `image.docker` becomes the scope's container image under `docker` and `daytona`. `env` is the scope environment; a value that is exactly `{{ secrets.NAME }}` is a `$secret` reference every command resolves at spawn (the standalone runner reads `PETRI_SECRET_NAME`; a missing secret fails the command with `secret_unavailable`) and masks in every log. `resources` size a Daytona runner. `cwd`, `network`, `lifecycle`, `labels` and `image.dockerfile` are platform-only and warn `ignored.workflow_toml.environments.<id>.<key>`; an `id` with no table, or a provider outside the three, is an error |
 | `[run.prepare]` `steps`, `timeout` | setup steps lowered as command nodes `run_prepare_1`, `run_prepare_2`, ... between `start` and its successors, so they run in the selected environment before any node, in order, each with the section's `timeout` (default `5m`), its `env`, and `on_failure="exit"`: a failed step ends the run before the first node. `command` argv is joined with shell quoting; `script` runs as written; `{{ inputs.* }}`, `{{ vars.* }}` and `{{ goal }}` render at load. The whole file is validated before any step runs |
 | `[[run.hooks]]` in `workflow.toml`, `.fabro/project.toml` at the repository root, and the host's user settings layer | local hooks ("Hooks" below). Each layer is read on its own and the three merge as Fabro's `combine_hooks` does: settings, then project, then workflow, a higher layer's entry replacing a lower one with the same `id` in place and the rest appending. Every field is validated at load (`fabro.hooks.toml`, `.entry`, `.event`, `.transport`, `.timeout`, `.matcher`); a hooks layer that cannot be read is an error, so a configured hook is never skipped silently. A `checkpoint_saved` hook warns `fabro.hooks.checkpoint_saved` and never runs. The merged list lands in `Graph.params["fabro_hooks"]` and on the `start` and `exit` stages. The user layer (`~/.fabro/settings.toml`) is outside the repository, so the host passes its text as the `fabro.settings_toml` compile variable when it wants one |
-| `[run.agent.mcps.<name>]` in `workflow.toml`, `.fabro/project.toml` and the host's user settings layer | MCP servers for native agent nodes ("MCP servers" under "Native Pebble" below). Each layer is read on its own with Fabro's field rules (`type` is `stdio`, `http` or `sandbox`; exactly one of `script` and `command`; `url`; `port`; `env`, `headers`; `startup_timeout` default `10s`, `tool_timeout` default `60s`; `enabled`), the three merge by name with the higher layer replacing the lower one whole (Fabro's sticky map) and `enabled = false` removing the name, and the merged list is carried on every agent node's config (`mcps`) and into nested workflows. `{{ inputs.* }}`, `{{ vars.* }}` and `{{ goal }}` substitute at load; a value under `env` or `headers` that is exactly `{{ secrets.NAME }}` is a `$secret` reference resolved when the server launches. Errors: `fabro.mcps.entry`, `fabro.mcps.type`, `fabro.mcps.shape`, `fabro.mcps.toml` (a layer that names servers and does not parse), `fabro.mcps.unbound`, `fabro.mcps.env_token` (`{{ env.* }}`, refused as Fabro refuses it); `unsupported.workflow_toml.run.agent.mcps.reference` (`id = ...` names a server-managed catalog the standalone runner does not have), `unsupported.workflow_toml.run.agent.mcps.protocol` (`protocol = "sse"`), `unsupported.workflow_toml.run.agent.mcps.secret` (a secret token anywhere but a whole `env` or `headers` value) |
+| `[run.agent.mcps.<name>]` in `workflow.toml`, `.fabro/project.toml` and the host's user settings layer | MCP servers for native agent nodes ("MCP servers" under "Native Pebble" below). Each layer is read on its own with Fabro's field rules (`type` is `stdio`, `http` or `sandbox`; exactly one of `script` and `command`; `url`; `port`; `protocol` on `http` and `sandbox`, `streamable_http` by default or `sse`; `env`, `headers`; `startup_timeout` default `10s`, `tool_timeout` default `60s`; `enabled`), the three merge by name with the higher layer replacing the lower one whole (Fabro's sticky map) and `enabled = false` removing the name, and the merged list is carried on every agent node's config (`mcps`) and into nested workflows. `{{ inputs.* }}`, `{{ vars.* }}` and `{{ goal }}` substitute at load; a value under `env` or `headers` that is exactly `{{ secrets.NAME }}` is a `$secret` reference resolved when the server launches. Errors: `fabro.mcps.entry`, `fabro.mcps.type`, `fabro.mcps.shape`, `fabro.mcps.toml` (a layer that names servers and does not parse), `fabro.mcps.unbound`, `fabro.mcps.env_token` (`{{ env.* }}`, refused as Fabro refuses it); `unsupported.workflow_toml.run.agent.mcps.reference` (`id = ...` names a server-managed catalog the standalone runner does not have), `unsupported.workflow_toml.run.agent.mcps.secret` (a secret token anywhere but a whole `env` or `headers` value) |
 | other sections in `workflow.toml` | every section is diagnosed, none is dropped silently. Platform-only sections warn `ignored.workflow_toml.<section>` with why (`[run.working_dir]`, `[run.metadata]`, `[run.run_branch]`, `[run.meta_branch]`, `[run.pull_request]`, `[run.git]`, `[run.integrations]`, `[run.checkpoint]`, `[run.artifacts]`, `[run.notifications]`, `[run.interviews]`, `[run.scm]`, `[run.agent] fabro_tools`, and the top-level `[project]`, `[cli]`, `[server]`, `[llm]`). A requirement the standalone runner cannot meet is a specific `unsupported.workflow_toml.*` error (the MCP row above lists its three). A key Fabro's parser refuses (a legacy top-level key, an unknown `[run]` key, `_version` other than 1) is `unsupported.workflow_toml.key` / `unsupported.workflow_toml.version` with Fabro's rename hint. See `crates/fabro/acceptance/CONTRACT.md` for the per-option table |
 | `prompt="@prompts/x.md"`, `output_schema="@schemas/x.json"` | read beside the workflow file; `{% include %}` resolves beside the included file |
 | `model_stylesheet` | rendered, parsed (`*`, shape, `.class`, `#id`; specificity 0–3), written onto nodes; an explicit node attribute wins |
@@ -696,16 +696,17 @@ files use the scope's filesystem. Bash, find, grep, and the usual file utilities
 must be available there. Content search uses ripgrep when available and grep
 otherwise. Searches fail explicitly when their captured output exceeds 4 MiB.
 The backend reads the project instruction files Fabro's `discover_memory`
-selects for the model's agent profile (the catalog's `pebble.profile`
-metadata): `AGENTS.md` and `CLAUDE.md` for Anthropic models, `AGENTS.md` and
+selects for the model's agent profile (the catalog's shared `metadata.agent`
+namespace): `AGENTS.md` and `CLAUDE.md` for Anthropic models, `AGENTS.md` and
 `.codex/instructions.md` for OpenAI, `AGENTS.md` and `GEMINI.md` for Gemini,
 `AGENTS.md` alone otherwise; from the Git root down to the working directory,
-root first, when the working directory is inside a repository. Petri selects
-the paths that exist in the scope (`fabro_steps::memory::select`) and Pebble's
-loader owns the 32 KiB budget, deduplication and truncation; a prompt node
-reads the working directory's files through the same loader
-(`ProjectMemory::load`), so its system prompt is the text a session would
-load, the crossing file cut with Pebble's marker. The backend
+root first, when the working directory is inside a repository. Pebble owns
+the filenames, the walk and the loader (`MemoryDiscovery::from_git_root`,
+the 32 KiB budget, deduplication and truncation); a prompt node reads the
+working directory's files through the same discovery and loader
+(`MemoryDiscovery::working_directory`, `ProjectMemory::load`), so its system
+prompt is the text a session would load, the crossing file cut with Pebble's
+marker. The backend
 searches Fabro's skill directories (below, "Skills"). Every
 session carries the run's tool hooks as Pebble middleware (`pre_tool_use`
 denies before the tool runs; `post_tool_use` observes the outcome), and the
@@ -888,80 +889,101 @@ rebuilds a stage's outcome and per-route accounting from the public stream.
 
 ### MCP servers
 
-A native agent node connects to the run's `[run.agent.mcps]` servers
-(`fabro_steps::mcp`). Petri's session owns them: it starts every server in
-name order before it builds the Pebble agent, registers each discovered tool
-with Pebble as a `RegisteredTool` whose source is `ToolSource::Mcp { server,
-original name }`, and shuts the servers down after the agent shuts down, so
-before the node returns and before the scope's environment is released. The
-MCP protocol lives in the `rmcp` client library (1.7.0, the version the
-pinned Fabro locks); Pebble's agent loop sees only tools, so the run's tool
-hooks (a `pre_tool_use` hook can block an MCP tool before it reaches the
-server), Pebble's history, output bounds, cancellation and agent events apply
-to an MCP tool as to any other. The tool the model sees is named
+A native agent node connects to the run's `[run.agent.mcps]` servers through
+Pebble's `mcp` feature (`fabro_steps::pebble::mcp`). Petri maps each entry
+onto a Pebble `McpServer` (a `stdio` entry is `McpPlacement::Stdio`, `http`
+is `McpPlacement::Http`, `sandbox` is `McpPlacement::Environment`), resolves
+its secrets, and names the servers to the agent builder in name order. Pebble
+starts them while it builds the agent, registers each discovered tool as a
+`RegisteredTool` whose source is `ToolSource::Mcp { server, original name }`,
+and closes them when the agent shuts down, so before the node returns and
+before the scope's environment is released. The MCP protocol lives in the
+`rmcp` client library Pebble pins (1.7.0, the version the pinned Fabro
+locks); Pebble's agent loop sees only tools, so the run's tool hooks (a
+`pre_tool_use` hook can block an MCP tool before it reaches the server),
+Pebble's history, output bounds, cancellation and agent events apply to an
+MCP tool as to any other. The tool the model sees is named
 `mcp__<server>__<tool>`, with every character outside alphanumerics and `_`
-replaced by `_`, as Fabro names it; a hook `matcher` matches that name.
+replaced by `_`, as Fabro and Pebble both name it; a hook `matcher` matches
+that name.
 
 Placement follows Fabro. A `stdio` server is a child process of Petri's host
 (Fabro's run worker), never of the sandbox; its working directory is the
 scope's workspace when the scope shares the host filesystem (the host
 backend), else Petri's own, and it gets the entry's `env` on top of Petri's
-environment. An `http` server is reached from the host over streamable HTTP
-with the entry's `headers`. A `sandbox` server is launched in the scope's
-execution environment (`bash -c` for a `script`) and reached over streamable
-HTTP through the environment's route to its port, which the sandbox provider
-supplies as a preview URL (`ExecEnv::preview_url`, the sandbox-driver
-`access/preview_url` operation): the host's own loopback on a host scope; a
-forward the Docker plugin opens on Petri's loopback and bridges into the
-container, so nothing is published on the daemon and a remote daemon works
-the same; Daytona's preview link with its token header, which rides on the
-request. Petri polls that route with an HTTP request until the server
-answers, within `startup_timeout`, because a forward accepts a connection
-before the port inside does. The route is released when the server stops
-(`access/preview_release`). A provider that offers no preview URL fails the
-server with a named reason (`no route from Petri to port <port> ...`). The
-legacy `sse` protocol is not spoken.
+environment. An `http` server is reached from the host with the entry's
+`headers`, over streamable HTTP or, with `protocol = "sse"`, the older SSE
+transport (Pebble's own client; the stream at `url`, posts to the endpoint
+it names, refused off the stream's origin). A `sandbox` server is launched in
+the scope's execution environment through Pebble's `Environment::exec`
+(`bash -c` for a `script`) and reached over the same two protocols through
+the environment's route to its port: a streamable HTTP server at the route
+itself, an SSE server's stream at `/sse` under it, where Fabro has always
+reached one. Pebble takes that route as sandbox-driver's `PreviewUrls` facet;
+Petri hands it `fabro_steps::pebble::environment::PortRoutes`, which answers
+from `ExecEnv::preview_url` (the sandbox-driver `access/preview_url`
+operation): the host's own loopback on a host scope; a forward the Docker
+plugin opens on Petri's loopback and bridges into the container, so nothing
+is published on the daemon and a remote daemon works the same; Daytona's
+preview link with its token header, which rides on the request. Pebble polls
+that route with an HTTP request until the server answers, within
+`startup_timeout`, because a forward accepts a connection before the port
+inside does, and releases the route when the server stops
+(`access/preview_release`). An environment that offers no preview URL fails
+the server with Pebble's reason (`no route to port <port> in the
+environment: capability preview_urls is not supported ...`).
 
 Failure behavior follows Fabro. A server that does not start (a launch error,
-no handshake within `startup_timeout`, a protocol error, an unavailable
-secret) is reported with the reason, including the tail of its own error
-output, as a line on the node's stderr (`mcp server \`<name>\` failed to
-start: ...`) and as a `failed` event, and skipped; the session proceeds with
-the tools of the servers that started. A result the server marks `isError`
-reaches the model as the tool's error text. A call with no answer within
+no handshake within `startup_timeout`, a protocol error) is reported by
+Pebble (`McpServerFailed`) with the reason, including the tail of its own
+error output; Petri writes the reason as a line on the node's stderr (`mcp
+server \`<name>\` failed to start: ...`) and as a `failed` event, and the
+session proceeds with the tools of the servers that started. A server whose
+`env` or `headers` secret the run cannot supply is reported the same way by
+Petri and never named to Pebble. A result the server marks `isError` reaches
+the model as the tool's error text. A call with no answer within
 `tool_timeout`, a call the agent cancelled, and a call to a server whose
 connection closed each reach the model as a failed call with a reason; the
 protocol's `notifications/cancelled` is sent for the first two. A server that
-exits mid-session is reported `disconnected` once and every later call to it
-fails at once; nothing reconnects within a session. A retained thread's next
-node starts its own servers again and registers the same names, so the
-conversation's earlier tool calls stay valid; a resumed run starts every
-thread again anyway. Secrets in `env` and `headers` are resolved at launch
-through the run's `SecretProvider` and never written down; the masker
-applies to every event. Sub-agents: MCP tools are registered as inheritable
-by Pebble child sessions (readiness item 9d verifies that against the
+exits mid-session fails every later call at once; nothing reconnects within a
+session. A retained thread's next node names the same servers again, so
+Pebble starts its own and registers the same names, and the conversation's
+earlier tool calls stay valid; a resumed run starts every thread again
+anyway. Secrets in `env` and `headers` are resolved when the servers are
+named, through the run's `SecretProvider`, and never written down; the
+masker applies to every event. Sub-agents: Pebble registers MCP tools as
+inheritable by child sessions (readiness item 9d verifies that against the
 reference). ACP agents receive no MCP servers (Fabro passes none either).
 
 Two `StepEvent::Custom` kinds carry the facts, each with `node`, `firing` and
-`attempt`:
+`attempt`. Petri's session emits `starting` and `stopped` itself; its event
+sink mirrors the rest from Pebble's events:
 
 | `kind` | Fields | When |
 |---|---|---|
-| `fabro.mcp.server` | `server`, `transport` (`stdio`, `http`, `sandbox`), `placement` (`host`, `remote`, `scope`), `phase`; `ready` adds `tool_count`, `tools` (`[{ name, original_name }]` sorted by `name`) and `duration_ms`; `failed` and `disconnected` add `error`; `stopped` adds `duration_ms` | `starting` before the launch, then `ready` or `failed`; `disconnected` once when a call finds the connection gone; `stopped` after the session's shutdown |
-| `fabro.mcp.tool` | `server`, `name` (the qualified name the model called), `tool` (the server's own name), `tool_call_id`, `status` (`ok`, `error`, `failed`, `timeout`, `cancelled`), `duration_ms`, `error` (the `isError` text or the failure reason; `null` otherwise) | after every proxied call, before its outcome returns to Pebble |
+| `fabro.mcp.server` | `server`, `transport` (`stdio`, `http`, `sandbox`), `placement` (`host`, `remote`, `scope`), `phase`; `ready` adds `tool_count` and `tools` (`[{ name, original_name }]` sorted by `name`); `failed` adds `error` | `starting` once the servers are named to the builder, before the agent is built; then `ready` or `failed` (Pebble's `McpServerReady` / `McpServerFailed`, on the stream once the agent is up); `stopped` after the agent's shutdown closed the server |
+| `fabro.mcp.tool` | `server`, `name` (the qualified name the model called), `tool` (the server's own name), `tool_call_id`, `status` (`ok`, `error`, `failed`, `cancelled`), `duration_ms` (between Pebble's `ToolCallStarted` and `ToolCallCompleted`), `error` (the `isError` text or the failure reason; `null` otherwise) | on Pebble's `ToolCallCompleted` for an `mcp__<server>__<tool>` name: `ok` for a result, `error` for a result the server marked as an error or a call with no answer within `tool_timeout`, `failed` for a call that did not reach the server or came back malformed, `cancelled` for a call the agent cancelled |
 
 A consumer accounts for a run's MCP activity from these alone: every server a
-node configured has a `starting` and a `ready` or `failed`; every proxied call
-has one `fabro.mcp.tool`; Pebble's own `ToolCallStarted` and
-`ToolCallCompleted` in the `pebble` envelope carry the same qualified name
-and call id. A hook that blocks an MCP call produces the hook's own event and
-no `fabro.mcp.tool`, because the call never reached the server.
+node configured has a `starting` and a `ready` or `failed`, and every server
+that was `ready` has a `stopped`; every proxied call has one `fabro.mcp.tool`;
+Pebble's own `ToolCallStarted` and `ToolCallCompleted` in the `pebble`
+envelope carry the same qualified name and call id. A hook that blocks an MCP
+call, or arguments Pebble refuses before the call, produce Pebble's
+`ToolCallCompleted` (`error_kind` `denied` or `invalid_arguments`) and the
+hook's own event, and no `fabro.mcp.tool`, because the call never reached the
+server. Compared with the events Petri emitted from its own MCP client: there
+is no `disconnected` phase (Pebble reports a closed connection through each
+failed call, not as a server event), no `duration_ms` on the server phases,
+and a timeout is `status = "error"` with the reason in `error` rather than a
+status of its own.
 ### Skills
 
 A skill is a `<dir>/<name>/SKILL.md` file: a frontmatter block with `name:`
 and an optional `description:`, then the prompt it expands into. Petri
-resolves the directories the way Fabro's agent does
-(`fabro_steps::skills`), lowest precedence first:
+states the directories the way Fabro's agent orders them, as a Pebble
+`SkillDiscovery` (`fabro_steps::skills`), lowest precedence first, and Pebble
+resolves and searches them:
 
 1. the configured skills directory, `$FABRO_HOME/skills` when `FABRO_HOME`
    is set, else `$HOME/.fabro/skills`; an embedding host names the home

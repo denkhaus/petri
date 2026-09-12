@@ -176,7 +176,7 @@ impl Twin {
     /// The catalog layer that points `lithos-llm` at this twin.
     pub(crate) fn catalog_layer(&self) -> String {
         format!(
-            "schema_version = 1\n[providers.{}]\nbase_url = {:?}\n",
+            "schema_version = 1\n[providers.{}]\nbase_url = {:?}\nenabled = true\n",
             self.provider.id(),
             self.base_url
         )

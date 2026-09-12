@@ -2,9 +2,11 @@
 """A scripted MCP server for Petri's tests: deterministic, dependency-free.
 
 Speaks JSON-RPC 2.0 over stdin and stdout (one message per line) as the MCP
-specification describes, or streamable HTTP with ``--http PORT``. The tools
-it exposes let a test observe an actual workspace effect, a result the
-server marks as an error, a slow call, and a server that exits mid-session:
+specification describes, streamable HTTP with ``--http PORT``, or the older
+SSE transport with ``--sse PORT`` (``GET /sse`` opens the event stream, whose
+first event names the endpoint requests are posted to). The tools it
+exposes let a test observe an actual workspace effect, a result the server
+marks as an error, a slow call, and a server that exits mid-session:
 
 - ``write_file(path, content)``: writes ``content`` to ``path`` (relative to
   the server's working directory) and answers ``wrote N bytes to PATH``.
@@ -27,10 +29,14 @@ answer. ``MCP_TEST_LOG`` names a file every lifecycle step is appended to:
 import argparse
 import json
 import os
+import queue
 import socketserver
 import sys
+import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import uuid
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 SERVER_INFO = {"name": "petri-test-mcp", "version": "1.0.0"}
 PROTOCOL_VERSION = "2025-03-26"
@@ -266,20 +272,108 @@ def serve_http(server, port):
             self.send_header("Content-Length", "0")
             self.end_headers()
 
-    class Server(HTTPServer):
-        def server_bind(self):
-            # The stock server_bind resolves the bound address to a fully
-            # qualified name with a reverse DNS lookup. On a GitHub macOS
-            # runner that lookup for 127.0.0.1 can outlast the test's
-            # startup window, so the server never answers. The name is only
-            # used in error pages; a loopback test server does not need it.
-            socketserver.TCPServer.server_bind(self)
-            host, port = self.server_address[:2]
-            self.server_name = host
-            self.server_port = port
+    class Server(LoopbackBind, HTTPServer):
+        pass
 
+    serve_forever(Server, port, Handler)
+
+
+def serve_sse(server, port):
+    """The older HTTP transport. ``GET /sse`` opens a session: the response is
+    an event stream whose first event names the endpoint
+    (``/messages?session=ID``) requests are posted to. Each request's answer
+    is a ``message`` event on that session's stream, and the post itself is
+    acknowledged with 202. Streams and posts are served on their own threads,
+    since a stream stays open for the session's whole life."""
+    streams = {}
+    streams_lock = threading.Lock()
+
+    def status(handler, code):
+        handler.send_response(code)
+        handler.send_header("Content-Length", "0")
+        handler.end_headers()
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):  # noqa: N802 - http.server's naming
+            if urlsplit(self.path).path != "/sse":
+                status(self, 404)
+                return
+            session = uuid.uuid4().hex
+            events = queue.Queue()
+            with streams_lock:
+                streams[session] = events
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            try:
+                self.chunk(f"event: endpoint\ndata: /messages?session={session}\n\n")
+                while True:
+                    response = events.get()
+                    self.chunk(f"event: message\ndata: {json.dumps(response)}\n\n")
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                # The client closed the stream: the session is over.
+                pass
+            finally:
+                with streams_lock:
+                    streams.pop(session, None)
+                self.close_connection = True
+
+        def chunk(self, text):
+            data = text.encode("utf-8")
+            self.wfile.write(f"{len(data):x}\r\n".encode("ascii") + data + b"\r\n")
+            self.wfile.flush()
+
+        def do_POST(self):  # noqa: N802
+            parts = urlsplit(self.path)
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length)
+            session = parse_qs(parts.query).get("session", [None])[0]
+            with streams_lock:
+                events = streams.get(session)
+            if parts.path != "/messages" or events is None:
+                status(self, 404)
+                return
+            try:
+                request = json.loads(body)
+            except json.JSONDecodeError:
+                status(self, 400)
+                return
+            response = server.handle(request)
+            if response is not None:
+                events.put(response)
+            status(self, 202)
+
+    class Server(LoopbackBind, ThreadingHTTPServer):
+        pass
+
+    serve_forever(Server, port, Handler)
+
+
+class LoopbackBind:
+    """A ``server_bind`` that skips the reverse DNS lookup."""
+
+    def server_bind(self):
+        # The stock server_bind resolves the bound address to a fully
+        # qualified name with a reverse DNS lookup. On a GitHub macOS
+        # runner that lookup for 127.0.0.1 can outlast the test's
+        # startup window, so the server never answers. The name is only
+        # used in error pages; a loopback test server does not need it.
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+
+def serve_forever(server_class, port, handler):
     trace(f"binding 127.0.0.1:{port} under {sys.executable} {sys.version.split()[0]}")
-    httpd = Server(("127.0.0.1", port), Handler)
+    httpd = server_class(("127.0.0.1", port), handler)
     trace(f"bound {httpd.server_address}")
     log("started")
     try:
@@ -292,6 +386,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tag", default="")
     parser.add_argument("--http", type=int, default=0)
+    parser.add_argument("--sse", type=int, default=0)
     parser.add_argument("--fail-init", action="store_true")
     parser.add_argument("--slow-init", type=int, default=0)
     options = parser.parse_args()
@@ -303,6 +398,8 @@ def main():
     server = Server(options)
     if options.http:
         serve_http(server, options.http)
+    elif options.sse:
+        serve_sse(server, options.sse)
     else:
         serve_stdio(server)
 

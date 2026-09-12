@@ -15,8 +15,8 @@
 //! the third. A prompt's model error stays typed ([`AgentError::Model`]) so
 //! that chain can read it.
 
-mod capture;
 pub mod environment;
+pub mod mcp;
 pub mod questions;
 
 use std::borrow::Cow;
@@ -27,7 +27,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use environment::{PebbleEnvironment, elapsed_ms};
+use environment::{PebbleEnvironment, PortRoutes, elapsed_ms};
 use execution::hooks::HookServiceHandle;
 use executor::Masker;
 use ir::{Attempt, Control, FiringId, ScopeId, StepEvent, Value};
@@ -35,13 +35,13 @@ use lithos_llm::Client;
 use lithos_llm::catalog::Metadata;
 use lithos_llm::types::{ReasoningEffort, Request, Speed};
 use pebble_coding_agent::events::{
-    CodingAgentEvent, EventSink, EventSinkError, PermissionLevel, TokenUsage,
+    AgentProfileKind, CodingAgentEvent, EventSink, EventSinkError, PermissionLevel, TokenUsage,
 };
 use pebble_coding_agent::extensions::Redactor;
 use pebble_coding_agent::state::SessionRecord;
 use pebble_coding_agent::{
     CodingAgent, CodingAgentBuilder, CodingAgentExport, CodingAgentOptions, CodingInput,
-    PromptReport, ResumeMode, ShutdownReason,
+    MemoryDiscovery, PromptReport, ResumeMode, ShutdownReason,
 };
 use questions::AgentQuestions;
 use serde_json::json;
@@ -56,9 +56,8 @@ use crate::compaction::{self, CompactionPolicyHandle};
 use crate::fallback::{self, Disposition, Route};
 use crate::hooks::tools::ToolHooks;
 use crate::hooks::{self};
-use crate::mcp::{self, McpServers};
+use crate::skills;
 use crate::subagents::{self, Ledger};
-use crate::{memory, skills};
 
 /// Host capability supplied by applications embedding the native backend.
 /// Construct the client with the application's catalog, credentials, and
@@ -91,8 +90,9 @@ pub struct TurnUsage {
 
 pub(crate) struct NativeSession {
     agent:           CodingAgent,
-    /// The node's MCP servers, shut down after the agent.
-    mcp:             McpServers,
+    /// The node's sink, kept so the MCP mirror can say `stopped` once the
+    /// agent has closed its servers.
+    events:          Arc<PetriEvents>,
     questions:       Arc<AgentQuestions>,
     compaction:      compaction::Accounting,
     attribution:     compaction::Attribution,
@@ -109,13 +109,13 @@ pub(crate) struct NativeSession {
     last_turn:       Option<TurnUsage>,
 }
 
-/// The Pebble profile name (`anthropic`, `claude-5`, `openai`, `gpt56`,
-/// `gpt6`, `gemini`, `kimi`) the model selector resolves to, from the
-/// catalog's `metadata.pebble.profile` on the model then the provider. The
-/// same rule Pebble applies when it builds the session.
-pub fn profile_of(client: &Client, selector: &str) -> Option<String> {
+/// The Pebble profile the model selector resolves to, from the catalog's
+/// shared `metadata.agent.profile` on the model then the provider: the rule
+/// Pebble applies when it builds a session. A prompt node, which builds no
+/// session, asks here for the profile whose instruction files it reads.
+pub fn profile_of(client: &Client, selector: &str) -> Option<AgentProfileKind> {
     #[derive(serde::Deserialize, Default)]
-    struct PebbleMetadata {
+    struct AgentMetadata {
         profile: Option<String>,
     }
     let probe = Request::builder()
@@ -126,12 +126,16 @@ pub fn profile_of(client: &Client, selector: &str) -> Option<String> {
     let route = client.resolve_route(&probe).ok()?;
     let read = |metadata: &Metadata| {
         metadata
-            .namespace::<PebbleMetadata>("pebble")
+            .namespace::<AgentMetadata>("agent")
             .ok()
             .flatten()
             .and_then(|m| m.profile)
     };
-    read(route.model().metadata()).or_else(|| read(route.provider().metadata()))
+    let named = read(route.model().metadata()).or_else(|| read(route.provider().metadata()))?;
+    AgentProfileKind::ALL
+        .iter()
+        .copied()
+        .find(|kind| kind.as_str() == named)
 }
 
 /// Fabro's `speed` to lithos-llm's: `fast` asks for the fast tier,
@@ -208,30 +212,26 @@ impl NativeSession {
             }
             Resume::Export(_) => selector,
         };
-        // Fabro's project documents for the model's profile, from the Git
-        // root down to the working directory. Pebble loads them.
-        let profile = profile_of(&client.0, &selector).unwrap_or_default();
-        let memory_files = memory::select(
-            ctx.env.as_ref(),
-            &profile,
-            memory::Scope::GitRootToWorkingDir,
-        )
-        .await;
         let hook_service = ctx.capability::<HookServiceHandle>();
         let compaction_policy = ctx.capability::<CompactionPolicyHandle>();
         let cancel = CancellationToken::new();
         let kill = CancellationToken::new();
         let guard = cancel.clone().drop_guard();
-        let sink = Arc::new(PetriEvents {
+        // Fabro's skill directories, in its order then the workflow's own;
+        // Pebble discovers and reports, the sink attributes.
+        let (skill_discovery, skill_labels) = skills::for_node(config, ctx);
+        let events = Arc::new(PetriEvents {
             sender:  ctx.logs.clone(),
             masker:  ctx.secrets.masker(),
             firing:  ctx.firing,
             attempt: ctx.attempt,
             scope:   ctx.scope,
             node:    ctx.node.clone(),
+            skills:  skill_labels,
+            mcp:     mcp::Mirror::new(ctx, &config.mcps),
         });
         let ledger = Arc::new(Ledger::default());
-        let sink = subagents::observe(sink, ledger.clone());
+        let sink = subagents::observe(events.clone(), ledger.clone());
         let redactor = Arc::new(PetriRedactor(ctx.secrets.masker()));
         // Agent questions ride the same progress and control channels a human
         // gate uses, so the host's one interviewer answers both.
@@ -259,24 +259,34 @@ impl NativeSession {
         });
         let mcps = config.mcps.clone();
         let secrets = ctx.secrets.clone();
-        let attribution = mcp::Attribution::of(ctx);
-        // Fabro's skill directories, audited and recorded; Pebble discovers.
-        let skills = skills::prepare(config, ctx).await;
+        let session_events = events.clone();
         let build = async {
-            // The node's MCP servers start first, on Petri's side of the
-            // agent, so their tools are registered with the builder.
-            let mut mcp =
-                McpServers::start(&mcps, env.clone(), secrets, attribution, &cancel).await;
-            let environment = PebbleEnvironment::prepare(env, cancel.clone(), kill.clone())
+            let environment = PebbleEnvironment::prepare(env.clone(), cancel.clone(), kill.clone())
                 .await
                 .map_err(|e| AgentError::failed("pebble_environment", e.to_string()))?;
             let environment = Arc::new(environment);
+            // The node's MCP servers: Fabro's entries as Pebble's, their
+            // secrets resolved here and nowhere else. Pebble starts them while
+            // it builds the agent and reports each one on the sink; a server
+            // whose secret the run cannot supply is reported here instead.
+            let servers = mcp::pebble_servers(&mcps, env.as_ref(), secrets.as_ref());
+            // A send that fails here means the driver stopped taking this
+            // attempt's progress; the build's own outcome reports that.
+            for server in &mcps {
+                let _ = session_events.mcp.starting(&server.name).await;
+            }
+            for (server, error) in &servers.unavailable {
+                let _ = session_events.mcp.failed(server, error).await;
+            }
+            // Fabro's project documents for the model's profile, from the
+            // Git root down to the working directory: Pebble names the
+            // files, does the walk, and loads them.
             let options = CodingAgentOptions::default()
                 .with_reasoning_effort(reasoning)
                 .with_speed(speed)
                 .with_max_tokens(config.max_tokens)
-                .with_memory_files(memory_files)
-                .with_skill_dirs(skills.paths());
+                .with_memory_discovery(MemoryDiscovery::from_git_root())
+                .with_skill_discovery(skill_discovery);
             let options = compaction::options(options, &config.compaction);
             let options = fallback::configure_options(options);
             // A resumed export keeps its route and its conversation; a
@@ -302,26 +312,24 @@ impl NativeSession {
                 .event_sink(sink)
                 .redactor(redactor)
                 .human_input(provider)
-                .tools(mcp.tools());
+                .mcp_servers(servers.servers)
+                .port_routes(Arc::new(PortRoutes::new(env)));
             builder = compaction::install(builder, compaction_policy);
             if let Some(middleware) = tool_hooks {
                 builder = builder.tool_middleware(middleware);
             }
             builder = subagents::configure(builder, &config.subagents);
-            match builder.build().await {
-                Ok(agent) => Ok((agent, mcp)),
-                Err(e) => {
-                    mcp.shutdown().await;
-                    // The chain, not the head alone: a refused event sink or a
-                    // bad model selector is the cause under Pebble's summary.
-                    Err(AgentError::failed("pebble_config", chain(&e)))
-                }
-            }
+            // The chain, not the head alone: a refused event sink or a bad
+            // model selector is the cause under Pebble's summary.
+            builder
+                .build()
+                .await
+                .map_err(|e| AgentError::failed("pebble_config", chain(&e)))
         };
         tokio::pin!(build);
         let mut pending = Vec::new();
         let mut closed = false;
-        let (agent, mcp) = loop {
+        let agent = loop {
             tokio::select! {
                 result = &mut build => break match result { Err(_) if cancel.is_cancelled() => return Err(AgentError::Cancelled), other => other? },
                 control = ctx.control.recv(), if !closed => {
@@ -345,10 +353,10 @@ impl NativeSession {
             attempt: ctx.attempt,
         };
         let mut session = Self {
-            compaction: compaction::Accounting::new(&agent),
+            compaction: compaction::Accounting::default(),
             attribution,
             agent,
-            mcp,
+            events,
             questions,
             cancel: cancel.clone(),
             kill: kill.clone(),
@@ -423,7 +431,10 @@ impl NativeSession {
             }
         };
         self.account(&report);
-        self.compaction.settle(&self.agent, &self.attribution).await;
+        let session = self.agent.snapshot().session_id().to_string();
+        self.compaction
+            .settle(&session, &report, &self.attribution)
+            .await;
         if cancel.is_cancelled() {
             return Err(AgentError::Cancelled);
         }
@@ -497,14 +508,26 @@ impl NativeSession {
     }
 
     pub(crate) async fn shutdown(&mut self, reason: ShutdownReason) -> Result<(), AgentError> {
+        // The MCP servers Pebble started; it closes them with the agent, after
+        // its last tool call and before this returns, so before the node
+        // returns and the scope's environment is released.
+        let started: Vec<String> = self
+            .agent
+            .snapshot()
+            .mcp_servers()
+            .iter()
+            .filter(|status| status.error.is_none())
+            .map(|status| status.server.clone())
+            .collect();
         let result = self
             .agent
             .shutdown(reason)
             .await
             .map(|_| ())
             .map_err(|e| AgentError::failed("pebble_shutdown", e.to_string()));
-        // The servers outlive the agent's last tool call and nothing else.
-        self.mcp.shutdown().await;
+        for server in started {
+            let _ = self.events.mcp.stopped(&server).await;
+        }
         result
     }
 }
@@ -552,6 +575,10 @@ impl Redactor for PetriRedactor {
 /// attempt: an attempt whose finish never landed is re-dispatched on resume
 /// and emits its events again, so a record may appear twice; Pebble's
 /// `(stream_id, seq)` in the nested envelope is the idempotency key.
+///
+/// Beside the envelope, the sink derives Petri's own events from what Pebble
+/// reports: the skill directories it searched, and the MCP servers' lifecycle
+/// and calls ([`mcp::Mirror`]).
 struct PetriEvents {
     sender:  ProgressSender,
     masker:  Masker,
@@ -559,6 +586,10 @@ struct PetriEvents {
     attempt: Attempt,
     scope:   ScopeId,
     node:    SmolStr,
+    /// What names the skill directories Pebble reports having searched.
+    skills:  skills::Labels,
+    /// The MCP server and tool events, from Pebble's.
+    mcp:     mcp::Mirror,
 }
 #[async_trait::async_trait]
 impl EventSink for PetriEvents {
@@ -571,19 +602,26 @@ impl EventSink for PetriEvents {
             ))
             .await
             .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))?;
-        // A skipped skill file is Pebble's report; the diagnostic is Petri's.
+        // Acknowledged like the envelope: Pebble's confirmation covers the
+        // events Petri derived from its event too.
+        self.mcp
+            .observe(&event.event)
+            .await
+            .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))?;
+        // The directories Pebble searched are Petri's record, with the
+        // convention behind each; a skipped file or directory is Pebble's
+        // report and the diagnostic is Petri's.
+        let at = skills::Attribution {
+            node:    self.node.clone(),
+            firing:  self.firing,
+            attempt: self.attempt,
+        };
+        if let Some(dirs) = skills::labeled(event, &self.skills) {
+            skills::record_resolved(&self.sender, &at, self.scope, &dirs).await;
+        }
         let skipped = skills::skipped(event);
         if !skipped.is_empty() {
-            skills::report(
-                &self.sender,
-                &skills::Attribution {
-                    node:    self.node.clone(),
-                    firing:  self.firing,
-                    attempt: self.attempt,
-                },
-                &skipped,
-            )
-            .await;
+            skills::report(&self.sender, &at, &skipped).await;
         }
         Ok(())
     }

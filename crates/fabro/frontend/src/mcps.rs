@@ -52,6 +52,30 @@ pub enum McpValue {
     Literal(String),
 }
 
+/// Which HTTP transport an `http` or `sandbox` server speaks: Fabro's
+/// `protocol` field, `streamable_http` unless the entry says `sse`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpHttpProtocol {
+    /// The current transport: JSON-RPC over POST, with optional server
+    /// streams.
+    #[default]
+    StreamableHttp,
+    /// The older transport: one server-sent event stream that names the
+    /// endpoint messages are posted to.
+    Sse,
+}
+
+impl McpHttpProtocol {
+    /// The protocol's name in the entry and in messages.
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::StreamableHttp => "streamable_http",
+            Self::Sse => "sse",
+        }
+    }
+}
+
 /// How the runner reaches a server: Fabro's three transports.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -63,20 +87,25 @@ pub enum McpTransport {
         #[serde(default)]
         env:     BTreeMap<String, McpValue>,
     },
-    /// A streamable HTTP endpoint the host connects to.
+    /// An HTTP endpoint the host connects to, over `protocol`.
     Http {
-        url:     String,
         #[serde(default)]
-        headers: BTreeMap<String, McpValue>,
+        protocol: McpHttpProtocol,
+        url:      String,
+        #[serde(default)]
+        headers:  BTreeMap<String, McpValue>,
     },
     /// A command launched inside the scope's execution environment that
-    /// listens on `port`; the host connects to it over streamable HTTP. A
-    /// `script` entry is `["bash", "-c", script]`.
+    /// listens on `port`; the host connects to it over `protocol` through
+    /// the environment's route to the port. A `script` entry is
+    /// `["bash", "-c", script]`.
     Sandbox {
-        command: Vec<String>,
-        port:    u16,
         #[serde(default)]
-        env:     BTreeMap<String, McpValue>,
+        protocol: McpHttpProtocol,
+        command:  Vec<String>,
+        port:     u16,
+        #[serde(default)]
+        env:      BTreeMap<String, McpValue>,
     },
 }
 
@@ -416,9 +445,7 @@ impl EntryReader<'_> {
         if !ok {
             return None;
         }
-        if !self.protocol_supported(name, table) {
-            return None;
-        }
+        let protocol = self.protocol(name, table)?;
         let startup_timeout_ms =
             self.duration(name, table, "startup_timeout", DEFAULT_STARTUP_TIMEOUT_MS)?;
         let tool_timeout_ms =
@@ -427,7 +454,11 @@ impl EntryReader<'_> {
             "http" => {
                 let url = self.text(name, table, "url", true)?;
                 let headers = self.values(name, table, "headers")?;
-                McpTransport::Http { url, headers }
+                McpTransport::Http {
+                    protocol,
+                    url,
+                    headers,
+                }
             }
             "stdio" => McpTransport::Stdio {
                 command: self.command(name, table, Interpreter::HostShell)?,
@@ -450,6 +481,7 @@ impl EntryReader<'_> {
                     }
                 };
                 McpTransport::Sandbox {
+                    protocol,
                     command: self.command(name, table, Interpreter::SandboxBash)?,
                     port,
                     env: self.values(name, table, "env")?,
@@ -465,32 +497,36 @@ impl EntryReader<'_> {
         }))
     }
 
-    /// `protocol`: `streamable_http` (the default) is served; the legacy
-    /// `sse` protocol is not.
-    fn protocol_supported(&mut self, name: &str, table: &toml::Table) -> bool {
+    /// `protocol`: `streamable_http` (the default) or `sse`, Fabro's two
+    /// values. A `stdio` entry never reaches here with one: the field is not
+    /// in its allowed list.
+    fn protocol(&mut self, name: &str, table: &toml::Table) -> Option<McpHttpProtocol> {
         let source = self.source;
-        match table.get("protocol").and_then(toml::Value::as_str) {
-            None | Some("streamable_http") => true,
-            Some("sse") => {
-                self.unsupported(
-                    "workflow_toml.run.agent.mcps.protocol",
-                    format!(
-                        "`run.agent.mcps.{name}` in `{source}` asks for the legacy `sse` MCP \
-                         protocol, which the standalone runner does not speak"
-                    ),
-                    "use a server that speaks streamable HTTP (`protocol = \"streamable_http\"`)",
-                );
-                false
-            }
-            Some(other) => {
+        match table.get("protocol") {
+            None => Some(McpHttpProtocol::default()),
+            Some(toml::Value::String(text)) => match text.as_str() {
+                "streamable_http" => Some(McpHttpProtocol::StreamableHttp),
+                "sse" => Some(McpHttpProtocol::Sse),
+                other => {
+                    self.error(
+                        "fabro.mcps.entry",
+                        format!(
+                            "`run.agent.mcps.{name}.protocol = \"{other}\"` in `{source}` must \
+                             be `streamable_http` or `sse`"
+                        ),
+                    );
+                    None
+                }
+            },
+            Some(_) => {
                 self.error(
                     "fabro.mcps.entry",
                     format!(
-                        "`run.agent.mcps.{name}.protocol = \"{other}\"` in `{source}` must be \
+                        "`run.agent.mcps.{name}.protocol` in `{source}` must be a string, \
                          `streamable_http` or `sse`"
                     ),
                 );
-                false
+                None
             }
         }
     }
@@ -805,8 +841,9 @@ port = 3100
             env:     BTreeMap::new(),
         });
         assert_eq!(servers[2].transport, McpTransport::Http {
-            url:     "https://mcp.example//srv".into(),
-            headers: BTreeMap::from([("Authorization".to_owned(), McpValue::Secret {
+            protocol: McpHttpProtocol::StreamableHttp,
+            url:      "https://mcp.example//srv".into(),
+            headers:  BTreeMap::from([("Authorization".to_owned(), McpValue::Secret {
                 name: "REMOTE".into(),
             })]),
         });
@@ -825,6 +862,71 @@ port = 3100
         );
         let back: Vec<McpServer> = serde_json::from_value(json).expect("back");
         assert_eq!(back, servers);
+    }
+
+    /// `protocol = "sse"` is accepted on `http` and `sandbox` servers, as
+    /// Fabro accepts it; `streamable_http` is the default and may be named.
+    /// A transport persisted before the field existed reads as the default.
+    #[test]
+    fn sse_and_streamable_http_are_fabros_two_protocols() {
+        let (entries, codes) = layer(
+            r#"
+[run.agent.mcps.legacy]
+type = "http"
+url = "http://127.0.0.1:1/sse"
+protocol = "sse"
+
+[run.agent.mcps.current]
+type = "http"
+url = "http://127.0.0.1:1/mcp"
+protocol = "streamable_http"
+
+[run.agent.mcps.browser]
+type = "sandbox"
+command = ["npx", "@playwright/mcp", "--port", "3100"]
+port = 3100
+protocol = "sse"
+
+[run.agent.mcps.plain]
+type = "sandbox"
+script = "exec ./server"
+port = 3200
+"#,
+        );
+        assert!(codes.is_empty(), "{codes:?}");
+        let servers = merge(vec![entries]);
+        let protocols: Vec<(&str, McpHttpProtocol)> = servers
+            .iter()
+            .map(|server| {
+                (server.name.as_str(), match &server.transport {
+                    McpTransport::Http { protocol, .. }
+                    | McpTransport::Sandbox { protocol, .. } => *protocol,
+                    McpTransport::Stdio { .. } => unreachable!("no stdio entry"),
+                })
+            })
+            .collect();
+        assert_eq!(protocols, [
+            ("browser", McpHttpProtocol::Sse),
+            ("current", McpHttpProtocol::StreamableHttp),
+            ("legacy", McpHttpProtocol::Sse),
+            ("plain", McpHttpProtocol::StreamableHttp),
+        ]);
+        assert_eq!(McpHttpProtocol::Sse.kind(), "sse");
+        assert_eq!(McpHttpProtocol::default().kind(), "streamable_http");
+        // The step config carries the protocol by Fabro's name...
+        let json = serde_json::to_value(&servers).expect("json");
+        assert_eq!(json[0]["transport"]["protocol"], "sse");
+        assert_eq!(json[3]["transport"]["protocol"], "streamable_http");
+        // ...and a graph written before the field existed reads as the
+        // default, so an existing run directory still resumes.
+        let older: McpTransport =
+            serde_json::from_value(serde_json::json!({ "type": "http", "url": "u" }))
+                .expect("an older transport");
+        assert_eq!(older, McpTransport::Http {
+            protocol: McpHttpProtocol::StreamableHttp,
+            url:      "u".into(),
+            headers:  BTreeMap::new(),
+        });
     }
 
     #[test]
@@ -882,8 +984,16 @@ port = 3100
                 "unsupported.workflow_toml.run.agent.mcps.reference",
             ),
             (
-                "[run.agent.mcps.a]\ntype = \"http\"\nurl = \"u\"\nprotocol = \"sse\"\n",
-                "unsupported.workflow_toml.run.agent.mcps.protocol",
+                "[run.agent.mcps.a]\ntype = \"http\"\nurl = \"u\"\nprotocol = \"ws\"\n",
+                "fabro.mcps.entry",
+            ),
+            (
+                "[run.agent.mcps.a]\ntype = \"http\"\nurl = \"u\"\nprotocol = 3\n",
+                "fabro.mcps.entry",
+            ),
+            (
+                "[run.agent.mcps.a]\ntype = \"stdio\"\ncommand = [\"x\"]\nprotocol = \"sse\"\n",
+                "fabro.mcps.entry",
             ),
             (
                 "[run.agent.mcps.a]\ntype = \"stdio\"\ncommand = [\"x\", \"{{ secrets.T }}\"]\n",

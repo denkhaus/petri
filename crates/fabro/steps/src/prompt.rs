@@ -38,7 +38,7 @@ use lithos_llm::types::{
     Message, ReasoningEffort, Request, Response, ResponseFormat, Role, TokenCounts,
 };
 use lithos_llm::{Client, Error};
-use pebble_coding_agent::ProjectMemory;
+use pebble_coding_agent::{MemoryDiscovery, ProjectMemory};
 use serde::Deserialize;
 use serde_json::json;
 use smol_str::SmolStr;
@@ -55,8 +55,8 @@ use crate::outcome::{ExplicitRoutes, Stage};
 use crate::parallel::{BRANCH_COUNT_KEY, RESULTS_KEY, parallel_complete, strip_placeholders};
 use crate::pebble::environment::PebbleEnvironment;
 use crate::pebble::{PebbleClient, TurnUsage, profile_of, speed_of};
+use crate::preamble;
 use crate::stage::{self, RunInfo};
-use crate::{memory, preamble};
 
 pub const KIND: StepKindId = PROMPT_KIND;
 
@@ -366,13 +366,20 @@ impl Step for PromptStep {
         // system prompt. Petri selects the paths; Pebble's loader, the one a
         // native session runs, reads them within its budget.
         let system_prompt = if config.project_memory {
-            let profile = profile_of(&client.0, &selector).unwrap_or_default();
-            let paths =
-                memory::select(ctx.env.as_ref(), &profile, memory::Scope::WorkingDirOnly).await;
             let reader = PebbleEnvironment::for_files(ctx.env.clone());
-            // The loader errs only when its token is cancelled; this one
-            // never is.
-            ProjectMemory::load(&reader, &paths, &CancellationToken::new())
+            let never = CancellationToken::new();
+            // The working directory alone, with the profile's filenames:
+            // Pebble names the files and loads them; the discovery and the
+            // loader err only when their token is cancelled, and this one
+            // never is. A model with no profile reads the shared file.
+            let paths = match profile_of(&client.0, &selector) {
+                Some(profile) => MemoryDiscovery::working_directory()
+                    .resolve(&reader, profile, &never)
+                    .await
+                    .unwrap_or_default(),
+                None => vec!["AGENTS.md".to_owned()],
+            };
+            ProjectMemory::load(&reader, &paths, &never)
                 .await
                 .ok()
                 .filter(|memory| !memory.is_empty())

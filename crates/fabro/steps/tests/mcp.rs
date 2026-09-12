@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{env, fs};
 
-use fabro_steps::mcp::{SERVER_EVENT, TOOL_EVENT};
 use fabro_steps::pebble::PebbleClient;
+use fabro_steps::pebble::mcp::{SERVER_EVENT, TOOL_EVENT};
 use fabro_steps::register;
 use frontend::{CompileInputs, MapFiles};
 use ir::{CancelScopeId, Graph, RunStatus, StepEvent, Value};
@@ -24,7 +24,7 @@ use runtime::executor::Retention;
 use runtime::{RunOptions, Runtime};
 use serde_json::json;
 use testkit::{RunDir, log_lines, output_of};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command as TokioCommand;
 use tokio::time::{sleep, timeout};
 
@@ -98,11 +98,21 @@ impl Customs {
 
     /// Pebble's own `ToolCallStarted` tool names, in order.
     fn pebble_tool_names(&self) -> Vec<String> {
+        self.pebble_tool_event_names("ToolCallStarted")
+    }
+
+    /// Pebble's own `ToolCallCompleted` tool names, in order: the calls the
+    /// session finished, which the mirrored tool events are derived from.
+    fn pebble_completed_tool_names(&self) -> Vec<String> {
+        self.pebble_tool_event_names("ToolCallCompleted")
+    }
+
+    fn pebble_tool_event_names(&self, variant: &str) -> Vec<String> {
         self.all()
             .into_iter()
             .filter(|(_, v)| v["kind"] == "pebble")
             .filter_map(|(_, v)| {
-                v["event"]["event"]["ToolCallStarted"]["tool_name"]
+                v["event"]["event"][variant]["tool_name"]
                     .as_str()
                     .map(str::to_owned)
             })
@@ -237,8 +247,8 @@ async fn free_port() -> u16 {
     listener.local_addr().expect("address").port()
 }
 
-/// A configured `stdio` server starts before the agent, its tools are
-/// registered under Fabro's qualified names with their MCP source, a call
+/// A configured `stdio` server starts while the agent is built, its tools
+/// are registered under Fabro's qualified names with their MCP source, a call
 /// writes into the scope's workspace, the result reaches the model, and the
 /// server stops with the session, before the scope is released.
 #[tokio::test]
@@ -314,7 +324,6 @@ async fn a_stdio_server_exposes_tools_that_act_on_the_workspace_and_stops_with_t
         "mcp__notes__write_file",
     ]);
     assert_eq!(ready["tools"][5]["original_name"], "write_file");
-    assert!(ready["duration_ms"].is_u64());
     let tools = customs.tool_events();
     assert_eq!(customs.tool_statuses(), ["ok", "ok", "ok"]);
     assert_eq!(tools[0].0, "agent");
@@ -399,9 +408,9 @@ script = "echo post:$FABRO_NODE_ID >> tool-hooks.log"
 
 /// A result the server marks as an error, a call that outlives the tool
 /// timeout, and a call a crashed server cannot answer each reach the model
-/// with their reason; the crash is reported as a disconnection and later
-/// calls to that server fail at once. The slow call goes to its own server:
-/// a timed-out call leaves the scripted server busy until it finishes.
+/// with their reason, and later calls to the crashed server fail at once.
+/// The slow call goes to its own server: a timed-out call leaves the
+/// scripted server busy until it finishes.
 #[tokio::test]
 async fn error_results_timeouts_and_a_crashed_server_reach_the_model_with_reasons() {
     let dir = RunDir::new("mcp-failures");
@@ -449,20 +458,36 @@ async fn error_results_timeouts_and_a_crashed_server_reach_the_model_with_reason
         "{}",
         requests[4]
     );
+    // A timeout is an error result: the model and the event both get
+    // Pebble's reason.
     assert_eq!(customs.tool_statuses(), [
-        "error", "timeout", "failed", "failed"
+        "error", "error", "failed", "failed"
     ]);
     let tools = customs.tool_events();
     assert_eq!(tools[0].1["error"], "disk full");
-    assert!(tools[1].1["error"].is_null());
+    assert!(
+        tools[1].1["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("did not answer within 1s")),
+        "{}",
+        tools[1].1
+    );
+    assert!(
+        tools[2].1["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("failed the call to `crash`")),
+        "{}",
+        tools[2].1
+    );
+    assert!(
+        tools.iter().all(|(_, event)| event["duration_ms"].is_u64()),
+        "{tools:?}"
+    );
     assert_eq!(customs.phases("notes"), [
         ("agent".to_owned(), "starting".to_owned()),
         ("agent".to_owned(), "ready".to_owned()),
-        ("agent".to_owned(), "disconnected".to_owned()),
         ("agent".to_owned(), "stopped".to_owned()),
     ]);
-    let disconnected = &customs.server_events("notes", "disconnected")[0];
-    assert!(disconnected["error"].is_string());
     assert_eq!(
         read(&log),
         "started\ninitialize\ncall fail\ncall crash\ncrash\n"
@@ -658,7 +683,10 @@ async fn a_server_that_fails_to_start_is_reported_and_the_others_serve() {
 
 /// The `http` transport reaches a server the run does not own, and the
 /// `sandbox` transport launches one in the scope and reaches it on its port;
-/// the owned one stops with the session.
+/// the owned one stops with the session. The run has ended when the events
+/// are read, and each mirrored tool event is checked against the Pebble
+/// completion it was derived from: the previous MCP client's test lost a
+/// tool event to timing on macOS CI.
 #[tokio::test]
 async fn http_and_sandbox_transports_reach_a_server_on_a_port() {
     let dir = RunDir::new("mcp-http");
@@ -671,6 +699,10 @@ async fn http_and_sandbox_transports_reach_a_server_on_a_port() {
         .kill_on_drop(true)
         .spawn()
         .expect("the remote server starts");
+    // Pebble connects to an `http` server once, with no readiness probe (only
+    // an `Environment` placement polls until `startup_timeout`), so wait for
+    // the server to listen: on the macOS runner the connect raced its start.
+    wait_for_port(http_port).await;
     let (client, provider) = scripted_client(vec![
         call(
             "remote",
@@ -698,8 +730,15 @@ async fn http_and_sandbox_transports_reach_a_server_on_a_port() {
     );
     let requests = requests_text(&provider);
     assert!(requests[1].contains("over http"), "{}", requests[1]);
-    // Before reading the pid: a scoped call that failed leaves no pid in the
-    // request, and the server events and the tool statuses say why.
+    // Both calls completed on Pebble's side...
+    assert_eq!(
+        customs.pebble_completed_tool_names(),
+        ["mcp__remote__echo", "mcp__scoped__echo"],
+        "server events: {:?}",
+        customs.server_events("scoped", "failed")
+    );
+    // ...and before reading the pid: a scoped call that failed leaves no pid
+    // in the request, and the server events and the tool statuses say why.
     assert_eq!(
         customs.tool_statuses(),
         ["ok", "ok"],
@@ -715,6 +754,95 @@ async fn http_and_sandbox_transports_reach_a_server_on_a_port() {
     );
     let pid = pid_in(&requests[2]);
     wait_gone(&pid).await;
+    let remote_ready = &customs.server_events("remote", "ready")[0];
+    assert_eq!(remote_ready["placement"], "remote");
+    assert_eq!(remote_ready["transport"], "http");
+    let scoped_ready = &customs.server_events("scoped", "ready")[0];
+    assert_eq!(scoped_ready["placement"], "scope");
+    assert_eq!(scoped_ready["transport"], "sandbox");
+    assert_eq!(
+        customs
+            .phases("scoped")
+            .into_iter()
+            .map(|(_, p)| p)
+            .collect::<Vec<_>>(),
+        ["starting", "ready", "stopped"]
+    );
+    let _ = remote.kill().await;
+}
+
+/// Wait until a server the test spawned accepts connections on `port`.
+async fn wait_for_port(port: u16) {
+    timeout(Duration::from_secs(15), async {
+        while TcpStream::connect(("127.0.0.1", port)).await.is_err() {
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the server listens");
+}
+
+/// `protocol = "sse"`, as Fabro accepts it: an `http` server the run does not
+/// own is reached over the older SSE transport at its URL, and a `sandbox`
+/// server that speaks it is launched in the scope and reached at `/sse`
+/// under the route to its port, where Fabro reaches one. Both answer a call
+/// through Pebble's tool path; the owned one stops with the session.
+#[tokio::test]
+async fn sse_servers_are_reached_at_their_stream_over_http_and_under_a_sandbox_route() {
+    let dir = RunDir::new("mcp-sse");
+    let http_port = free_port().await;
+    let sandbox_port = free_port().await;
+    let mut remote = TokioCommand::new("python3")
+        .arg(server_script())
+        .args(["--sse", &http_port.to_string()])
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("the remote server starts");
+    wait_for_port(http_port).await;
+    let (client, provider) = scripted_client(vec![
+        call(
+            "remote",
+            "mcp__remote__echo",
+            json!({"message": "over sse"}),
+        ),
+        call("scope", "mcp__scoped__echo", json!({"message": "__pid__"})),
+        ScriptedCall::response(text_response("Reached both.")),
+    ]);
+    let log = dir.path().join("mcp.log");
+    let toml = format!(
+        "[run.agent.mcps.remote]\ntype = \"http\"\nprotocol = \"sse\"\nurl = \"http://127.0.0.1:{http_port}/sse\"\nheaders = {{ X-Case = \"mcp-sse\" }}\n\n[run.agent.mcps.scoped]\ntype = \"sandbox\"\nprotocol = \"sse\"\ncommand = [\"python3\", {:?}, \"--sse\", \"{sandbox_port}\"]\nport = {sandbox_port}\nenv = {{ MCP_TEST_LOG = {:?} }}\nstartup_timeout = \"15s\"\n",
+        server_script().display().to_string(),
+        log.display().to_string()
+    );
+    let graph = lower(&agent_dot(""), &toml);
+    let (report, customs) = run(&dir, graph, client).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let requests = requests_text(&provider);
+    assert!(requests[1].contains("over sse"), "{}", requests[1]);
+    assert_eq!(
+        customs.pebble_completed_tool_names(),
+        ["mcp__remote__echo", "mcp__scoped__echo"],
+        "server events: {:?}",
+        customs.server_events("scoped", "failed")
+    );
+    assert_eq!(
+        customs.tool_statuses(),
+        ["ok", "ok"],
+        "scoped server events: {:?}; tool events: {:?}; server log: {:?}",
+        customs.server_events("scoped", "failed"),
+        customs.tool_events(),
+        read(&log)
+    );
+    // The owned server answered on its stream and stopped with the session.
+    let pid = pid_in(&requests[2]);
+    wait_gone(&pid).await;
+    assert_eq!(read(&log), "started\ninitialize\ncall echo\n");
     let remote_ready = &customs.server_events("remote", "ready")[0];
     assert_eq!(remote_ready["placement"], "remote");
     assert_eq!(remote_ready["transport"], "http");

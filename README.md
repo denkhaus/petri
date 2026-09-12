@@ -20,7 +20,7 @@ crates/github/actions    the GitHub Actions step kinds: run, action, checkout
 crates/github/objects    the ObjectService: cache, artifacts, and tool-cache storage
 crates/github/acceptance the acceptance battery: corpus harness and end-to-end runs
 crates/fabro/frontend    the Fabro frontend: lowers Graphviz DOT workflows to the IR
-crates/fabro/steps       the Fabro step kinds: command, wait, human, agent over ACP or native Pebble, prompt, nested workflow, the stage step, the local hook service, MCP servers as Pebble tools (`mcp`, over the `rmcp` client), fidelity preambles, retained threads, project memory, Fabro's skill directories, context compaction, the output store, and the stub registry
+crates/fabro/steps       the Fabro step kinds: command, wait, human, agent over ACP or native Pebble, prompt, nested workflow, the stage step, the local hook service, MCP servers as Pebble tool sources (`pebble::mcp`), fidelity preambles, retained threads, project memory, Fabro's skill directories, context compaction, the output store, and the stub registry
 crates/fabro/acceptance  the Fabro battery: corpus harness, runs under stubs, the Fabro oracle, real steps, the compatibility contract and bundle manifest
 crates/petri/lib       the distribution: core plus every component
 crates/petri/cli       the shipped `petri` binary: the distribution handed to core's CLI
@@ -143,7 +143,7 @@ crates/petri/lib/tests/embedding.rs          readiness item 7: a Fabro workflow 
 crates/fabro/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wait, human answered through deliver; Fabro's failure promotion; output references above 100 KiB
 crates/fabro/steps/tests/agent.rs            Fabro plan §7 6: the agent step against Fabro's fake ACP agent
 crates/fabro/steps/tests/hooks.rs            readiness item 5: `[[run.hooks]]` at every phase with Fabro's payload and order, decisions, placement, timeouts, HTTP, prompt and agent hooks, native tool hooks, threads and fidelity, project memory, `speed` and `max_tokens`, ACP best effort
-crates/fabro/steps/tests/mcp.rs              readiness item 9b: `[run.agent.mcps]` against the scripted `mcp_server.py`: a stdio server's tool writes into the workspace, hooks block MCP tools, error results, timeouts, a crashed server, cancellation, a retained thread, start failures, the http and sandbox transports, lifecycle and tool events
+crates/fabro/steps/tests/mcp.rs              readiness item 9b: `[run.agent.mcps]` against the scripted `mcp_server.py`: a stdio server's tool writes into the workspace, hooks block MCP tools, error results, timeouts, a crashed server, cancellation, a retained thread, start failures, the http and sandbox transports over streamable HTTP and SSE, lifecycle and tool events
 crates/petri/cli/tests/fabro_mcp_blackbox.rs  readiness item 9b (milestone C2) through the binary: a configured MCP server's tool called by the twin's model under its qualified name, the effect in the workspace and the result in the next request, a hook block, failures, Ctrl-C, a retained thread, a start failure on the terminal, a masked secret, refused settings
 crates/petri/cli/tests/fabro_fallback_blackbox.rs  readiness item 9a (milestone C1) through the binary: `[run.model.fallbacks]` with the twins injecting failures: a successful primary, qualifying and non-qualifying failures, a third provider after two failures, chain exhaustion, a tool effect not repeated across a failover, cancellation during fallback, refusal versus other content filters, a request timeout, client retries spent before the chain advances, a workflow retry that is not a failover, reasoning effort mapping with `NoNearbyReasoningLevel` and `ChainEmpty`, repair turns on the plan with a target's chain inert, a retained thread on the fallback route, a prompt node
 crates/petri/cli/tests/llm_client.rs         the client `petri::llm_client` builds, against a twin: its same-route retries and its call budget
@@ -262,15 +262,14 @@ revisions. The readiness checklist with each item's evidence source is the
 
 #### Library and repository gates
 
-Pebble owns the agent loop and coding-agent behavior, `lithos-llm` owns
-provider transport and request retries, and an MCP client library owns its
-protocol. A change to any of them runs the owning repository's required checks
+Pebble owns the agent loop, coding-agent behavior, and the MCP client;
+`lithos-llm` owns provider transport and request retries. A change to either runs the owning repository's required checks
 before Petri moves its pin; then the manifests, the contract's pin table, and
 the affected evidence records move together, and the relevant Petri scenarios
 run again through the shipped binary. A library test pass never replaces a
 required Petri scenario. The current pins are in the contract's "Pinned
-revisions" table (Pebble `6b7d26e0`, lithos-llm `4aab27d`, sandbox-driver
-`5b9f9da`, twins `fedab8e`, Fabro `b648291`, the runner image
+revisions" table (Pebble `222d17f`, lithos-llm `a1e3fd3`, sandbox-driver
+`a92c0db6`, twins `fedab8e`, Fabro `b648291`, the runner image
 `506a3433f7af`); `mise run check:pins` keeps every citation in agreement.
 The library batch the readiness work asked for landed on
 `petri/readiness-batch` in each repository and is pinned: Pebble's

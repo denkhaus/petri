@@ -24,8 +24,6 @@ pub mod fallback;
 pub mod fidelity;
 pub mod hooks;
 pub mod human;
-pub mod mcp;
-pub mod memory;
 mod outcome;
 pub mod parallel;
 pub mod pebble;

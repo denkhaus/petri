@@ -242,7 +242,7 @@ diagnostic goes away.
 | `[run.agent]` `fabro_tools` | run-management tools for agents | explicit exclusion: platform-only, warn `ignored.workflow_toml.run.agent.fabro_tools` when `true` |
 | `[run.agent]` `skills` | refused: `[run.agent]` denies unknown keys; skills come from `$FABRO_HOME/skills`, `<root>/.fabro/skills`, `<root>/skills` (`fabro-agent/src/skills.rs`) | a Petri extension (accepted difference below): a list of extra directories searched after Fabro's three, warned `fabro.petri_extension`; any other shape is `unsupported.workflow_toml.run.agent.skills`. Fabro's three directories, their order and precedence are implemented for native agents (`crates/fabro/FORMAT.md`, "Skills"; fixtures `testdata/skills`) |
 | `[run.agent]` `compaction` | refused: `[run.agent]` denies unknown keys; compaction is always on with hardcoded values (`fabro-agent`'s `SessionOptions`: 80 percent trigger, six preserved turns) | refused `unsupported.workflow_toml.key`, with a message naming the values in force; those values are lowered onto every agent node and run through Pebble's automatic compaction (`crates/fabro/FORMAT.md`, "Compaction") |
-| `[run.agent.mcps.<name>]` `type` (`http`, `stdio`, `sandbox`) with `url`, `headers`, `protocol`, `script`, `command`, `env`, `port`, `startup_timeout`, `tool_timeout`, `enabled`; or `id` | MCP servers for agent sessions | supported: every inline field with Fabro's rules and defaults, merged across the settings, project and workflow layers by name (`crates/fabro/FORMAT.md`, "MCP servers"); stdio servers on Petri's host, http servers from the host, sandbox servers in the scope's environment, reached through the provider's preview URL (the host's loopback, the Docker plugin's port forward, Daytona's preview link); tools registered with Pebble under `mcp__<server>__<tool>` and run through the normal tool path, hooks included; explicit exclusions: `id` (a server-managed catalog reference, `unsupported.workflow_toml.run.agent.mcps.reference`), `protocol = "sse"` (`unsupported.workflow_toml.run.agent.mcps.protocol`), a secret token outside a whole `env`/`headers` value (`unsupported.workflow_toml.run.agent.mcps.secret`); `{{ env.* }}` is an error as in Fabro. The decision record `mcp-catalog-and-transports` accepts no comparison difference for these refused forms, so a scenario that uses one needs its own scoped evidence; implementing them would be a deliberate revision of that record |
+| `[run.agent.mcps.<name>]` `type` (`http`, `stdio`, `sandbox`) with `url`, `headers`, `protocol`, `script`, `command`, `env`, `port`, `startup_timeout`, `tool_timeout`, `enabled`; or `id` | MCP servers for agent sessions | supported: every inline field with Fabro's rules and defaults, merged across the settings, project and workflow layers by name (`crates/fabro/FORMAT.md`, "MCP servers"); stdio servers on Petri's host, http servers from the host, sandbox servers in the scope's environment, reached through the provider's preview URL (the host's loopback, the Docker plugin's port forward, Daytona's preview link); `protocol` on http and sandbox servers with Fabro's two values, `streamable_http` (the default) and `sse` (an SSE sandbox server's stream at `/sse` under the route, as Fabro reaches it); tools registered with Pebble under `mcp__<server>__<tool>` and run through the normal tool path, hooks included; explicit exclusions: `id` (a server-managed catalog reference, `unsupported.workflow_toml.run.agent.mcps.reference`), a secret token outside a whole `env`/`headers` value (`unsupported.workflow_toml.run.agent.mcps.secret`); `{{ env.* }}` is an error as in Fabro. The decision record `mcp-catalog-and-transports` accepts no comparison difference for these refused forms, so a scenario that uses one needs its own scoped evidence; implementing them would be a deliberate revision of that record |
 | `[[run.hooks]]` `id`, `name`, `event`, `matcher`, `blocking`, `timeout`, `sandbox`, and one of `script`/`command`, `url`+`headers`+`tls`, `prompt`+`model`, `agent="enabled"`+`prompt`+`model`+`max_tool_rounds` | local hooks | supported: every field, transport and event, merged with `.fabro/project.toml` and the host's settings layer by `id`, run by the local hook service with Fabro's matching, decisions, placement and timeouts (`crates/fabro/FORMAT.md`, "Hooks"); an agent hook's `max_tool_rounds` is enforced as Pebble's tool-round budget, failing open on exhaustion as the reference's loop does (`hooks::agent_hook_tool_rounds_are_a_hard_bound_that_fails_open`); a layer that cannot be read is an error, so a configured hook is never skipped silently; `checkpoint_saved` warns and does not run (accepted difference below); `stage_retrying` is dispatched (the reference never fires it) |
 | `[run.checkpoint]` `exclude_globs`, `skip_git_hooks`, `commit_timeout` | Git checkpoints | explicit exclusion: platform Git; warn `ignored.workflow_toml.run.checkpoint` |
 | `[run.clone]` `enabled`, `depth` | server clone depth | supported (task 17): the root `start` stage checks the repository the run was loaded from out into the workspace at `depth` commits (default 100, `0` full), on the host and in a container through the executor; `enabled = false` starts empty. Difference: the clone is of the local checkout at `HEAD`, not a fetch from the remote, and `origin` is the checkout's own `origin` |
@@ -357,7 +357,7 @@ default model before the first stage) and `fallback-repeated-tool-effect`
 | Skill files that do not parse | reported: a `fabro.skills.warning` event and a stderr line per skipped `SKILL.md` and per unsearchable directory, from Pebble's `SkillsDiscovered.skipped` report, and per workflow-named directory that does not exist, from Petri's own probe; the file is still skipped, as Pebble skips it | skipped silently |
 | A prompt naming a missing skill (`/name`) | the node fails with class `skill_missing` | the stage fails with an `InvalidState` error |
 | Sub-agent nesting and concurrency | a child may delegate again; one tree holds at most 4 sessions open at once (the root included; a finished child holds its slot until closed), and a spawn over the bound is the tool's answer (`Cannot spawn another agent`) | one level only (a child has no sub-agent tools; `max_subagent_depth = 1`); no bound on concurrent children |
-| Sub-agent MCP tools | a child inherits the workflow's `[run.agent.mcps]` tools (task 13 registers them `allow_in_subagents`) and calls them through the parent's one connection, under the parent's hooks and attribution; readiness items 9b and 9d ask for inherited tools | a child session is built without `mcp_servers`, so it has no MCP tools |
+| Sub-agent MCP tools | a child inherits the workflow's `[run.agent.mcps]` tools (Pebble registers them `allow_in_subagents`) and calls them through the parent's one connection, under the parent's hooks and attribution; readiness items 9b and 9d ask for inherited tools | a child session is built without `mcp_servers`, so it has no MCP tools |
 | Sub-agent usage | the stage's `pebble.usage` is the parent session's own; the children's usage is the `pebble.subagents` metric and the `agent_activity` events | child usage merges into the stage's usage total through the event stream |
 | `checkpoint_saved` hook | warning; the hook does not run | dispatched with no built-in behavior |
 | Sensitive answers (`sensitive=true`, `$secret`) | a Petri extension | not defined |
@@ -369,9 +369,8 @@ default model before the first stage) and `fallback-repeated-tool-effect`
 | Workflow secrets | `{{ secrets.NAME }}` resolves from `PETRI_SECRET_NAME` in the standalone runner; an embedding host supplies its own `SecretProvider` | the platform vault |
 | Output references | `blob://sha256/<hex>` in a local store under `<run_dir>/blobs`, replaceable through the `OutputStore` capability; a structured value's reference carries `#json`. Below Fabro's 100 KiB threshold, a fork also offloads the `for_each` source list (any size) and other fork snapshot values above 4 KiB from every branch child's context, and a fan-in publishes `parallel.results` above 4 KiB as a reference; the agent and prompt preambles and a nested workflow's start context put those back, `stdin_source` and prompted fan-ins read them back, and a condition sees the reference text | `blob://sha256/<hex>` in platform storage, materialized as `file://…/blobs/<hex>.json` for handlers; nothing under 100 KiB is ever a reference |
 | Prompt events | `StepEvent::Custom` with `kind = "fabro.prompt"` / `"fabro.prompt.completed"` (see `crates/fabro/FORMAT.md`) | `stage.prompt` / `prompt.completed` |
-| MCP events | `StepEvent::Custom` with `kind = "fabro.mcp.server"` (`starting`, `ready`, `failed`, `disconnected`, `stopped`) and `"fabro.mcp.tool"` (one per proxied call, with `status` and `duration_ms`); the failure line `mcp server \`<name>\` failed to start: ...` on the node's stderr | `agent.mcp.ready` / `agent.mcp.failed`; tool activity only through the generic tool events |
+| MCP events | `StepEvent::Custom` with `kind = "fabro.mcp.server"` (`starting`, `ready`, `failed`, `stopped`; `ready` and `failed` mirror Pebble's `McpServerReady` and `McpServerFailed`) and `"fabro.mcp.tool"` (one per proxied call, derived from Pebble's `ToolCallCompleted`, with `status` and `duration_ms`); the failure line `mcp server \`<name>\` failed to start: ...` on the node's stderr | `agent.mcp.ready` / `agent.mcp.failed`; tool activity only through the generic tool events |
 | MCP catalog references | `[run.agent.mcps.<name>] id = "..."` is refused at load: the standalone runner has no server-managed catalog | resolved from the server's catalog |
-| MCP legacy SSE | `protocol = "sse"` is refused at load; only streamable HTTP is spoken (the pinned `rmcp` has no legacy SSE client; Fabro carries its own) | supported |
 | MCP secrets | `{{ secrets.NAME }}` resolves as a whole `env` or `headers` value only, from `PETRI_SECRET_NAME` (or the host's provider) at launch; a token inside a command, script or URL is refused at load | resolved anywhere in the transport strings at the run boundary from the vault |
 | MCP `sandbox` transport | launched through the scope's execution environment and reached through the provider's preview URL (the host's loopback, the Docker plugin's port forward into the container, Daytona's preview link with its token header); a provider without preview URLs fails the server with a named reason | a Daytona preview URL; local sandboxes fall back to localhost |
 | MCP stdio working directory | the scope's workspace when the scope shares the host filesystem, else Petri's own directory | the run worker's directory |
@@ -382,7 +381,7 @@ default model before the first stage) and `fallback-repeated-tool-effect`
 | Model fallback: ACP agents | no plan; the ACP command owns its model | the same |
 | Model fallback: events | `StepEvent::Custom` kinds `fabro.fallback.{plan,route,usage,failover,stop}` and the once-per-run stderr notices | `agent.failover` events and run notices |
 | Model fallback: recovery | a resumed node starts a new plan at position 0 on the primary; a request in flight at the crash may be sent again | sessions persist server-side |
-| MCP server lifetime | one set of servers per agent node session, started before the agent and stopped after it (a retained thread's next node starts its own); a resumed run starts them again | one set per agent session; the same |
+| MCP server lifetime | one set of servers per agent node session, started by Pebble while the agent is built and closed with it (a retained thread's next node starts its own); a resumed run starts them again | one set per agent session; the same |
 
 ## Advanced agent milestones (item 9, milestones C1 to C5)
 
@@ -424,9 +423,9 @@ from the parent agent's own history. Pebble bills the child's summary call to
 the child's own prompt, so the ledger's `pebble.subagents.sessions` usage
 carries it.
 
-MCP (C2) landed: MCP tools are registered on the session with Pebble's
-`tools(mcp.tools())` (`pebble.rs`), so they live in the session's tool
-registry, outside `History`; compaction replaces only `History`, so a compacted
+MCP (C2) landed: the servers are Pebble's tool sources
+(`CodingAgentBuilder::mcp_servers`, `pebble.rs`), so their tools live in the
+session's tool registry, outside `History`; compaction replaces only `History`, so a compacted
 session keeps its MCP tools. Verified end to end by the readiness suites
 (milestone D below): the `review` node calls the MCP tool on the compacted
 thread, and the call is on the public stream (`fabro.mcp.tool` on `review`).
@@ -577,14 +576,29 @@ names the decision record under `decisions/`; "gap" names the owner.
 
 ## Library pin
 
-Pebble is pinned at `6b7d26e0f791edf3381b110b78db1c5507c94f66`
-(`petri-readiness-gaps`, on top of the readiness batch's
-`408638fe982ace5b570e04ba808be3a32d4001f7`). The `petri-readiness-gaps`
-revision adds the two capabilities the readiness review's G07 and G14 asked
-for and changes no existing behavior: `CodingAgentOptions::with_max_tool_rounds`
-(a prompt ends with `Error::ToolRoundsExhausted` and a `ToolRoundsExhausted`
-event when the bound is reached) and the public `ProjectMemory` loader. The
-readiness batch itself brought five changes:
+Pebble is pinned at `222d17f17d7384545d3782f3b315210ad2cb0cfe`, which is
+Pebble `main`. That commit is the `embedder-concerns` batch (Pebble PR #9)
+plus Pebble PR #10. PR #10 moves the sandbox-driver pin under Pebble's `mcp`
+feature to `a92c0db6b6a122ca9b6df75de6615544f53c0d47`; Petri pins the same
+revision and enables the feature, so the `PreviewUrls` trait object crosses
+the crate boundary. The `embedder-concerns` batch sits on top of
+`petri-readiness-gaps` `6b7d26e0f791edf3381b110b78db1c5507c94f66`, which sat
+on the readiness batch's `408638fe982ace5b570e04ba808be3a32d4001f7`. The
+`embedder-concerns` batch moves concerns both embedders wrote into Pebble:
+memory and skill discovery (`MemoryDiscovery`, `SkillDiscovery`, with the
+profile's filenames Pebble's own), the environment helpers
+(`environment::support`), compaction accounting on the prompt report
+(`PromptReport::compactions`), the `SessionProjection` fold Petri's sub-agent
+ledger now reads, fallback routes as a builder option, MCP servers as a tool
+source, a steering bus, and the command line as a library. Petri takes the
+first four here and MCP servers as a tool source (`fabro_steps::pebble::mcp`);
+fallback routes, the steering bus and the command line library are pinned but
+not yet adopted (`fallback.rs` still drives the failover). `petri-readiness-gaps` added the two capabilities the
+readiness review's G07 and G14 asked for and changed no existing behavior:
+`CodingAgentOptions::with_max_tool_rounds` (a prompt ends with
+`Error::ToolRoundsExhausted` and a `ToolRoundsExhausted` event when the
+bound is reached) and the public `ProjectMemory` loader. The readiness
+batch itself brought five changes:
 
 - The summary call's usage and cost are in the prompt report, so
   `pebble.usage` and `pebble.cost_usd_micros` include compaction and the
@@ -618,18 +632,19 @@ fails when any of them disagree. The row names are the keys of a record's
 
 | Pin | Revision | Repository | Role |
 |---|---|---|---|
-| `pebble` | `6b7d26e0f791edf3381b110b78db1c5507c94f66` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
-| `lithos_llm` | `4aab27d7d42e7f762a8b6a3871c3db86816b0721` | `lithoscomputer/lithos-llm` (public) | provider transport and request retries |
-| `sandbox_driver` | `5b9f9dae506560f030ca4ef43d0facbe7baa99dc` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
+| `pebble` | `222d17f17d7384545d3782f3b315210ad2cb0cfe` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
+| `lithos_llm` | `a1e3fd37b7153870411701327ac117606753fe90` | `lithoscomputer/lithos-llm` (public) | provider transport and request retries |
+| `sandbox_driver` | `a92c0db6b6a122ca9b6df75de6615544f53c0d47` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `fedab8e6b9b8e2577bee7d93812a318d6adb4aa4` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
 | `fabro_reference` | `b6482910e517d00dfc3c4a2f2d3e417c9348f7f6` | `fabro-sh/fabro` (public, `refs/pull/844/head`) | the reference Fabro the corpus, oracle, bundles, and differential matrix use |
 | `runner_image` | `506a3433f7af` | `lithoscomputer/sandbox-images` (public) | the default runner images (`ghcr.io/lithoscomputer/ubuntu-*`) Docker and Daytona scopes start from (`RUNNER_PIN` in `crates/core/executor-sandbox/src/backend.rs`; PyYAML present since `df708f910111`) |
 
-A change to Pebble, lithos-llm, or an MCP client library runs the owning
+A change to Pebble or lithos-llm runs the owning
 repository's required checks before Petri moves its pin; then this table, the
 manifests, and the affected evidence records move together. The library batch
-the readiness work asked for is pinned (Pebble `6b7d26e0`, sandbox-driver
-`5b9f9da`); the twins are pinned in both test crates that serve them.
+the readiness work asked for is inside the pinned revisions (Pebble `222d17f`,
+sandbox-driver `a92c0db6`); the twins are pinned in both test crates that
+serve them.
 
 ## Readiness gate checklist
 

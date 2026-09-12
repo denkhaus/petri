@@ -1,25 +1,30 @@
 //! Pebble tools act through the firing's execution scope, never host paths.
+//! The same scope is the route to a sandbox-hosted MCP server's port
+//! ([`PortRoutes`]).
 
 use std::fmt::Write as _;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use executor::{ExecEnv, OutputMode, ProcessHandle, ProcessSpec, Sig};
+use executor::{EnvError, ExecEnv, OutputMode, ProcessHandle, ProcessSpec, Sig};
 use globset::{GlobBuilder, GlobMatcher};
 use ir::LogStream;
+use pebble_coding_agent::environment::support::{
+    ExecFailure, OutputCaptureBuffer, classify_exec_error, tree_order, validate_glob,
+};
 use pebble_coding_agent::environment::{
     DirEntry, EnvResult, Environment, EnvironmentError, EnvironmentErrorKind, ExecOutcome,
-    ExecRequest, ExecResult, GrepOptions,
+    ExecOutputStream, ExecRequest, ExecResult, GrepOptions,
 };
 use pebble_coding_agent::events::CommandTermination;
 use pebble_coding_agent::tools::OutputCaptureStats;
+use sandbox_driver::{Capability, PreviewUrl, PreviewUrls};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
-
-use super::capture::Capture;
 
 /// Adapts the execution scope supplied by Petri to Pebble's coding tools.
 /// Bash, find, and grep must be available inside the scope. Uses ripgrep
@@ -174,21 +179,20 @@ impl Environment for PebbleEnvironment {
     }
 
     async fn list_directory(&self, path: &str, depth: Option<usize>) -> EnvResult<Vec<DirEntry>> {
-        let mut entries = self
+        let mut entries: Vec<DirEntry> = self
             .env
             .list_directory(&self.path(path), depth.unwrap_or(1))
             .await
-            .map_err(io_error)?;
-        // Compare path segments so children directly follow their parent.
-        entries.sort_by(|a, b| a.path.split('/').cmp(b.path.split('/')));
-        Ok(entries
+            .map_err(io_error)?
             .into_iter()
             .map(|entry| DirEntry {
                 name:   entry.path,
                 is_dir: entry.is_dir,
                 size:   entry.size,
             })
-            .collect())
+            .collect();
+        tree_order(&mut entries);
+        Ok(entries)
     }
 
     async fn grep(
@@ -276,25 +280,38 @@ impl Environment for PebbleEnvironment {
             () = self.cancel.cancelled() => return Ok(empty_stopped(CommandTermination::Cancelled, started)),
             () = cancel.cancelled() => return Ok(empty_stopped(CommandTermination::Cancelled, started)),
             () = &mut deadline, if request.timeout_ms.is_some() => return Ok(empty_stopped(CommandTermination::TimedOut, started)),
-            process = self.env.spawn(spec) => process.map_err(|e| error(EnvironmentErrorKind::Spawn, e.to_string()))?,
+            process = self.env.spawn(spec) => process.map_err(|e| error(classify_exec_error(ExecFailure::Start), e.to_string()))?,
         };
         let Some(mut bytes) = process.bytes() else {
             let _ = process.signal(Sig::Kill).await;
             let _ = process.wait().await;
             return Err(error(
-                EnvironmentErrorKind::Unsupported,
+                classify_exec_error(ExecFailure::Unsupported),
                 "Executor does not provide raw process output",
             ));
         };
         let mut drains = JoinSet::new();
         let cap = request.output_bytes_cap;
+        let sink = request.output_sink.clone();
         drains.spawn(async move {
-            let mut stdout = Capture::new(cap);
-            let mut stderr = Capture::new(cap);
+            let mut stdout = OutputCaptureBuffer::new(cap);
+            let mut stderr = OutputCaptureBuffer::new(cap);
             while let Some(chunk) = bytes.recv().await {
+                // Every byte reaches the sink as it is read, uncapped; the
+                // buffers keep what the outcome retains.
                 match chunk.stream {
-                    LogStream::Stdout => stdout.push(&chunk.bytes),
-                    LogStream::Stderr => stderr.push(&chunk.bytes),
+                    LogStream::Stdout => {
+                        if let Some(sink) = &sink {
+                            sink(ExecOutputStream::Stdout, &chunk.bytes);
+                        }
+                        stdout.push(&chunk.bytes);
+                    }
+                    LogStream::Stderr => {
+                        if let Some(sink) = &sink {
+                            sink(ExecOutputStream::Stderr, &chunk.bytes);
+                        }
+                        stderr.push(&chunk.bytes);
+                    }
                 }
             }
             (stdout, stderr)
@@ -331,15 +348,20 @@ impl Environment for PebbleEnvironment {
             drains.join_next().await
         };
         let (stdout, stderr) = capture
-            .ok_or_else(|| error(EnvironmentErrorKind::Io, "Output capture task missing"))?
+            .ok_or_else(|| {
+                error(
+                    classify_exec_error(ExecFailure::Collect),
+                    "Output capture task missing",
+                )
+            })?
             .map_err(|cause| {
                 error(
-                    EnvironmentErrorKind::Io,
+                    classify_exec_error(ExecFailure::Collect),
                     format!("Output capture task failed: {cause}"),
                 )
             })?;
-        let (stdout, stdout_capture) = stdout.finish();
-        let (stderr, stderr_capture) = stderr.finish();
+        let (stdout, stdout_capture) = stdout.into_text();
+        let (stderr, stderr_capture) = stderr.into_text();
         Ok(ExecOutcome {
             result: ExecResult {
                 stdout,
@@ -396,56 +418,21 @@ fn empty_stopped(termination: CommandTermination, started: Instant) -> ExecOutco
     }
 }
 
+/// Pebble's glob grammar, then a matcher for it. Pebble states the rules
+/// once for every environment; the matcher is this one's.
 fn compile_glob(pattern: &str) -> EnvResult<GlobMatcher> {
-    let invalid = |message: &str| {
-        error(
-            EnvironmentErrorKind::InvalidInput,
-            format!("Invalid glob {pattern:?}: {message}"),
-        )
-    };
-    if pattern.is_empty() {
-        return Err(invalid("pattern cannot be empty"));
-    }
-    if pattern.starts_with('/') || pattern.as_bytes().get(1) == Some(&b':') {
-        return Err(invalid("pattern must be relative"));
-    }
-    if pattern.contains('\\') {
-        return Err(invalid("use / as the path separator"));
-    }
-    if pattern.ends_with('/') {
-        return Err(invalid("pattern must name files, not end with /"));
-    }
-    if pattern.split('/').any(|part| part == "..") {
-        return Err(invalid("pattern cannot traverse a parent directory"));
-    }
-    let mut in_class = false;
-    for character in pattern.chars() {
-        match character {
-            '[' => in_class = true,
-            ']' => in_class = false,
-            '/' | '*' | '?' if in_class => {
-                return Err(invalid(
-                    "character classes cannot contain separators or wildcards",
-                ));
-            }
-            _ => {}
-        }
-    }
-    if in_class {
-        return Err(invalid("unclosed character class"));
-    }
-    if pattern
-        .split('/')
-        .any(|part| part.contains("**") && part != "**")
-    {
-        return Err(invalid("** must be a whole path segment"));
-    }
+    validate_glob(pattern)?;
     GlobBuilder::new(pattern.trim_start_matches("./"))
         .literal_separator(true)
         .backslash_escape(false)
         .build()
         .map(|glob| glob.compile_matcher())
-        .map_err(|cause| invalid(&cause.to_string()))
+        .map_err(|cause| {
+            error(
+                EnvironmentErrorKind::InvalidInput,
+                format!("Invalid glob {pattern:?}: {cause}"),
+            )
+        })
 }
 
 fn quote(text: &str) -> String {
@@ -459,4 +446,44 @@ fn io_error(cause: executor::EnvError) -> EnvironmentError {
 }
 pub(super) fn elapsed_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The route from Petri to a port inside the scope, as Pebble reaches a
+/// sandbox-hosted MCP server: sandbox-driver's [`PreviewUrls`] facet over
+/// [`ExecEnv::preview_url`]. The provider answers (the host's own loopback,
+/// the forward the Docker plugin opens into the container, Daytona's preview
+/// link with its token header); an environment with no route to its ports
+/// reports the capability as unsupported, which Pebble makes the server's
+/// failure reason.
+pub struct PortRoutes(Arc<dyn ExecEnv>);
+
+impl PortRoutes {
+    pub fn new(env: Arc<dyn ExecEnv>) -> Self {
+        Self(env)
+    }
+}
+
+#[async_trait]
+impl PreviewUrls for PortRoutes {
+    async fn preview_url(&self, port: u16) -> sandbox_driver::Result<PreviewUrl> {
+        match self.0.preview_url(port).await {
+            Ok(Some(route)) => {
+                let mut preview = PreviewUrl::new(route.url);
+                preview.headers = route.headers;
+                Ok(preview)
+            }
+            Ok(None) => Err(sandbox_driver::Error::unsupported(Capability::PreviewUrls)),
+            Err(error) => Err(route_error(error)),
+        }
+    }
+
+    async fn release_preview_url(&self, port: u16) -> sandbox_driver::Result<()> {
+        self.0.release_preview_url(port).await.map_err(route_error)
+    }
+}
+
+/// The environment's refusal as the driver's error, its message kept: Pebble
+/// reports it as the reason the server has no route.
+fn route_error(error: EnvError) -> sandbox_driver::Error {
+    sandbox_driver::Error::io(error.to_string(), io::Error::other(error))
 }
