@@ -696,16 +696,17 @@ files use the scope's filesystem. Bash, find, grep, and the usual file utilities
 must be available there. Content search uses ripgrep when available and grep
 otherwise. Searches fail explicitly when their captured output exceeds 4 MiB.
 The backend reads the project instruction files Fabro's `discover_memory`
-selects for the model's agent profile (the catalog's `pebble.profile`
-metadata): `AGENTS.md` and `CLAUDE.md` for Anthropic models, `AGENTS.md` and
+selects for the model's agent profile (the catalog's shared `metadata.agent`
+namespace): `AGENTS.md` and `CLAUDE.md` for Anthropic models, `AGENTS.md` and
 `.codex/instructions.md` for OpenAI, `AGENTS.md` and `GEMINI.md` for Gemini,
 `AGENTS.md` alone otherwise; from the Git root down to the working directory,
-root first, when the working directory is inside a repository. Petri selects
-the paths that exist in the scope (`fabro_steps::memory::select`) and Pebble's
-loader owns the 32 KiB budget, deduplication and truncation; a prompt node
-reads the working directory's files through the same loader
-(`ProjectMemory::load`), so its system prompt is the text a session would
-load, the crossing file cut with Pebble's marker. The backend
+root first, when the working directory is inside a repository. Pebble owns
+the filenames, the walk and the loader (`MemoryDiscovery::from_git_root`,
+the 32 KiB budget, deduplication and truncation); a prompt node reads the
+working directory's files through the same discovery and loader
+(`MemoryDiscovery::working_directory`, `ProjectMemory::load`), so its system
+prompt is the text a session would load, the crossing file cut with Pebble's
+marker. The backend
 searches Fabro's skill directories (below, "Skills"). Every
 session carries the run's tool hooks as Pebble middleware (`pre_tool_use`
 denies before the tool runs; `post_tool_use` observes the outcome), and the
@@ -960,8 +961,9 @@ no `fabro.mcp.tool`, because the call never reached the server.
 
 A skill is a `<dir>/<name>/SKILL.md` file: a frontmatter block with `name:`
 and an optional `description:`, then the prompt it expands into. Petri
-resolves the directories the way Fabro's agent does
-(`fabro_steps::skills`), lowest precedence first:
+states the directories the way Fabro's agent orders them, as a Pebble
+`SkillDiscovery` (`fabro_steps::skills`), lowest precedence first, and Pebble
+resolves and searches them:
 
 1. the configured skills directory, `$FABRO_HOME/skills` when `FABRO_HOME`
    is set, else `$HOME/.fabro/skills`; an embedding host names the home

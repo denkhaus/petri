@@ -41,7 +41,7 @@ use fabro_steps::pebble::PebbleClient;
 use frontend_gha::exprs::GITHUB_TOKEN_SECRET;
 use lithos_llm::catalog::{Catalog, CatalogError};
 use lithos_llm::client::ClientBuildError;
-use lithos_llm::credentials::{CredentialProvider, EnvironmentCredentials};
+use lithos_llm::credentials::{ConventionalCredentials, CredentialProvider};
 use lithos_llm::middleware::{RetryMiddleware, RetryPolicy};
 use pebble_coding_agent::events::RetryEventObserver;
 pub use runtime::{
@@ -323,7 +323,7 @@ pub fn build_llm_client(config: &LlmClientConfig) -> Result<lithos_llm::Client, 
     let mut builder = lithos_llm::Client::builder().catalog(catalog);
     builder = match &config.credentials {
         Some(credentials) => builder.credentials_arc(credentials.clone()),
-        None => builder.credentials(EnvironmentCredentials::conventional()),
+        None => builder.credentials(ConventionalCredentials::new()),
     };
     // The client's own retries, on the same route. Pebble's turn replay and
     // Fabro's model fallback are configured elsewhere and start after these.

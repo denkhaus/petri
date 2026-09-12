@@ -19,10 +19,10 @@
 //! chooses the cut, validates the summary and records the outcome.
 //!
 //! Accounting: Pebble bills the summary call to the prompt that compacted, so
-//! its usage and cost are in the prompt report; the compaction events carry
-//! neither, but the `Compaction` turn Pebble puts in the history does. After
-//! each prompt settles, [`Accounting`] reads the turns that appeared, emits
-//! one [`EVENT`] per compaction with that usage, and sums them into the
+//! its usage and cost are in the prompt report, and the report names each
+//! compaction with its counts and the summary call's usage
+//! (`PromptReport::compactions`). After each prompt, [`Accounting`] emits one
+//! [`EVENT`] per compaction with that usage and sums them into the
 //! `pebble.compaction_*` metrics, which are a breakdown of `pebble.usage`.
 
 use std::sync::Arc;
@@ -31,8 +31,7 @@ use frontend_fabro::{DEFAULT_PRESERVE_TURNS, DEFAULT_THRESHOLD_PERCENT};
 use ir::{Attempt, FiringId, StepEvent, Value};
 use pebble_coding_agent::events::TokenUsage;
 use pebble_coding_agent::extensions::CompactionPolicy;
-use pebble_coding_agent::state::Message;
-use pebble_coding_agent::{CodingAgent, CodingAgentBuilder, CodingAgentOptions};
+use pebble_coding_agent::{CodingAgentBuilder, CodingAgentOptions, PromptReport};
 use serde::Deserialize;
 use serde_json::json;
 use smol_str::SmolStr;
@@ -102,53 +101,23 @@ pub struct Attribution {
     pub attempt: Attempt,
 }
 
-/// The compactions one node's session performed, read from the history
-/// after each prompt.
+/// The compactions one node's session performed, as each prompt's report
+/// accounts them.
+#[derive(Debug, Default)]
 pub struct Accounting {
-    /// Compaction turns already reported (or inherited from a resumed
-    /// export, which a predecessor reported).
-    seen:  usize,
     count: u64,
     usage: TokenUsage,
     cost:  Option<u64>,
 }
 
 impl Accounting {
-    /// Start counting after the turns `agent` already holds.
-    #[must_use]
-    pub fn new(agent: &CodingAgent) -> Self {
-        Self {
-            seen:  compaction_turns(agent).len(),
-            count: 0,
-            usage: TokenUsage::default(),
-            cost:  None,
-        }
-    }
-
-    /// Report every compaction since the last call and add its usage.
-    pub async fn settle(&mut self, agent: &CodingAgent, at: &Attribution) {
-        let session = agent.snapshot().session_id().to_string();
-        let turns = compaction_turns(agent);
-        for turn in turns.iter().skip(self.seen) {
-            let Message::Compaction {
-                reason,
-                original_turn_count,
-                preserved_turn_count,
-                estimated_tokens_before,
-                summary_token_estimate,
-                tracked_file_count,
-                summary_truncated,
-                usage,
-                cost_usd_micros,
-                ..
-            } = turn
-            else {
-                continue;
-            };
+    /// Report every compaction the prompt completed and add its usage.
+    pub async fn settle(&mut self, session: &str, report: &PromptReport, at: &Attribution) {
+        for compaction in &report.compactions {
             self.count += 1;
-            self.usage = self.usage.saturating_add(*usage);
-            if let Some(cost) = cost_usd_micros {
-                self.cost = Some(self.cost.unwrap_or(0).saturating_add(*cost));
+            self.usage = self.usage.saturating_add(compaction.usage);
+            if let Some(cost) = compaction.cost_usd_micros {
+                self.cost = Some(self.cost.unwrap_or(0).saturating_add(cost));
             }
             let _ = at
                 .sender
@@ -158,19 +127,18 @@ impl Accounting {
                     "firing": at.firing,
                     "attempt": at.attempt,
                     "session": session,
-                    "reason": reason,
-                    "original_turn_count": original_turn_count,
-                    "preserved_turn_count": preserved_turn_count,
-                    "estimated_tokens_before": estimated_tokens_before,
-                    "summary_token_estimate": summary_token_estimate,
-                    "tracked_file_count": tracked_file_count,
-                    "summary_truncated": summary_truncated,
-                    "usage": usage,
-                    "cost_usd_micros": cost_usd_micros,
+                    "reason": compaction.reason,
+                    "original_turn_count": compaction.original_turn_count,
+                    "preserved_turn_count": compaction.preserved_turn_count,
+                    "estimated_tokens_before": compaction.estimated_tokens_before,
+                    "summary_token_estimate": compaction.summary_token_estimate,
+                    "tracked_file_count": compaction.tracked_file_count,
+                    "summary_truncated": compaction.summary_truncated,
+                    "usage": compaction.usage,
+                    "cost_usd_micros": compaction.cost_usd_micros,
                 })))
                 .await;
         }
-        self.seen = turns.len();
     }
 
     /// `pebble.compactions`, `pebble.compaction_usage` and
@@ -183,16 +151,6 @@ impl Accounting {
             ("pebble.compaction_cost_usd_micros".into(), json!(self.cost)),
         ]
     }
-}
-
-fn compaction_turns(agent: &CodingAgent) -> Vec<Message> {
-    agent
-        .history()
-        .turns()
-        .iter()
-        .filter(|turn| matches!(turn, Message::Compaction { .. }))
-        .cloned()
-        .collect()
 }
 
 #[cfg(test)]

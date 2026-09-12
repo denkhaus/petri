@@ -15,7 +15,6 @@
 //! the third. A prompt's model error stays typed ([`AgentError::Model`]) so
 //! that chain can read it.
 
-mod capture;
 pub mod environment;
 pub mod questions;
 
@@ -35,13 +34,13 @@ use lithos_llm::Client;
 use lithos_llm::catalog::Metadata;
 use lithos_llm::types::{ReasoningEffort, Request, Speed};
 use pebble_coding_agent::events::{
-    CodingAgentEvent, EventSink, EventSinkError, PermissionLevel, TokenUsage,
+    AgentProfileKind, CodingAgentEvent, EventSink, EventSinkError, PermissionLevel, TokenUsage,
 };
 use pebble_coding_agent::extensions::Redactor;
 use pebble_coding_agent::state::SessionRecord;
 use pebble_coding_agent::{
     CodingAgent, CodingAgentBuilder, CodingAgentExport, CodingAgentOptions, CodingInput,
-    PromptReport, ResumeMode, ShutdownReason,
+    MemoryDiscovery, PromptReport, ResumeMode, ShutdownReason,
 };
 use questions::AgentQuestions;
 use serde_json::json;
@@ -57,8 +56,8 @@ use crate::fallback::{self, Disposition, Route};
 use crate::hooks::tools::ToolHooks;
 use crate::hooks::{self};
 use crate::mcp::{self, McpServers};
+use crate::skills;
 use crate::subagents::{self, Ledger};
-use crate::{memory, skills};
 
 /// Host capability supplied by applications embedding the native backend.
 /// Construct the client with the application's catalog, credentials, and
@@ -109,13 +108,13 @@ pub(crate) struct NativeSession {
     last_turn:       Option<TurnUsage>,
 }
 
-/// The Pebble profile name (`anthropic`, `claude-5`, `openai`, `gpt56`,
-/// `gpt6`, `gemini`, `kimi`) the model selector resolves to, from the
-/// catalog's `metadata.pebble.profile` on the model then the provider. The
-/// same rule Pebble applies when it builds the session.
-pub fn profile_of(client: &Client, selector: &str) -> Option<String> {
+/// The Pebble profile the model selector resolves to, from the catalog's
+/// shared `metadata.agent.profile` on the model then the provider: the rule
+/// Pebble applies when it builds a session. A prompt node, which builds no
+/// session, asks here for the profile whose instruction files it reads.
+pub fn profile_of(client: &Client, selector: &str) -> Option<AgentProfileKind> {
     #[derive(serde::Deserialize, Default)]
-    struct PebbleMetadata {
+    struct AgentMetadata {
         profile: Option<String>,
     }
     let probe = Request::builder()
@@ -126,12 +125,16 @@ pub fn profile_of(client: &Client, selector: &str) -> Option<String> {
     let route = client.resolve_route(&probe).ok()?;
     let read = |metadata: &Metadata| {
         metadata
-            .namespace::<PebbleMetadata>("pebble")
+            .namespace::<AgentMetadata>("agent")
             .ok()
             .flatten()
             .and_then(|m| m.profile)
     };
-    read(route.model().metadata()).or_else(|| read(route.provider().metadata()))
+    let named = read(route.model().metadata()).or_else(|| read(route.provider().metadata()))?;
+    AgentProfileKind::ALL
+        .iter()
+        .copied()
+        .find(|kind| kind.as_str() == named)
 }
 
 /// Fabro's `speed` to lithos-llm's: `fast` asks for the fast tier,
@@ -208,20 +211,14 @@ impl NativeSession {
             }
             Resume::Export(_) => selector,
         };
-        // Fabro's project documents for the model's profile, from the Git
-        // root down to the working directory. Pebble loads them.
-        let profile = profile_of(&client.0, &selector).unwrap_or_default();
-        let memory_files = memory::select(
-            ctx.env.as_ref(),
-            &profile,
-            memory::Scope::GitRootToWorkingDir,
-        )
-        .await;
         let hook_service = ctx.capability::<HookServiceHandle>();
         let compaction_policy = ctx.capability::<CompactionPolicyHandle>();
         let cancel = CancellationToken::new();
         let kill = CancellationToken::new();
         let guard = cancel.clone().drop_guard();
+        // Fabro's skill directories, in its order then the workflow's own;
+        // Pebble discovers and reports, the sink attributes.
+        let (skill_discovery, skill_labels) = skills::for_node(config, ctx);
         let sink = Arc::new(PetriEvents {
             sender:  ctx.logs.clone(),
             masker:  ctx.secrets.masker(),
@@ -229,6 +226,7 @@ impl NativeSession {
             attempt: ctx.attempt,
             scope:   ctx.scope,
             node:    ctx.node.clone(),
+            skills:  skill_labels,
         });
         let ledger = Arc::new(Ledger::default());
         let sink = subagents::observe(sink, ledger.clone());
@@ -260,8 +258,6 @@ impl NativeSession {
         let mcps = config.mcps.clone();
         let secrets = ctx.secrets.clone();
         let attribution = mcp::Attribution::of(ctx);
-        // Fabro's skill directories, audited and recorded; Pebble discovers.
-        let skills = skills::prepare(config, ctx).await;
         let build = async {
             // The node's MCP servers start first, on Petri's side of the
             // agent, so their tools are registered with the builder.
@@ -271,12 +267,15 @@ impl NativeSession {
                 .await
                 .map_err(|e| AgentError::failed("pebble_environment", e.to_string()))?;
             let environment = Arc::new(environment);
+            // Fabro's project documents for the model's profile, from the
+            // Git root down to the working directory: Pebble names the
+            // files, does the walk, and loads them.
             let options = CodingAgentOptions::default()
                 .with_reasoning_effort(reasoning)
                 .with_speed(speed)
                 .with_max_tokens(config.max_tokens)
-                .with_memory_files(memory_files)
-                .with_skill_dirs(skills.paths());
+                .with_memory_discovery(MemoryDiscovery::from_git_root())
+                .with_skill_discovery(skill_discovery);
             let options = compaction::options(options, &config.compaction);
             let options = fallback::configure_options(options);
             // A resumed export keeps its route and its conversation; a
@@ -345,7 +344,7 @@ impl NativeSession {
             attempt: ctx.attempt,
         };
         let mut session = Self {
-            compaction: compaction::Accounting::new(&agent),
+            compaction: compaction::Accounting::default(),
             attribution,
             agent,
             mcp,
@@ -423,7 +422,10 @@ impl NativeSession {
             }
         };
         self.account(&report);
-        self.compaction.settle(&self.agent, &self.attribution).await;
+        let session = self.agent.snapshot().session_id().to_string();
+        self.compaction
+            .settle(&session, &report, &self.attribution)
+            .await;
         if cancel.is_cancelled() {
             return Err(AgentError::Cancelled);
         }
@@ -559,6 +561,8 @@ struct PetriEvents {
     attempt: Attempt,
     scope:   ScopeId,
     node:    SmolStr,
+    /// What names the skill directories Pebble reports having searched.
+    skills:  skills::Labels,
 }
 #[async_trait::async_trait]
 impl EventSink for PetriEvents {
@@ -571,19 +575,20 @@ impl EventSink for PetriEvents {
             ))
             .await
             .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))?;
-        // A skipped skill file is Pebble's report; the diagnostic is Petri's.
+        // The directories Pebble searched are Petri's record, with the
+        // convention behind each; a skipped file or directory is Pebble's
+        // report and the diagnostic is Petri's.
+        let at = skills::Attribution {
+            node:    self.node.clone(),
+            firing:  self.firing,
+            attempt: self.attempt,
+        };
+        if let Some(dirs) = skills::labeled(event, &self.skills) {
+            skills::record_resolved(&self.sender, &at, self.scope, &dirs).await;
+        }
         let skipped = skills::skipped(event);
         if !skipped.is_empty() {
-            skills::report(
-                &self.sender,
-                &skills::Attribution {
-                    node:    self.node.clone(),
-                    firing:  self.firing,
-                    attempt: self.attempt,
-                },
-                &skipped,
-            )
-            .await;
+            skills::report(&self.sender, &at, &skipped).await;
         }
         Ok(())
     }
