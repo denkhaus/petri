@@ -54,11 +54,11 @@ Inputs: `helper` (absolute path to `helper/code_review.py`), `level` (`high`),
 | Field | Value |
 | --- | --- |
 | Fabro repository | `https://github.com/fabro-sh/fabro` |
-| Revision | `b6482910e517d00dfc3c4a2f2d3e417c9348f7f6` (the compatibility target) |
-| Where it was fetched from | `refs/pull/844/head`; on 2026-09-06 the commit was also an ancestor of `origin/main` (`2f326a1`, 0.348.0-nightly.0) |
-| Build | `cargo build --locked -p fabro-cli` in a confined clone; version string `fabro 0.347.0-nightly.0 (b648291 2026-09-06 debug)` |
-| PATH `fabro` | not used (`/opt/homebrew/bin/fabro` is `0.339.0-nightly.1 (775b62b)`) |
-| Capture date | 2026-09-06 |
+| Revision | `05ebd0fd1beec214b558f4b478e36bd08b507dc7` (the compatibility target; first captured at `b6482910` on 2026-09-06, re-captured at this pin with identical results) |
+| Where it was fetched from | `refs/heads/main` (the merge of fabro-sh/fabro#867), through `scripts/corpus-fetch-fabro.sh` |
+| Build | `scripts/fabro-provision.sh` (`cargo build --locked -p fabro-cli` from the fetched corpus checkout); version string `fabro 0.355.0-nightly.0 (05ebd0f 2026-09-13 debug)` |
+| PATH `fabro` | not used |
+| Capture date | 2026-09-13 |
 | Capture script | `fabro-reference/capture.sh` |
 
 Files:

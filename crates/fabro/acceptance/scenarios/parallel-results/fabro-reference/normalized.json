@@ -1,11 +1,11 @@
 {
   "provenance": {
     "fabro_repository": "https://github.com/fabro-sh/fabro",
-    "fabro_revision": "b6482910e517d00dfc3c4a2f2d3e417c9348f7f6",
-    "fabro_revision_ref": "refs/pull/844/head (also on origin/main as of 2026-09-06)",
-    "fabro_version_string": "fabro 0.347.0-nightly.0 (b648291 2026-09-06 debug)",
-    "built_with": "cargo build --locked -p fabro-cli (debug profile) from a confined clone; PATH's fabro was never used",
-    "captured_on": "2026-09-06",
+    "fabro_revision": "05ebd0fd1beec214b558f4b478e36bd08b507dc7",
+    "fabro_revision_ref": "refs/heads/main (the merge of fabro-sh/fabro#867)",
+    "fabro_version_string": "fabro 0.355.0-nightly.0 (05ebd0f 2026-09-13 debug)",
+    "built_with": "scripts/fabro-provision.sh (cargo build --locked -p fabro-cli, debug profile, from the fetched corpus checkout); PATH's fabro was never used",
+    "captured_on": "2026-09-13",
     "capture_script": "capture.sh (this directory)",
     "commands": [
       "fabro server start --foreground --no-web --bind 127.0.0.1:<port>  (HOME=<private dir>, FABRO_DEV_TOKEN, SESSION_SECRET set; settings.toml has [server.auth] methods=[\"dev-token\"])",
@@ -21,9 +21,11 @@
       "blob://sha256/<64 hex> -> <BLOB_REF> (Fabro offloads command.output leaves in event payloads; the dump keeps them inline)",
       "absolute working directory -> <WORKDIR>",
       "internal.*, thread.*, graph.* context keys dropped from final_context",
-      "finder_jobs collapsed to a count (helper-generated prompt text)"
+      "finder_jobs collapsed to a count (helper-generated prompt text)",
+      "the staged bundle directory (the helper's path in the run inputs) -> <WORKDIR>"
     ],
-    "raw_files": "raw/ (events.jsonl, find-parallel_results.json, verify-parallel_results.json, report.md, run-stderr.txt, run.log, probe-*.json)"
+    "raw_files": "raw/ (events.jsonl, find-parallel_results.json, verify-parallel_results.json, report.md, run-stderr.txt, run.log, probe-*.json)",
+    "previous_capture": "b6482910e517d00dfc3c4a2f2d3e417c9348f7f6 on 2026-09-06: identical branch envelopes, stage order, report and final context; only the order of the find group's branch start and completion events differed (parallel completion order is free)"
   },
   "run_status": "succeeded",
   "stage_order": [
@@ -52,28 +54,28 @@
       "branches": [
         {
           "event": "parallel.branch.started",
-          "branch": "finder_b",
-          "parallel_branch_id": "find@1:1",
-          "index": 1
-        },
-        {
-          "event": "parallel.branch.started",
           "branch": "finder_a",
           "parallel_branch_id": "find@1:0",
           "index": 0
         },
         {
-          "event": "parallel.branch.completed",
-          "branch": "finder_a",
-          "parallel_branch_id": "find@1:0",
-          "index": 0,
-          "status": "succeeded"
+          "event": "parallel.branch.started",
+          "branch": "finder_b",
+          "parallel_branch_id": "find@1:1",
+          "index": 1
         },
         {
           "event": "parallel.branch.completed",
           "branch": "finder_b",
           "parallel_branch_id": "find@1:1",
           "index": 1,
+          "status": "succeeded"
+        },
+        {
+          "event": "parallel.branch.completed",
+          "branch": "finder_a",
+          "parallel_branch_id": "find@1:0",
+          "index": 0,
           "status": "succeeded"
         }
       ],

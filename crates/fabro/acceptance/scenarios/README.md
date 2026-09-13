@@ -46,6 +46,12 @@ reason) or `excluded` (not required, with its reason).
 
 ## Running
 
+Every scenario file has a host cell and a Docker cell; the Docker cell
+reuses the file with `modes.backend` overridden by the matrix entry, and a
+file-triggered interrupt is read inside the container. The Docker cells run
+under the bounded Nextest group `fabro-docker` (`.config/nextest.toml`), so
+the full gate cannot starve them past their deadlines.
+
 `mise run test:fabro:blackbox` runs every planned cell of `matrix.json` and
 then the coverage report, allowing a skipped cell (a machine with no Docker).
 `mise run test:fabro:blackbox:strict` requires Docker

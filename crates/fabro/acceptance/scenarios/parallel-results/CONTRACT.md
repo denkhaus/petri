@@ -10,7 +10,7 @@ key, and for the fan-in node's output under Petri.
 
 Sources, in order of authority:
 
-1. Fabro source at revision `b6482910e517d00dfc3c4a2f2d3e417c9348f7f6`. Paths
+1. Fabro source at revision `05ebd0fd1beec214b558f4b478e36bd08b507dc7`. Paths
    are relative to the Fabro repository root. Line numbers are from that
    revision.
 2. The Fabro capture in `fabro-reference/` (see `PROVENANCE.md`).

@@ -59,12 +59,30 @@ cell!(
     acp
 );
 cell!(
+    acp_exit_before_answer_is_retried_docker,
+    "acp/exit-before-answer-is-retried",
+    docker,
+    acp
+);
+cell!(
     acp_permission_request_and_hook,
     "acp/permission-request-and-hook",
     host,
     acp
 );
+cell!(
+    acp_permission_request_and_hook_docker,
+    "acp/permission-request-and-hook",
+    docker,
+    acp
+);
 cell!(acp_cancel_during_turn, "acp/cancel-during-turn", host, acp);
+cell!(
+    acp_cancel_during_turn_docker,
+    "acp/cancel-during-turn",
+    docker,
+    acp
+);
 
 // ── Code review ─────────────────────────────────────────────────────────────
 
@@ -88,9 +106,21 @@ cell!(
     openrouter
 );
 cell!(
+    code_review_empty_diff_docker,
+    "code-review/empty-diff",
+    docker,
+    openrouter
+);
+cell!(
     code_review_no_surviving_findings,
     "code-review/no-surviving-findings",
     host,
+    openrouter
+);
+cell!(
+    code_review_no_surviving_findings_docker,
+    "code-review/no-surviving-findings",
+    docker,
     openrouter
 );
 cell!(
@@ -100,9 +130,21 @@ cell!(
     openrouter
 );
 cell!(
+    code_review_invalid_output_repaired_docker,
+    "code-review/invalid-output-repaired",
+    docker,
+    openrouter
+);
+cell!(
     code_review_repair_exhausted,
     "code-review/repair-exhausted",
     host,
+    openrouter
+);
+cell!(
+    code_review_repair_exhausted_docker,
+    "code-review/repair-exhausted",
+    docker,
     openrouter
 );
 cell!(
@@ -112,15 +154,33 @@ cell!(
     openrouter
 );
 cell!(
+    code_review_one_failed_branch_docker,
+    "code-review/one-failed-branch",
+    docker,
+    openrouter
+);
+cell!(
     code_review_reverse_branch_completion,
     "code-review/reverse-branch-completion",
     host,
     openrouter
 );
 cell!(
+    code_review_reverse_branch_completion_docker,
+    "code-review/reverse-branch-completion",
+    docker,
+    openrouter
+);
+cell!(
     code_review_multi_level_fan_out,
     "code-review/multi-level-fan-out",
     host,
+    openrouter
+);
+cell!(
+    code_review_multi_level_fan_out_docker,
+    "code-review/multi-level-fan-out",
+    docker,
     openrouter
 );
 
@@ -133,9 +193,21 @@ cell!(
     openrouter
 );
 cell!(
+    security_review_no_vulnerabilities_docker,
+    "security-review/no-vulnerabilities",
+    docker,
+    openrouter
+);
+cell!(
     security_review_several_verified,
     "security-review/several-verified",
     host,
+    openrouter
+);
+cell!(
+    security_review_several_verified_docker,
+    "security-review/several-verified",
+    docker,
     openrouter
 );
 cell!(
@@ -145,9 +217,21 @@ cell!(
     openrouter
 );
 cell!(
+    security_review_rejected_candidate_docker,
+    "security-review/rejected-candidate",
+    docker,
+    openrouter
+);
+cell!(
     security_review_partial_branch_failure,
     "security-review/partial-branch-failure",
     host,
+    openrouter
+);
+cell!(
+    security_review_partial_branch_failure_docker,
+    "security-review/partial-branch-failure",
+    docker,
     openrouter
 );
 cell!(
@@ -157,9 +241,21 @@ cell!(
     openrouter
 );
 cell!(
+    security_review_malformed_response_docker,
+    "security-review/malformed-response",
+    docker,
+    openrouter
+);
+cell!(
     security_review_timeout_cancel,
     "security-review/timeout-cancel",
     host,
+    openrouter
+);
+cell!(
+    security_review_timeout_cancel_docker,
+    "security-review/timeout-cancel",
+    docker,
     openrouter
 );
 
@@ -172,15 +268,33 @@ cell!(
     anthropic
 );
 cell!(
+    provider_faults_auth_failure_docker,
+    "provider-faults/auth-failure",
+    docker,
+    anthropic
+);
+cell!(
     provider_faults_rate_limit_then_recovery,
     "provider-faults/rate-limit-then-recovery",
     host,
     anthropic
 );
 cell!(
+    provider_faults_rate_limit_then_recovery_docker,
+    "provider-faults/rate-limit-then-recovery",
+    docker,
+    anthropic
+);
+cell!(
     provider_faults_exhausted_retries,
     "provider-faults/exhausted-retries",
     host,
+    anthropic
+);
+cell!(
+    provider_faults_exhausted_retries_docker,
+    "provider-faults/exhausted-retries",
+    docker,
     anthropic
 );
 cell!(
@@ -196,9 +310,21 @@ cell!(
     anthropic
 );
 cell!(
+    provider_faults_truncated_stream_docker,
+    "provider-faults/truncated-stream",
+    docker,
+    anthropic
+);
+cell!(
     provider_faults_tool_call_continuation,
     "provider-faults/tool-call-continuation",
     host,
+    anthropic
+);
+cell!(
+    provider_faults_tool_call_continuation_docker,
+    "provider-faults/tool-call-continuation",
+    docker,
     anthropic
 );
 
@@ -211,12 +337,30 @@ cell!(
     openrouter
 );
 cell!(
+    routing_bundle_defaults_and_overrides_docker,
+    "routing/bundle-defaults-and-overrides",
+    docker,
+    openrouter
+);
+cell!(
     routing_goal_gate_restart_and_visit_limit,
     "routing/goal-gate-restart-and-visit-limit",
     host,
     none
 );
+cell!(
+    routing_goal_gate_restart_and_visit_limit_docker,
+    "routing/goal-gate-restart-and-visit-limit",
+    docker,
+    none
+);
 cell!(routing_failure_policy, "routing/failure-policy", host, none);
+cell!(
+    routing_failure_policy_docker,
+    "routing/failure-policy",
+    docker,
+    none
+);
 
 // ── Backend matrix ──────────────────────────────────────────────────────────
 
@@ -278,9 +422,21 @@ cell!(
     openrouter
 );
 cell!(
+    implement_input_model_inheritance_docker,
+    "implement/input-model-inheritance",
+    docker,
+    openrouter
+);
+cell!(
     implement_multiple_manager_cycles,
     "implement/multiple-manager-cycles",
     host,
+    openrouter
+);
+cell!(
+    implement_multiple_manager_cycles_docker,
+    "implement/multiple-manager-cycles",
+    docker,
     openrouter
 );
 cell!(
@@ -290,15 +446,33 @@ cell!(
     openrouter
 );
 cell!(
+    implement_stop_condition_docker,
+    "implement/stop-condition",
+    docker,
+    openrouter
+);
+cell!(
     implement_child_failure,
     "implement/child-failure",
     host,
     openrouter
 );
 cell!(
+    implement_child_failure_docker,
+    "implement/child-failure",
+    docker,
+    openrouter
+);
+cell!(
     implement_parent_cancellation,
     "implement/parent-cancellation",
     host,
+    openrouter
+);
+cell!(
+    implement_parent_cancellation_docker,
+    "implement/parent-cancellation",
+    docker,
     openrouter
 );
 
@@ -310,11 +484,23 @@ cell!(
     host,
     openai
 );
+cell!(
+    interview_scripted_choice_refusal_freeform_docker,
+    "interview/scripted-choice-refusal-freeform",
+    docker,
+    openai
+);
 
 cell!(
     interview_repeated_and_concurrent_questions,
     "interview/repeated-and-concurrent-questions",
     host,
+    none
+);
+cell!(
+    interview_repeated_and_concurrent_questions_docker,
+    "interview/repeated-and-concurrent-questions",
+    docker,
     none
 );
 cell!(
@@ -330,9 +516,21 @@ cell!(
     openai
 );
 cell!(
+    interview_delayed_withheld_reply_docker,
+    "interview/delayed-withheld-reply",
+    docker,
+    openai
+);
+cell!(
     interview_invalid_answer_reasked,
     "interview/invalid-answer-reasked",
     host,
+    openai
+);
+cell!(
+    interview_invalid_answer_reasked_docker,
+    "interview/invalid-answer-reasked",
+    docker,
     openai
 );
 cell!(
@@ -342,9 +540,21 @@ cell!(
     openai
 );
 cell!(
+    interview_unexpected_question_docker,
+    "interview/unexpected-question",
+    docker,
+    openai
+);
+cell!(
     interview_unused_answer,
     "interview/unused-answer",
     host,
+    openai
+);
+cell!(
+    interview_unused_answer_docker,
+    "interview/unused-answer",
+    docker,
     openai
 );
 cell!(
@@ -353,11 +563,29 @@ cell!(
     host,
     openai
 );
+cell!(
+    interview_timeout_cancel_docker,
+    "interview/timeout-cancel",
+    docker,
+    openai
+);
 cell!(interview_gate_timeout, "interview/gate-timeout", host, none);
+cell!(
+    interview_gate_timeout_docker,
+    "interview/gate-timeout",
+    docker,
+    none
+);
 cell!(
     interview_terminal_eof,
     "interview/terminal-eof",
     host,
+    openai
+);
+cell!(
+    interview_terminal_eof_docker,
+    "interview/terminal-eof",
+    docker,
     openai
 );
 

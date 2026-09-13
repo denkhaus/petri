@@ -66,6 +66,20 @@
 //! Records are masked by the driver before they are appended, so every value
 //! here is post-mask: a secret reference stays `{"$secret": ...}` and a
 //! masked value stays `***`.
+//!
+//! # Inversion
+//!
+//! The stream is lossless for the records replay consumes. Every event says
+//! who appended its record ([`RunEvent::origin`]). Every coordinator record
+//! and every external engine record derives at least one event, and the
+//! first event derived from such a record (`index` 0) carries everything the
+//! record did, so [`invert`] rebuilds the records from the events alone. The
+//! core's own records (routed tokens, applied routes, splices, cascading
+//! cancels) derive events too, but replay regenerates them from the external
+//! ones, so inversion skips them by origin. [`verify_lossless`] proves the
+//! round trip over a run dir: project, invert, replay the inverted records,
+//! and compare both the regenerated logs and the re-projected stream with
+//! the originals.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -76,8 +90,9 @@ use std::{fs, io};
 use driver::lifecycle::{BUDGET_PAUSED_KIND, BUDGET_RESUMED_KIND, BudgetNote, Note};
 use driver::{BranchMap, BranchRef, BranchRole};
 use engine::{
-    Admission, DecisionId, EngineExit, EngineState, EntryPoint, Event, EventRecord, GroupDecision,
-    Intervention, RouteApplied, RouteDecision,
+    Admission, DecisionId, EngineExit, EngineState, EntryPoint, Event, EventRecord,
+    EventSource as RecordSource, GroupDecision, Intervention, RouteApplied, RouteDecision,
+    WeightedDraw,
 };
 use ir::placeholder::is_placeholder_item;
 use ir::{
@@ -96,14 +111,31 @@ use crate::hooks::{HOOK_ACTIVITY_NOTE_KIND, HookActivity, HookOperation};
 use crate::host::EVENTS_FILE;
 use crate::store::execution_relative_dir;
 use crate::{
-    COORDINATOR_FILE, CancelReason, CoordinatorEvent, CoordinatorRecord, CoordinatorState,
-    EngineLogError, ExecutionId, ExecutionObserver, GRAPHS_DIR, InvocationId, InvocationResult,
-    ParentCallKey, SandboxBinding, StateError, StoreError, decode_coordinator_log, read_engine_log,
+    AttemptAdmission, COORDINATOR_FILE, CancelReason, CoordinatorEvent, CoordinatorRecord,
+    CoordinatorState, DecodedCoordinatorLog, DecodedEngineLog, EngineLogError, ExecutionId,
+    ExecutionObserver, GRAPHS_DIR, InvocationId, InvocationResult, ParentCallKey, SandboxBinding,
+    SecretBindings, StateError, StoreError, decode_coordinator_log, read_engine_log,
+};
+
+pub mod invert;
+
+pub use invert::{
+    InvertError, InvertedRecord, InvertedRun, LosslessError, invert, verify_lossless,
 };
 
 /// The version of this contract. Bump when an existing field changes meaning
 /// or a variant is removed; adding a variant or an optional field does not.
-pub const EVENT_CONTRACT_VERSION: u32 = 1;
+///
+/// Version 2 made the stream lossless for replay (see "Inversion" in the
+/// module docs): every event carries the `origin` of its record, `run_started`
+/// carries the coordinator format version, `graph_registered` is new,
+/// `invocation_declared` carries the secret bindings and the admission gate,
+/// `execution_declared` and `execution_started` carry the whole engine start,
+/// `execution_admitted` carries the decision and its trace, a `RouteChoice`
+/// carries the weighted draw, an `AgentActivity` carries the step's own
+/// attributes beside the envelope, and a delivered answer carries the value
+/// it was decoded from.
+pub const EVENT_CONTRACT_VERSION: u32 = 2;
 
 /// The `StepEvent::Custom` key under which a backend's own event envelope
 /// rides, with `kind` naming the backend.
@@ -115,6 +147,31 @@ pub const BACKEND_EVENT_KIND_KEY: &str = "kind";
 pub enum EventSource {
     Coordinator,
     Execution { execution: ExecutionId },
+}
+
+/// Who appended the record an event derives from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordOrigin {
+    /// The host fed the record: every coordinator record, and an engine
+    /// record the driver applied (an execution's start, an admission, a
+    /// step's start, progress and result, a routing decision, an elapsed
+    /// retry, a host's cancel, kill or control). Replay consumes these.
+    #[default]
+    External,
+    /// The core produced the record while draining: a routed token, an
+    /// applied route, a splice, a cascading cancel. Replay regenerates these
+    /// from the external records.
+    Core,
+}
+
+impl From<RecordSource> for RecordOrigin {
+    fn from(source: RecordSource) -> Self {
+        match source {
+            RecordSource::External => Self::External,
+            RecordSource::Core => Self::Core,
+        }
+    }
 }
 
 /// A stable identity for deduplication.
@@ -182,6 +239,11 @@ pub struct Subject {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunEvent {
     pub id:          EventId,
+    /// Whether the host or the core appended the record this event derives
+    /// from. Inversion rebuilds the `external` records; replay regenerates
+    /// the `core` ones.
+    #[serde(default)]
+    pub origin:      RecordOrigin,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation:  Option<InvocationId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -236,6 +298,10 @@ pub struct RouteChoice {
     pub trace:    Vec<Intervention>,
     /// Whether the engine drew a random number for a weighted tier.
     pub weighted: bool,
+    /// The draw itself, when `weighted`: the tier, its candidates, the roll
+    /// and the total, as the engine recorded them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw:     Option<WeightedDraw>,
 }
 
 /// One branch's result: the record of the last node that ran on the branch.
@@ -305,6 +371,11 @@ pub struct AgentActivity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_seq:     Option<u64>,
     pub envelope:       Value,
+    /// The step's own keys beside `kind` and `event` in the custom payload,
+    /// verbatim (the native backend records `node`, `firing`, `attempt` and
+    /// `scope`). Empty when the payload carried only the envelope.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub attributes:     serde_json::Map<String, Value>,
 }
 
 /// What happened.
@@ -313,20 +384,35 @@ pub struct AgentActivity {
 pub enum EventBody {
     // ── Run and invocations (coordinator log) ───────────────────────────────
     RunStarted {
+        /// The coordinator record format the run was written in.
+        format_version:   u32,
         root:             InvocationId,
         middleware_chain: Vec<engine::MiddlewareKey>,
     },
     RunFinished {
         status: RunStatus,
     },
+    /// A graph is in the run's registry under its digest, before any
+    /// invocation declares it.
+    GraphRegistered {
+        digest: String,
+    },
     InvocationDeclared {
-        invocation: InvocationId,
+        invocation:      InvocationId,
         /// Absent for the root.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        call:       Option<ParentLink>,
-        graph:      String,
-        sandbox:    SandboxBinding,
-        context:    BTreeMap<SmolStr, Value>,
+        call:            Option<ParentLink>,
+        graph:           String,
+        sandbox:         SandboxBinding,
+        context:         BTreeMap<SmolStr, Value>,
+        /// The child's secret bindings, by name only; plaintext is not
+        /// representable here.
+        #[serde(default)]
+        secret_bindings: SecretBindings,
+        /// The admission gate the invocation's attempts share, when it has
+        /// one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        admission:       Option<AttemptAdmission>,
     },
     InvocationFinished {
         invocation: InvocationId,
@@ -364,12 +450,23 @@ pub enum EventBody {
         remaining_ms: u64,
     },
     ExecutionDeclared {
-        execution:       ExecutionId,
-        invocation:      InvocationId,
+        execution:        ExecutionId,
+        invocation:       InvocationId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        predecessor:     Option<ExecutionId>,
-        execution_index: u32,
-        entry:           EntryPoint,
+        predecessor:      Option<ExecutionId>,
+        execution_index:  u32,
+        entry:            EntryPoint,
+        /// The rest of the engine start the execution was declared with: its
+        /// initial context, the firing counts it inherits from its
+        /// predecessor, and the restart limit.
+        context:          BTreeMap<SmolStr, Value>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        prior_firings:    BTreeMap<NodeId, u32>,
+        max_executions:   u32,
+        /// The middleware state the execution starts from, by key: the
+        /// middleware's state version and its value.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        middleware_state: BTreeMap<engine::MiddlewareKey, (u32, Value)>,
     },
     ExecutionFinished {
         execution: ExecutionId,
@@ -381,12 +478,21 @@ pub enum EventBody {
         entry:           EntryPoint,
         execution_index: u32,
         context:         BTreeMap<SmolStr, Value>,
+        /// The firing counts inherited from the predecessor execution.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        prior_firings:   BTreeMap<NodeId, u32>,
+        /// The restart limit the execution runs under.
+        max_executions:  u32,
     },
     /// The execution's own admission decision, before any node fires.
     ExecutionAdmitted {
         admitted: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason:   Option<SmolStr>,
+        /// The decision as the host or middleware gave it, with its trace.
+        decision: Admission,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        trace:    Vec<engine::MiddlewareKey>,
     },
     /// A node's join was satisfied and a firing exists, awaiting admission.
     VisitStarted {
@@ -555,8 +661,16 @@ pub struct CloneRef {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeliveredControl {
-    Answer { answer: steps::Answer },
-    Deliver { value: Value },
+    /// A delivered value that reads as an answer. `value` is the value as
+    /// delivered (a host may send the answer under `$answer`, as a bare
+    /// object, or as a bare string), `answer` its decoding.
+    Answer {
+        answer: steps::Answer,
+        value:  Value,
+    },
+    Deliver {
+        value: Value,
+    },
     Cancel,
     Kill,
 }
@@ -640,30 +754,38 @@ impl Projection {
         };
         let (invocation, execution, body) = match &record.event {
             CoordinatorEvent::RunStarted {
+                format_version,
                 root,
                 middleware_chain,
-                ..
             } => (Some(*root), None, EventBody::RunStarted {
+                format_version:   *format_version,
                 root:             *root,
                 middleware_chain: middleware_chain.clone(),
             }),
-            CoordinatorEvent::GraphRegistered { .. } => return Vec::new(),
+            CoordinatorEvent::GraphRegistered { digest } => {
+                (None, None, EventBody::GraphRegistered {
+                    digest: digest.to_hex(),
+                })
+            }
             CoordinatorEvent::InvocationDeclared {
                 invocation,
                 call,
                 graph,
                 context,
+                secret_bindings,
                 sandbox,
-                ..
+                admission,
             } => {
                 let link = call.as_ref().map(ParentLink::from);
                 self.invocations.insert(*invocation, link.clone());
                 (Some(*invocation), None, EventBody::InvocationDeclared {
-                    invocation: *invocation,
-                    call:       link,
-                    graph:      graph.to_hex(),
-                    sandbox:    *sandbox,
-                    context:    context.clone(),
+                    invocation:      *invocation,
+                    call:            link,
+                    graph:           graph.to_hex(),
+                    sandbox:         *sandbox,
+                    context:         context.clone(),
+                    secret_bindings: secret_bindings.clone(),
+                    admission:       admission.clone(),
                 })
             }
             CoordinatorEvent::ExecutionDeclared {
@@ -671,7 +793,7 @@ impl Projection {
                 invocation,
                 predecessor,
                 start,
-                ..
+                middleware_state,
             } => {
                 let track = self.executions.entry(*execution).or_default();
                 track.invocation = Some(*invocation);
@@ -680,11 +802,15 @@ impl Projection {
                     Some(*invocation),
                     Some(*execution),
                     EventBody::ExecutionDeclared {
-                        execution:       *execution,
-                        invocation:      *invocation,
-                        predecessor:     *predecessor,
-                        execution_index: start.execution_index,
-                        entry:           start.entry,
+                        execution:        *execution,
+                        invocation:       *invocation,
+                        predecessor:      *predecessor,
+                        execution_index:  start.execution_index,
+                        entry:            start.entry,
+                        context:          start.context.clone(),
+                        prior_firings:    start.prior_firings.clone(),
+                        max_executions:   start.max_executions,
+                        middleware_state: middleware_state.clone(),
                     },
                 )
             }
@@ -709,6 +835,7 @@ impl Projection {
             CoordinatorEvent::InvocationCancelRequested { invocation, reason } => {
                 let mut events = vec![RunEvent {
                     id,
+                    origin: RecordOrigin::External,
                     invocation: Some(*invocation),
                     execution: None,
                     parent: self.invocations.get(invocation).cloned().flatten(),
@@ -727,6 +854,7 @@ impl Projection {
                 {
                     events.push(RunEvent {
                         id:          EventId { index: 1, ..id },
+                        origin:      RecordOrigin::External,
                         invocation:  Some(*invocation),
                         execution:   None,
                         parent:      None,
@@ -764,6 +892,7 @@ impl Projection {
             .flatten();
         vec![RunEvent {
             id,
+            origin: RecordOrigin::External,
             invocation,
             execution,
             parent,
@@ -798,6 +927,8 @@ impl Projection {
                 entry:           start.entry,
                 execution_index: start.execution_index,
                 context:         start.context.clone(),
+                prior_firings:   start.prior_firings.clone(),
+                max_executions:  start.max_executions,
             }),
             Event::TokenEmitted(_) => {}
             Event::StepStarted { firing, .. } => {
@@ -900,7 +1031,12 @@ impl Projection {
                         Admission::Block { reason } => (false, Some(reason.clone())),
                         _ => (true, None),
                     };
-                    emit(None, EventBody::ExecutionAdmitted { admitted, reason });
+                    emit(None, EventBody::ExecutionAdmitted {
+                        admitted,
+                        reason,
+                        decision: decision.clone(),
+                        trace: trace.clone(),
+                    });
                 }
                 DecisionId::AttemptStart { firing, .. } => {
                     emit(
@@ -1061,7 +1197,10 @@ impl Projection {
                             || DeliveredControl::Deliver {
                                 value: value.clone(),
                             },
-                            |answer| DeliveredControl::Answer { answer },
+                            |answer| DeliveredControl::Answer {
+                                answer,
+                                value: value.clone(),
+                            },
                         ),
                         None => DeliveredControl::Deliver {
                             value: value.clone(),
@@ -1238,6 +1377,7 @@ impl Projection {
                     seq:    record.seq,
                     index:  u32::try_from(index).unwrap_or(u32::MAX),
                 },
+                origin: record.source.into(),
                 invocation,
                 execution: Some(execution),
                 parent: parent.clone(),
@@ -1311,6 +1451,7 @@ fn route_choice(state: &EngineState, group: &GroupDecision) -> RouteChoice {
         target,
         trace: group.trace.clone(),
         weighted: group.draw.is_some(),
+        draw: group.draw.clone(),
     }
 }
 
@@ -1487,14 +1628,20 @@ fn agent_activity(value: &Value) -> Option<AgentActivity> {
     // its hook event); only an object is a backend envelope.
     let envelope = object.get("event").filter(|event| event.is_object())?;
     let text = |key: &str| envelope.get(key).and_then(Value::as_str).map(str::to_owned);
+    let attributes = object
+        .iter()
+        .filter(|(key, _)| key.as_str() != BACKEND_EVENT_KIND_KEY && key.as_str() != "event")
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
     Some(AgentActivity {
-        backend:        SmolStr::new(backend),
-        session:        text("session_id"),
+        backend: SmolStr::new(backend),
+        session: text("session_id"),
         parent_session: text("parent_session_id"),
-        tool_call:      text("tool_call_id"),
-        stream:         text("stream_id"),
-        stream_seq:     envelope.get("seq").and_then(Value::as_u64),
-        envelope:       envelope.clone(),
+        tool_call: text("tool_call_id"),
+        stream: text("stream_id"),
+        stream_seq: envelope.get("seq").and_then(Value::as_u64),
+        envelope: envelope.clone(),
+        attributes,
     })
 }
 
@@ -1946,6 +2093,45 @@ pub fn replay_run(run_dir: &Path) -> Result<Vec<RunEvent>, ReplayError> {
 
 /// [`replay_run`] through a caller's projection state.
 fn project_run(run_dir: &Path, projection: &mut Projection) -> Result<Vec<RunEvent>, ReplayError> {
+    Ok(project_loaded(&load_run(run_dir)?, projection))
+}
+
+/// Project a loaded run: the coordinator log first, then each execution's
+/// engine log in declaration order.
+pub(crate) fn project_loaded(loaded: &LoadedRun, projection: &mut Projection) -> Vec<RunEvent> {
+    let mut events = Vec::new();
+    for record in &loaded.coordinator.records {
+        events.extend(projection.lifecycle(record));
+    }
+    for execution in &loaded.executions {
+        events.extend(replay_execution(
+            projection,
+            execution.execution,
+            execution.graph.clone(),
+            &execution.log.log,
+            &execution.log.recorded_at,
+        ));
+    }
+    events
+}
+
+/// One run's durable logs as a run dir holds them: the coordinator log and,
+/// for each execution in declaration order that started, its graph and its
+/// engine log.
+pub(crate) struct LoadedRun {
+    pub(crate) coordinator: DecodedCoordinatorLog,
+    pub(crate) executions:  Vec<LoadedExecution>,
+}
+
+pub(crate) struct LoadedExecution {
+    pub(crate) execution: ExecutionId,
+    /// The graph the execution started from, before any splice.
+    pub(crate) graph:     Graph,
+    pub(crate) log:       DecodedEngineLog,
+}
+
+/// Read a run dir's logs and the graphs its executions ran.
+pub(crate) fn load_run(run_dir: &Path) -> Result<LoadedRun, ReplayError> {
     let coordinator = run_dir.join(COORDINATOR_FILE);
     let bytes = fs::read(&coordinator).map_err(|source| ReplayError::Io {
         path: coordinator.clone(),
@@ -1953,10 +2139,7 @@ fn project_run(run_dir: &Path, projection: &mut Projection) -> Result<Vec<RunEve
     })?;
     let decoded = decode_coordinator_log(&coordinator, &bytes)?;
     let state = CoordinatorState::replay(&decoded.records)?;
-    let mut events = Vec::new();
-    for record in &decoded.records {
-        events.extend(projection.lifecycle(record));
-    }
+    let mut executions = Vec::new();
     for (execution, declared) in &state.executions {
         let invocation = declared.declaration.invocation;
         let digest = state.invocations[&invocation].declaration.graph;
@@ -1976,16 +2159,17 @@ fn project_run(run_dir: &Path, projection: &mut Projection) -> Result<Vec<RunEve
         if !log_path.exists() {
             continue;
         }
-        let decoded = read_engine_log(&log_path)?;
-        events.extend(replay_execution(
-            projection,
-            *execution,
+        let log = read_engine_log(&log_path)?;
+        executions.push(LoadedExecution {
+            execution: *execution,
             graph,
-            &decoded.log,
-            &decoded.recorded_at,
-        ));
+            log,
+        });
     }
-    Ok(events)
+    Ok(LoadedRun {
+        coordinator: decoded,
+        executions,
+    })
 }
 
 /// Project one execution's log through `projection`, external event by

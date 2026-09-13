@@ -374,7 +374,16 @@ async fn run(scenario: Scenario, backend: Backend, agent: Agent, cell: &str) -> 
     let mut watcher = None;
     if let Some(when) = &scenario.controls.interrupt_when {
         if let Some(file) = &when.file {
-            launch.interrupt_when = Some(workspace.join(file));
+            // A workspace path. On the host the harness reads the workspace
+            // directly; in a container the workspace is `/workspace` inside
+            // the sandbox, read through `docker cp`, so one scenario file
+            // serves both backends.
+            match backend {
+                Backend::Host => launch.interrupt_when = Some(workspace.join(file)),
+                Backend::Docker => {
+                    launch.interrupt_when_container_file = Some(format!("/workspace/{file}"));
+                }
+            }
         }
         if let Some(file) = &when.container_file {
             launch.interrupt_when_container_file = Some(file.clone());

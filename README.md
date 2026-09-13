@@ -269,8 +269,8 @@ the affected evidence records move together, and the relevant Petri scenarios
 run again through the shipped binary. A library test pass never replaces a
 required Petri scenario. The current pins are in the contract's "Pinned
 revisions" table (Pebble `6996942`, lithos-llm `a1e3fd3`, sandbox-driver
-`ddb32e19`, twins `fedab8e`, Fabro `b648291`, the runner image
-`506a3433f7af`); `mise run check:pins` keeps every citation in agreement.
+`ddb32e19`, twins `ca45f0e`, Fabro `05ebd0f`, the runner image
+`f8bbbfd81934`); `mise run check:pins` keeps every citation in agreement.
 The library batch the readiness work asked for landed on
 `petri/readiness-batch` in each repository and is pinned: Pebble's
 summary-call usage accounting, `continue_prompt` for a failover with no
@@ -1225,6 +1225,10 @@ no platform vocabulary in them:
   run dir after the fact, and `EventProjector::primed`
   attaches at resume. Every event names its run, invocation, execution,
   node (with the frontend's `meta`), firing, visit, attempt and branch role.
+  The stream is lossless for replay: `invert` rebuilds the coordinator log
+  and every execution's external engine records from the events, and
+  `verify_lossless` proves the round trip at the end of every run beside
+  `verify_replay`.
 - **Awaited extension points.** `Runtime::hooks` installs
   `driver::lifecycle::ExecutionHooks`: `before_attempt` (pause, skip or block
   an attempt), `prepare_result` (adjust the effective result; the original is
