@@ -873,12 +873,10 @@ fn reads_another_run(pinned: &PinnedAction, config: &Value) -> bool {
     action_inputs(config).is_some_and(|inputs| inputs.contains_key("run-id"))
 }
 
-/// Actions whose work is inseparable from a hosted service — OIDC issuers,
-/// GitHub App credentials, SaaS backends, and **mutating actions**, whose whole
-/// job is a write to github.com: a local run with write permission would
-/// mutate the real repository (the API stance), so the sweep, which must never
-/// mutate, can never see them pass. No local runner can fix a failure here,
-/// so the sweep classifies it as expected rather than a gap.
+/// Actions whose work depends on a hosted service, including actions that
+/// write to GitHub. This list classifies failures after execution; it does
+/// not skip actions or prevent writes. A failing action may already have
+/// posted a comment. The sweep's credential policy must prevent those writes.
 pub const SERVER_COUPLED: &[(&str, &str)] = &[
     ("actions/attest-build-provenance", "OIDC attestation"),
     ("open-security-tools/ost-simple-sts", "OIDC token exchange"),
