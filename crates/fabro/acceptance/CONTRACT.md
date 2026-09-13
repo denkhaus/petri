@@ -369,7 +369,7 @@ default model before the first stage) and `fallback-repeated-tool-effect`
 | Workflow secrets | `{{ secrets.NAME }}` resolves from `PETRI_SECRET_NAME` in the standalone runner; an embedding host supplies its own `SecretProvider` | the platform vault |
 | Output references | `blob://sha256/<hex>` in a local store under `<run_dir>/blobs`, replaceable through the `OutputStore` capability; a structured value's reference carries `#json`. Below Fabro's 100 KiB threshold, a fork also offloads the `for_each` source list (any size) and other fork snapshot values above 4 KiB from every branch child's context, and a fan-in publishes `parallel.results` above 4 KiB as a reference; the agent and prompt preambles and a nested workflow's start context put those back, `stdin_source` and prompted fan-ins read them back, and a condition sees the reference text | `blob://sha256/<hex>` in platform storage, materialized as `file://…/blobs/<hex>.json` for handlers; nothing under 100 KiB is ever a reference |
 | Prompt events | `StepEvent::Custom` with `kind = "fabro.prompt"` / `"fabro.prompt.completed"` (see `crates/fabro/FORMAT.md`) | `stage.prompt` / `prompt.completed` |
-| MCP events | `StepEvent::Custom` with `kind = "fabro.mcp.server"` (`starting`, `ready`, `failed`, `disconnected`, `stopped`; `ready` and `failed` mirror Pebble's `McpServerReady` and `McpServerFailed` and carry its `startup_ms` as `duration_ms`, `disconnected` mirrors `McpServerDisconnected` once per closed connection) and `"fabro.mcp.tool"` (one per proxied call, derived from Pebble's `ToolCallCompleted`, with `status` (`ok`, `error`, `timeout`, `failed`, `cancelled`) and `duration_ms`); the failure line `mcp server \`<name>\` failed to start: ...` on the node's stderr | `agent.mcp.ready` / `agent.mcp.failed`; tool activity only through the generic tool events |
+| MCP events | Pebble's own events in `agent_activity`: `McpServerReady`, `McpServerFailed`, `McpServerDisconnected`, and `ToolCallStarted`/`ToolCallCompleted` under `mcp__<server>__<tool>` (`error_kind` `timeout`, `unavailable`, `cancelled`, `denied`, ...); one `StepEvent::Custom` kind, `fabro.mcp.unavailable`, for a server Petri never named to Pebble because its secret is unavailable; the failure line `mcp server \`<name>\` failed to start: ...` on the node's stderr for both. No Petri restatement of Pebble's server or tool facts (decision `pebble-events-are-the-agent-contract`) | `agent.mcp.ready` / `agent.mcp.failed` / `agent.mcp.disconnected`; tool activity only through the generic tool events |
 | MCP catalog references | `[run.agent.mcps.<name>] id = "..."` is refused at load: the standalone runner has no server-managed catalog | resolved from the server's catalog |
 | MCP secrets | `{{ secrets.NAME }}` resolves as a whole `env` or `headers` value only, from `PETRI_SECRET_NAME` (or the host's provider) at launch; a token inside a command, script or URL is refused at load | resolved anywhere in the transport strings at the run boundary from the vault |
 | MCP `sandbox` transport | launched through the scope's execution environment and reached through the provider's preview URL (the host's loopback, the Docker plugin's port forward into the container, Daytona's preview link with its token header); a provider without preview URLs fails the server with a named reason | a Daytona preview URL; local sandboxes fall back to localhost |
@@ -379,7 +379,7 @@ default model before the first stage) and `fallback-repeated-tool-effect`
 | Model fallback: unknown selectors | a selector no catalog row names is skipped with a notice unless the provider allows passthrough models | passed through for the provider to validate |
 | Model fallback: configuration errors | a bad chain (provider-named or qualified key, two keys for one model, unknown key or provider) fails the first LLM stage with class `bad_config` | fails run start |
 | Model fallback: ACP agents | no plan; the ACP command owns its model | the same |
-| Model fallback: events | `StepEvent::Custom` kinds `fabro.fallback.{plan,route,usage,failover,stop}` and the once-per-run stderr notices; on an agent node the failed route's `usage`, the `failover` and the next `route` mirror Pebble's `RouteFailover`, the final route's `usage` is the prompt report less the failed routes, and `stop` mirrors `RouteFailoverStopped` | `agent.failover` events and run notices |
+| Model fallback: events | `StepEvent::Custom` kind `fabro.fallback.plan` and the once-per-run stderr notices; every route fact is Pebble's own event in `agent_activity` (`SessionStarted`, `RouteFailover`, `RouteFailoverStopped`, `AssistantMessage`), with the `model fallback: ...` line on the node's stderr; no `route`, `usage`, `failover` or `stop` kinds and no `metrics.custom.fallback.*` (decision `pebble-events-are-the-agent-contract`) | `agent.failover` events and run notices |
 | Model fallback: recovery | a resumed node starts a new plan at position 0 on the primary; a request in flight at the crash may be sent again | sessions persist server-side |
 | MCP server lifetime | one set of servers per agent node session, started by Pebble while the agent is built and closed with it (a retained thread's next node starts its own); a resumed run starts them again | one set per agent session; the same |
 
@@ -613,10 +613,12 @@ profile's filenames Pebble's own), the environment helpers
 ledger now reads, fallback routes as a builder option, MCP servers as a tool
 source, a steering bus, and the command line as a library. Petri takes the
 first four here, MCP servers as a tool source (`fabro_steps::pebble::mcp`),
-fallback routes (`fabro_steps::fallback` plans, Pebble runs; the session's
-sink mirrors `RouteFailover` and `RouteFailoverStopped`) and the steering
-bus (one per node run; deliveries are follow-ups, buffered until the session
-attaches); the command line library is pinned but not adopted.
+fallback routes (`fabro_steps::fallback` plans, Pebble runs and reports;
+Pebble's `RouteFailover` and `RouteFailoverStopped` are the record) and the
+steering bus (one per node run; deliveries are follow-ups, buffered until
+the session attaches); the command line library is pinned but not adopted.
+Pebble's event stream is the contract for every fact Pebble knows (decision
+`pebble-events-are-the-agent-contract`).
 `petri-readiness-gaps` added the two capabilities the
 readiness review's G07 and G14 asked for and changed no existing behavior:
 `CodingAgentOptions::with_max_tool_rounds` (a prompt ends with
