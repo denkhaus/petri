@@ -29,7 +29,7 @@ subset; the unconfigured path stays the standalone runner.
 | The local hook system, or a replacement | `execution::hooks::HookService` behind `HookAdapter` and the `HookServiceHandle` capability; the standalone service is `fabro_steps::hooks::LocalHooks`. Every point, the ones steps ask themselves included (`ScopeReady`, `RunStarted`, the start stage's admission, `ForkStarted`, `ForkCompleted`, the tool boundary of both agent backends), reaches the one service through that handle, so a replacement receives each exactly once (`embedding::a_hook_service_runs_each_hook_once_at_its_point`). A host that installs its own `ExecutionHooks` and still wants `[[run.hooks]]` calls `register` first and wraps `Runtime::installed_hooks()`, forwarding every point, `run_finished` and `scope_released` included (the `EmbeddingHost` in `embedding_readiness.rs` is the pattern) | `crates/core/execution/HOOKS.md` |
 | Questions and answers | `execution::interview::{Interviewer, InterviewDispatcher}`; `InterviewRequest` carries the interaction identity (node, firing, occurrence, invocation path), the question type and choices; `InterviewReply::Answered(Answer)`, expiry, cancellation | `crates/core/execution/src/interview.rs` |
 | Pause, unpause, steer, cancel | `execution::controls` (the control service; `petri run --control <FILE>` is the terminal transport), `RunHandle` for cancel and kill | `crates/core/execution/src/controls.rs` |
-| The public event stream | `execution::events::{EventProjector, RunEventSink, replay_run}`; `EVENT_CONTRACT_VERSION` | `crates/core/execution/EVENTS.md` |
+| The public event stream | `execution::events::{EventProjector, RunEventSink, replay_run}`; `EVENT_CONTRACT_VERSION`. The stream is lossless for replay: `execution::events::invert` rebuilds the coordinator log and every execution's external engine records from the events, and `verify_lossless` proves it over a run dir | `crates/core/execution/EVENTS.md` ("Inversion") |
 | Durable inspection of a run directory | `execution::inspect::inspect_run` (`petri inspect --run-dir --json`), `INSPECT_FORMAT_VERSION` | `crates/core/execution/INSPECT.md` |
 | Output references and large values | the `OutputStore` capability (`BlobStore`); the default is a local store under `<run_dir>/blobs` writing `blob://sha256/<hex>` | `crates/fabro/steps/src/blobs.rs` |
 | Secrets | the `SecretProvider` capability; the standalone runner reads `PETRI_SECRET_<NAME>`; records are masked before they are appended | `crates/core/executor/src/secrets.rs` |
@@ -151,7 +151,7 @@ acknowledgement gates the next step of the run:
 
 | Version | Where | Rule |
 |---|---|---|
-| `EVENT_CONTRACT_VERSION` (1) | `execution::events` | additive within a version; a host checks it before projecting |
+| `EVENT_CONTRACT_VERSION` (2) | `execution::events` | additive within a version; a host checks it before projecting. Version 2 added the fields that make the stream invert to the records replay consumes, and the `graph_registered` event |
 | `INSPECT_FORMAT_VERSION` (1) | `execution::inspect` | the `petri inspect` document's field contract |
 | the run-directory format (`run.json`) and the coordinator record version (3, with `recorded_at` on every record) | `execution::store` | a run written by a newer or older format is refused, never migrated |
 | the engine log version (`Log` records, v9, with `recorded_at` beside every persisted record) | `engine::log` | a log whose version the runner does not speak is refused; replay must reproduce the log byte for byte or inspection reports corruption |
