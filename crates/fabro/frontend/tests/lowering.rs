@@ -1611,6 +1611,34 @@ fn unknown_attributes_are_refused_with_the_closest_name_as_the_hint() {
     );
 }
 
+/// `[run.model.fallbacks]` rides on the `start` node as written, beside
+/// every LLM node's copy, so the start stage can check the table against
+/// the catalog before anything runs.
+#[test]
+fn the_start_node_carries_the_fallback_table() {
+    let files = files(&[(
+        "wf/workflow.toml",
+        "[run.model.fallbacks]\n\"gpt-5.6-sol\" = [\"anthropic:claude-sonnet-5\"]\n",
+    )]);
+    let lowered = load(
+        "wf/workflow.fabro",
+        &dot(r#"
+            a [prompt="x", backend="api", model="gpt-5.6-sol"]
+            start -> a -> exit
+        "#),
+        &files,
+        &CompileInputs::new(),
+    );
+    let graph = lowered.graph.expect("a graph");
+    let table = json!({ "gpt-5.6-sol": ["anthropic:claude-sonnet-5"] });
+    assert_eq!(node(&graph, "start").step.config["fallbacks"], table);
+    assert_eq!(node(&graph, "a").step.config["fallbacks"], table);
+    assert!(
+        node(&graph, "exit").step.config.get("fallbacks").is_none(),
+        "only `start` checks the table"
+    );
+}
+
 #[test]
 fn unbounded_agent_repairs_are_rejected() {
     assert!(
