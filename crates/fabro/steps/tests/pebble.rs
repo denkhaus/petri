@@ -8,6 +8,7 @@ use std::time::Duration;
 use fabro_steps::pebble::PebbleClient;
 use fabro_steps::pebble::environment::PebbleEnvironment;
 use fabro_steps::register;
+use frontend::MapFiles;
 use ir::{CancelScopeId, Graph, RunStatus, ScopeId};
 use lithos_llm::types::ReasoningEffort;
 use pebble_coding_agent::environment::{Environment, ExecRequest};
@@ -29,7 +30,7 @@ use testkit::{RunDir, output_of};
 use tokio::fs;
 use tokio::process::Command;
 use tokio::sync::mpsc;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
 fn graph(extra: &str) -> Graph {
@@ -401,6 +402,114 @@ async fn steering_and_attributed_events_reach_the_native_session() {
         events
             .iter()
             .any(|event| event["event"]["event"].get("ToolCallCompleted").is_some())
+    );
+}
+
+/// Reports the firing of node `a` once its step has started: the native
+/// session's build begins at once and, here, waits on an MCP server that
+/// never answers.
+struct BuildStarted(mpsc::Sender<ir::FiringId>);
+impl EventObserver for BuildStarted {
+    fn on_record(&self, record: &EventRecord, _recorded_at: u64, state: &EngineState) {
+        if let Event::StepStarted { firing, .. } = &record.event
+            && state
+                .firing_node(*firing)
+                .and_then(|id| state.graph().node(id))
+                .is_some_and(|node| node.name == "a")
+        {
+            let _ = self.0.try_send(*firing);
+        }
+    }
+}
+
+/// A delivery that arrives while the session is still being built waits on
+/// the node run's steering bus and reaches the session when it attaches, in
+/// the mode it was sent: a follow-up, which runs as its own turn once the
+/// first answer is reached. Here Pebble holds the build on an MCP server
+/// that never completes its handshake; the node proceeds without it.
+#[tokio::test]
+async fn a_delivery_before_the_session_is_built_runs_as_a_follow_up() {
+    let dir = RunDir::new("pebble-deliver-before-build");
+    let (client, provider) = scripted_client(vec![
+        ScriptedCall::response(text_response("original answer")),
+        ScriptedCall::response(text_response("follow-up answer")),
+    ]);
+    let files = MapFiles(BTreeMap::from([(
+        "wf/workflow.toml".to_string(),
+        "[run.agent.mcps.slow]\ntype = \"stdio\"\ncommand = [\"sleep\", \"5\"]\nstartup_timeout = \
+         \"1s\"\n"
+            .to_string(),
+    )]));
+    let lowered = frontend_fabro::load(
+        "wf/w.fabro",
+        r#"digraph T {
+        graph [backend="api", default_model="test/model"]
+        start [shape=Mdiamond]
+        a [prompt="Make the change and verify it"]
+        exit [shape=Msquare]
+        start -> a -> exit
+    }"#,
+        &files,
+        &CompileInputs::new(),
+    );
+    assert!(
+        !lowered.diagnostics.has_errors(),
+        "{:?}",
+        lowered.diagnostics
+    );
+    let graph = lowered.graph.expect("valid workflow");
+    let (send, mut receive) = mpsc::channel(1);
+    let rt = runtime(&dir, client).observe(Arc::new(BuildStarted(send)));
+    let driver = rt.driver(graph);
+    let handle = driver.handle();
+    let run = tokio::spawn(driver.run());
+    let firing = timeout(Duration::from_secs(10), receive.recv())
+        .await
+        .expect("the step starts")
+        .expect("firing");
+    // The step is started before its control channel is live; the build
+    // holds for the server's startup timeout, so a short retry lands the
+    // delivery well inside it.
+    let mut disposition = DeliverDisposition::NotLive;
+    for _ in 0..50 {
+        disposition = handle
+            .deliver(
+                firing,
+                ir::Control::Deliver(json!({"text":"Also check the docs"})),
+            )
+            .await;
+        if disposition == DeliverDisposition::Delivered {
+            break;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(disposition, DeliverDisposition::Delivered);
+    let report = timeout(Duration::from_secs(30), run)
+        .await
+        .expect("run settles")
+        .expect("task");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert_eq!(output_of(&report, "a")["text"], "follow-up answer");
+    let requests: Vec<String> = provider
+        .requests()
+        .iter()
+        .map(|request| serde_json::to_string(request).expect("request"))
+        .collect();
+    assert_eq!(requests.len(), 2, "the prompt, then the follow-up turn");
+    assert!(
+        !requests[0].contains("Also check the docs"),
+        "the first turn is the prompt alone: {}",
+        requests[0]
+    );
+    assert!(
+        requests[1].contains("Also check the docs"),
+        "the follow-up ran after the first answer: {}",
+        requests[1]
     );
 }
 

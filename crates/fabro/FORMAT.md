@@ -760,7 +760,11 @@ totals from the `agent_activity` events (`AssistantMessage` payloads of
 sessions with a parent).
 
 `Control::Deliver` accepts a string or `{ "text": "..." }` and queues a
-follow-up. A delivered core `Answer` naming one of the session's open
+follow-up: a new user turn once the current answer is reached. Deliveries
+ride Pebble's steering bus, one per node run, in its follow-up mode
+(`SteeringBus::follow_up`); text delivered while the session is still being
+built waits on the bus and reaches the session when it attaches, in the same
+mode. A delivered core `Answer` naming one of the session's open
 questions answers it instead (below). Cancellation settles the active prompt
 and shuts down its session.
 Kill stops active tool processes immediately. A driver hard abort can discard
@@ -800,7 +804,10 @@ compaction summary call, which Pebble bills to the prompt that compacted;
 `[run.model.fallbacks]` is applied by the native agent and prompt steps
 (`fabro_steps::fallback`). A stage runs on a *plan*: the canonical route its
 `model` and `provider` resolve to, then the targets the chain keyed by that
-canonical model id lists, in order. The chain is resolved once per run as
+canonical model id lists, in order. Petri builds the plan; on a native agent
+node Pebble runs it (the plan's remaining routes are the builder's
+`fallback_routes`) and reports every move on its own event stream, which is
+the record of the routes (below). The chain is resolved once per run as
 Fabro's server resolves it at run start: a key that names a provider, a
 provider-qualified key, two keys that resolve to one model, or an unknown key
 fail the first LLM stage with class `bad_config`; a candidate on a provider
@@ -819,17 +826,21 @@ a target whose catalog row advertises no levels keeps the request. `speed`
 and `max_tokens` travel unchanged. The original route is filtered out of its
 own chain.
 
-A model error moves the plan when it is eligible and a target remains:
-eligible are the kinds the reference retries (`rate_limit`, `server`,
-`network`, `stream_decode`, `provider`, `response_decode`), provider
-availability failures (`authentication`, `access_denied`, `not_found`,
-`quota_exceeded`), a `timeout`, and a `content_filter` whose provider code is
-`refusal`. `invalid_request`, `context_length`, any other `content_filter`,
-`configuration`, `model_selection`, `resource_limit`, `middleware`, and an
+A model error moves the plan when it is eligible and a target remains.
+Eligibility is `lithos-llm`'s `failover_eligible`, the rule Pebble applies:
+a failure the client classifies as retryable (whatever its kind), the
+provider-local kinds `rate_limit`, `server`, `network`, `stream_decode`,
+`timeout`, `authentication`, `access_denied`, `not_found` and
+`quota_exceeded`, and a `content_filter` whose provider code is `refusal`.
+`invalid_request`, `context_length`, any other `content_filter`,
+`configuration`, `model_selection`, `resource_limit`, `middleware`, a
+`provider` or `response_decode` failure the client would not retry, and an
 unknown kind end the stage with class `llm:<kind>`. Cancellation, the
 driver's attempt budget, and any non-LLM agent error (a tool failure, a
-missing skill) never start fallback. The mapping is written before the
-implementation in `.ai/reviews/fabro-unified/task12-fallback.md`.
+missing skill) never start fallback. The reference's own mapping, written in
+`.ai/reviews/fabro-unified/task12-fallback.md`, differs on two classes: it
+moved a `provider` or `response_decode` failure whatever the retry class,
+and never moved a retryable failure of another kind.
 
 The plan is fixed when the stage opens. An output-repair turn runs on the
 route the plan reached; advancing to a target never activates the target's
@@ -838,29 +849,30 @@ continues on the route reached (position and all) and builds no plan of its
 own; a workflow retry (a new firing) builds a new plan at position 0. ACP
 agents have no plan: the command owns their model.
 
-A native session keeps its conversation across the change: the failed
-session's durable record resumes on the next route with Pebble's
-`ResumeMode::UseModel`, the same session id continuing. Two continuations
-exist. When the failed request carried the prompt itself (the record ends
-with that user turn), the turn is dropped from the record and the prompt is
-sent again on the new route (`replay_prompt`). When work happened first (the
-record ends with tool results or an assistant turn), the next model continues
-that unfinished turn with no new input (`continue_turn`, Pebble's
-`continue_prompt`): it answers the committed tool results as they stand, and
-the tool that ran is not run again. Fabro rebuilds the session from the
-original prompt on every failover, which would repeat the tool; this is an
-accepted difference. A prompt node re-sends its
+A native session keeps its conversation across the change: Pebble resumes
+the failed session's durable record on the next route with
+`ResumeMode::UseModel`, the same session id continuing, and carries the
+prompt on from the history as it stands. Two continuations exist, and Pebble
+names the one it took on its `RouteFailover` event. When nothing this prompt
+committed is in the conversation (the failed request carried the prompt
+itself), the prompt is asked again on the new route (`replay_prompt`). When
+work happened first (the conversation holds tool results or an assistant
+turn this prompt committed), the next model continues that unfinished turn
+with no new input (`continue_turn`): it answers the committed tool results as
+they stand, and the tool that ran is not run again. Fabro rebuilds the
+session from the original prompt on every failover, which would repeat the
+tool; this is an accepted difference. A prompt node re-sends its
 messages, repair history included, on the next route (`replay_prompt`).
 
 Three retry mechanisms exist and each has one owner: the client's own
 same-route retries (`PETRI_LLM_RETRY_ATTEMPTS`, default 3), Pebble's turn
-replay after a broken response stream (`PETRI_AGENT_TURN_REPLAY_ATTEMPTS`,
-unset keeps Pebble's default), and this chain, which starts only once both
-are spent. `PETRI_LLM_TIMEOUT_MS` bounds one client call, retries included;
-its expiry is a `timeout` and eligible. Both same-route mechanisms report on
-the agent's own event stream as Pebble's `LlmRetry` event, with `phase`
-`open` for a client retry and `consume` for a turn replay: Petri installs
-Pebble's `RetryEventObserver` on the client it builds.
+replay after a broken response stream (Pebble's default policy), and this
+chain, which Pebble starts only once both are spent. `PETRI_LLM_TIMEOUT_MS`
+bounds one client call, retries included; its expiry is a `timeout` and
+eligible. Both same-route mechanisms report on the agent's own event stream
+as Pebble's `LlmRetry` event, with `phase` `open` for a client retry and
+`consume` for a turn replay: Petri installs Pebble's `RetryEventObserver` on
+the client it builds.
 
 Recovery: nothing of a plan is durable. A run resumed after a crash starts
 the interrupted node's attempt again with a new plan at position 0, on the
@@ -871,21 +883,35 @@ primary, and a tool effect that ran before the crash may run again: the
 existing at-least-once limit for external effects applies to fallback as to
 every other stage.
 
-Events: five `StepEvent::Custom` kinds, each with `node`, `firing` and
-`attempt`. `fabro.fallback.plan` once per stage (`requested`, `routes[]` with
-`position`, `provider`, `model`, `reasoning_effort`, `speed`, and
-`notices[]` with `code`, `level`, `message`); `fabro.fallback.route` each
-time a route becomes active (`position`, the route, `reused`, `session`);
-`fabro.fallback.usage` after every model turn (`position`, the route,
-`outcome` `ok` or `error`, `usage`, `cost_usd_micros`, `inference_ms`,
-`tool_ms`); `fabro.fallback.failover` on each advance (`position`, `from`,
-`to` with its controls, `original`, `requested_reasoning_effort`, `error`
-with `kind`, `message`, `provider`, `status`, `provider_code`, `retry`,
-`eligible`, and `continuation`); `fabro.fallback.stop` when a model error
-ends the stage (`reason` `ineligible` or `exhausted`, the route, `error`). A
-cancellation emits no stop. The stage metrics carry `fallback.position`,
-`fallback.route` and `fallback.original`. `crates/petri/lib/tests/fallback_events.rs`
-rebuilds a stage's outcome and per-route accounting from the public stream.
+Events. Petri emits one `StepEvent::Custom` kind, for the fact Pebble cannot
+know: `fabro.fallback.plan`, once per stage that builds a plan (`node`,
+`firing`, `attempt`, `requested`, `routes[]` with `position`, `provider`,
+`model`, `reasoning_effort`, `speed`, and `notices[]` with `code`, `level`,
+`message`); a node that reuses a retained thread emits none. Every route fact
+is Pebble's own event, recorded as `agent_activity` under the node:
+`SessionStarted` (`provider`, `model`) for the route each session starts on,
+the primary and then each route a failover moved to; `RouteFailover` (`from`
+and `to` as `provider/model`, `attempt`, the failed route's `usage`,
+`cost_usd_micros`, `inference_ms` and `tool_ms`, `error` with `llm_kind`,
+`message`, `provider`, `status`, `provider_code` and `retry`, and
+`continuation` `replay_prompt` or `continue_turn`); `RouteFailoverStopped`
+(`route`, `attempt`, `reason` `ineligible` or `exhausted`, `error`) when a
+model error ends the prompt although the plan named a fallback route (a plan
+with no usable target names none, so Pebble publishes no stop and the stage
+fails with the primary's error; a cancelled prompt publishes none either);
+and `AssistantMessage` (`model`, `usage`, `cost_usd_micros`) for each answer.
+The prompt report Pebble hands the session names the route the prompt ended
+on and its totals; the stage metrics carry Pebble's totals under
+`pebble.*` and nothing per route. A prompt node (`tab`) emits the plan alone
+and reports its own move on stderr. `crates/petri/lib/tests/fallback_events.rs`
+rebuilds a stage's outcome and per-route accounting from the public stream;
+decision `pebble-events-are-the-agent-contract` records the kinds this
+replaced.
+
+On a native agent node the session names the plan's remaining routes to
+Pebble and puts one line on the node's stderr per move (`model fallback:
+<from> failed (<kind>); continuing on <to> (attempt <n> of the plan)`, from
+Pebble's `RouteFailover`). Nothing else about the routes is Petri's to say.
 
 ### MCP servers
 
@@ -939,22 +965,21 @@ Failure behavior follows Fabro. A server that does not start (a launch error,
 no handshake within `startup_timeout`, a protocol error) is reported by
 Pebble (`McpServerFailed`) with the reason, including the tail of its own
 error output; Petri writes the reason as a line on the node's stderr (`mcp
-server \`<name>\` failed to start: ...`) and as a `failed` event, and the
-session proceeds with the tools of the servers that started. A server whose
-`env` or `headers` secret the run cannot supply is reported the same way by
-Petri and never named to Pebble. A result the server marks `isError` reaches
-the model as the tool's error text. A call with no answer within
-`tool_timeout`, a call the agent cancelled, and a call to a server whose
-connection closed each reach the model as a failed call with a reason; the
-protocol's `notifications/cancelled` is sent for the first two. A server whose
-connection closes mid-session is reported `disconnected` once, by the call
-that first found it closed (Pebble's `McpServerDisconnected`, before that
-call's own failure), and every later call to it fails at once; nothing
+server \`<name>\` failed to start: ...`), and the session proceeds with the
+tools of the servers that started. A server whose `env` or `headers` secret
+the run cannot supply is never named to Pebble: Petri writes the same stderr
+line and emits `fabro.mcp.unavailable` (below). A result the server marks
+`isError` reaches the model as the tool's error text. A call with no answer
+within `tool_timeout`, a call the agent cancelled, and a call to a server
+whose connection closed each reach the model as a failed call with a reason;
+the protocol's `notifications/cancelled` is sent for the first two. A server
+whose connection closes mid-session is reported once by Pebble
+(`McpServerDisconnected`, from the call that first found it closed, before
+that call's own failure), and every later call to it fails at once; nothing
 reconnects within a session. When Pebble's build fails after the servers
 started, Pebble shuts them down before it reports the failure, so a server
-launched in the environment does not outlive the node; the node has emitted
-`starting` for each server and reports the build's error as its own, with no
-`ready`, `failed` or `stopped`. A retained thread's next node names the same servers again, so
+launched in the environment does not outlive the node; the node reports the
+build's error as its own. A retained thread's next node names the same servers again, so
 Pebble starts its own and registers the same names, and the conversation's
 earlier tool calls stay valid; a resumed run starts every thread again
 anyway. Secrets in `env` and `headers` are resolved when the servers are
@@ -963,26 +988,29 @@ masker applies to every event. Sub-agents: Pebble registers MCP tools as
 inheritable by child sessions (readiness item 9d verifies that against the
 reference). ACP agents receive no MCP servers (Fabro passes none either).
 
-Two `StepEvent::Custom` kinds carry the facts, each with `node`, `firing` and
-`attempt`. Petri's session emits `starting` and `stopped` itself; its event
-sink mirrors the rest from Pebble's events:
+Events. Pebble's own events, recorded as `agent_activity` under the node,
+are the record of the servers and their calls: `McpServerReady` (`server`,
+`tools` as `[{ name, original_name }]`, `startup_ms`: launch to tools
+listed) or `McpServerFailed` (`server`, `error`, `startup_ms`) once per
+server Pebble was given, on the stream once the agent is up;
+`McpServerDisconnected` (`server`, `error`) once, when a call first finds the
+connection closed, before that call's own completion; and `ToolCallStarted`
+and `ToolCallCompleted` under `mcp__<server>__<tool>` for every call, with
+Pebble's `tool_call_id`, `output`, `is_error` and `error_kind` (`timeout` for
+no answer within `tool_timeout`, `unavailable` for a call the closed or
+absent server could not take, `cancelled`, `denied` for a call a hook
+blocked before it reached the server, `invalid_arguments`). Pebble closes the
+servers with the agent and publishes nothing for the shutdown; the server's
+own log or process is the evidence. Petri emits one `StepEvent::Custom`
+kind, for the one fact Pebble cannot know:
 
 | `kind` | Fields | When |
 |---|---|---|
-| `fabro.mcp.server` | `server`, `transport` (`stdio`, `http`, `sandbox`), `placement` (`host`, `remote`, `scope`), `phase`; `ready` adds `tool_count`, `tools` (`[{ name, original_name }]` sorted by `name`) and `duration_ms` (Pebble's `startup_ms`: launch to tools listed); `failed` adds `error` and `duration_ms` (launch to the failure; `null` for a server Petri never named to Pebble because its secret is unavailable); `disconnected` adds `error`; `stopped` adds nothing (Pebble reports no timing for the shutdown) | `starting` once the servers are named to the builder, before the agent is built; then `ready` or `failed` (Pebble's `McpServerReady` / `McpServerFailed`, on the stream once the agent is up); `disconnected` once, when a call first finds the connection closed (Pebble's `McpServerDisconnected`, before that call's `fabro.mcp.tool`); `stopped` after the agent's shutdown closed the server |
-| `fabro.mcp.tool` | `server`, `name` (the qualified name the model called), `tool` (the server's own name), `tool_call_id`, `status` (`ok`, `error`, `timeout`, `failed`, `cancelled`), `duration_ms` (between Pebble's `ToolCallStarted` and `ToolCallCompleted`), `error` (the `isError` text or the failure reason; `null` otherwise) | on Pebble's `ToolCallCompleted` for an `mcp__<server>__<tool>` name: `ok` for a result, `error` for a result the server marked as an error, `timeout` for a call with no answer within `tool_timeout` (Pebble's `ToolErrorKind::Timeout`; `error` carries the reason), `failed` for a call that did not reach the server or came back malformed, `cancelled` for a call the agent cancelled |
+| `fabro.mcp.unavailable` | `node`, `firing`, `attempt`, `server`, `error` | once per configured server Petri never named to Pebble because a secret its `env` or `headers` needs is unavailable, before the agent is built; the same reason is a `mcp server \`<name>\` failed to start: ...` line on the node's stderr |
 
-A consumer accounts for a run's MCP activity from these alone: every server a
-node configured has a `starting` and a `ready` or `failed`, and every server
-that was `ready` has a `stopped`; every proxied call has one `fabro.mcp.tool`;
-Pebble's own `ToolCallStarted` and `ToolCallCompleted` in the `pebble`
-envelope carry the same qualified name and call id. A hook that blocks an MCP
-call, or arguments Pebble refuses before the call, produce Pebble's
-`ToolCallCompleted` (`error_kind` `denied` or `invalid_arguments`) and the
-hook's own event, and no `fabro.mcp.tool`, because the call never reached the
-server. These are the events Petri emitted from its own MCP client, with one
-difference: `stopped` carries no `duration_ms`, because Pebble reports no
-timing for a server's shutdown.
+Petri emitted `fabro.mcp.server` (`starting`, `ready`, `failed`,
+`disconnected`, `stopped`) and `fabro.mcp.tool` until 2026-09-12; decision
+`pebble-events-are-the-agent-contract` records their removal.
 ### Skills
 
 A skill is a `<dir>/<name>/SKILL.md` file: a frontmatter block with `name:`

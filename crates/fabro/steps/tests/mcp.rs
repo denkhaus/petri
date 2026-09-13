@@ -1,7 +1,8 @@
 //! MCP servers on native sessions, readiness item 9b: `[run.agent.mcps]`
 //! starts real servers (the scripted `mcp_server.py`), their tools reach the
-//! model through Pebble's normal tool path, and every fact is a step event.
-//! A scripted model, real Petri execution scopes, no Fabro.
+//! model through Pebble's normal tool path, and every fact is on Pebble's own
+//! event stream, recorded in the `pebble` envelope. A scripted model, real
+//! Petri execution scopes, no Fabro.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -11,7 +12,6 @@ use std::time::Duration;
 use std::{env, fs};
 
 use fabro_steps::pebble::PebbleClient;
-use fabro_steps::pebble::mcp::{SERVER_EVENT, TOOL_EVENT};
 use fabro_steps::register;
 use frontend::{CompileInputs, MapFiles};
 use ir::{CancelScopeId, Graph, RunStatus, StepEvent, Value};
@@ -62,37 +62,62 @@ impl Customs {
         self.0.lock().expect("not poisoned").clone()
     }
 
-    /// The server lifecycle events of `server`, as `(node, phase)`.
-    fn phases(&self, server: &str) -> Vec<(String, String)> {
+    /// Pebble's events, as `(node, variant, payload)`, in order.
+    fn pebble(&self) -> Vec<(String, String, Value)> {
         self.all()
             .into_iter()
-            .filter(|(_, v)| v["kind"] == SERVER_EVENT && v["server"] == server)
-            .map(|(node, v)| (node, v["phase"].as_str().unwrap_or("?").to_owned()))
-            .collect()
-    }
-
-    fn server_events(&self, server: &str, phase: &str) -> Vec<Value> {
-        self.all()
-            .into_iter()
-            .filter(|(_, v)| {
-                v["kind"] == SERVER_EVENT && v["server"] == server && v["phase"] == phase
+            .filter(|(_, v)| v["kind"] == "pebble")
+            .filter_map(|(node, v)| match &v["event"]["event"] {
+                Value::String(name) => Some((node, name.clone(), Value::Null)),
+                Value::Object(map) => map
+                    .iter()
+                    .next()
+                    .map(|(name, payload)| (node, name.clone(), payload.clone())),
+                _ => None,
             })
-            .map(|(_, v)| v)
             .collect()
     }
 
-    fn tool_events(&self) -> Vec<(String, Value)> {
-        self.all()
+    /// The server lifecycle events Pebble published for `server`, as
+    /// `(node, variant)`, in order.
+    fn server_variants(&self, server: &str) -> Vec<(String, String)> {
+        self.pebble()
             .into_iter()
-            .filter(|(_, v)| v["kind"] == TOOL_EVENT)
+            .filter(|(_, variant, payload)| {
+                variant.starts_with("McpServer") && payload["server"] == server
+            })
+            .map(|(node, variant, _)| (node, variant))
             .collect()
     }
 
-    /// The tool call statuses, in order.
-    fn tool_statuses(&self) -> Vec<String> {
-        self.tool_events()
+    fn server_events(&self, server: &str, variant: &str) -> Vec<Value> {
+        self.pebble()
             .into_iter()
-            .map(|(_, v)| v["status"].as_str().unwrap_or("?").to_owned())
+            .filter(|(_, v, payload)| v == variant && payload["server"] == server)
+            .map(|(_, _, payload)| payload)
+            .collect()
+    }
+
+    /// Pebble's `ToolCallCompleted` for MCP tools, as `(node, payload)`, in
+    /// order.
+    fn tool_completions(&self) -> Vec<(String, Value)> {
+        self.pebble()
+            .into_iter()
+            .filter(|(_, variant, payload)| {
+                variant == "ToolCallCompleted"
+                    && payload["tool_name"]
+                        .as_str()
+                        .is_some_and(|name| name.starts_with("mcp__"))
+            })
+            .map(|(node, _, payload)| (node, payload))
+            .collect()
+    }
+
+    /// How each MCP call ended, in Pebble's words, in order.
+    fn tool_outcomes(&self) -> Vec<String> {
+        self.tool_completions()
+            .into_iter()
+            .map(|(_, payload)| outcome_of(&payload))
             .collect()
     }
 
@@ -118,6 +143,17 @@ impl Customs {
             })
             .collect()
     }
+}
+
+/// How a completed call ended: `ok`, or Pebble's `error_kind` (`execution`
+/// for a result the server itself marked as an error, `timeout`,
+/// `unavailable`, `cancelled`, `denied`, ...); `error` when Pebble named no
+/// kind.
+fn outcome_of(payload: &Value) -> String {
+    if payload["is_error"] == false {
+        return "ok".to_owned();
+    }
+    payload["error_kind"].as_str().unwrap_or("error").to_owned()
 }
 
 fn lower(dot: &str, toml: &str) -> Graph {
@@ -299,16 +335,13 @@ async fn a_stdio_server_exposes_tools_that_act_on_the_workspace_and_stops_with_t
         read(&log),
         "started\ninitialize\ncall write_file\ncall echo\ncall echo\nshutdown\n"
     );
-    // Lifecycle and tool events, attributed to the node.
-    assert_eq!(customs.phases("notes"), [
-        ("agent".to_owned(), "starting".to_owned()),
-        ("agent".to_owned(), "ready".to_owned()),
-        ("agent".to_owned(), "stopped".to_owned()),
-    ]);
-    let ready = &customs.server_events("notes", "ready")[0];
-    assert_eq!(ready["transport"], "stdio");
-    assert_eq!(ready["placement"], "host");
-    assert_eq!(ready["tool_count"], 6);
+    // Pebble's own lifecycle and tool events, attributed to the node.
+    assert_eq!(customs.server_variants("notes"), [(
+        "agent".to_owned(),
+        "McpServerReady".to_owned()
+    )]);
+    let ready = &customs.server_events("notes", "McpServerReady")[0];
+    assert_eq!(ready["tools"].as_array().map(Vec::len), Some(6), "{ready}");
     let names: Vec<&str> = ready["tools"]
         .as_array()
         .expect("tools")
@@ -324,17 +357,14 @@ async fn a_stdio_server_exposes_tools_that_act_on_the_workspace_and_stops_with_t
         "mcp__notes__write_file",
     ]);
     assert_eq!(ready["tools"][5]["original_name"], "write_file");
-    // Pebble's launch-to-tools-listed time rides on `ready`.
-    assert!(ready["duration_ms"].is_u64(), "{ready}");
-    let tools = customs.tool_events();
-    assert_eq!(customs.tool_statuses(), ["ok", "ok", "ok"]);
+    // Pebble's launch-to-tools-listed time rides on the event.
+    assert!(ready["startup_ms"].is_u64(), "{ready}");
+    let tools = customs.tool_completions();
+    assert_eq!(customs.tool_outcomes(), ["ok", "ok", "ok"]);
     assert_eq!(tools[0].0, "agent");
-    assert_eq!(tools[0].1["server"], "notes");
-    assert_eq!(tools[0].1["name"], "mcp__notes__write_file");
-    assert_eq!(tools[0].1["tool"], "write_file");
+    assert_eq!(tools[0].1["tool_name"], "mcp__notes__write_file");
     assert_eq!(tools[0].1["tool_call_id"], "write");
-    assert!(tools[0].1["duration_ms"].is_u64());
-    assert!(tools[0].1["error"].is_null());
+    assert_eq!(tools[0].1["is_error"], false);
     // Pebble ran the calls through its own tool path under the MCP name.
     assert_eq!(customs.pebble_tool_names(), [
         "mcp__notes__write_file",
@@ -399,13 +429,14 @@ script = "echo post:$FABRO_NODE_ID >> tool-hooks.log"
         "{}",
         requests[1]
     );
-    // The server saw one call; the blocked one produced no MCP tool event.
+    // The server saw one call; the blocked one completed on Pebble's side
+    // as denied, before it reached the server.
     assert_eq!(
         read(&log),
         "started\ninitialize\ncall write_file\nshutdown\n"
     );
-    assert_eq!(customs.tool_statuses(), ["ok"]);
-    assert_eq!(customs.tool_events()[0].1["tool_call_id"], "ok");
+    assert_eq!(customs.tool_outcomes(), ["denied", "ok"]);
+    assert_eq!(customs.tool_completions()[1].1["tool_call_id"], "ok");
 }
 
 /// A result the server marks as an error, a call that outlives the tool
@@ -461,73 +492,57 @@ async fn error_results_timeouts_and_a_crashed_server_reach_the_model_with_reason
         "{}",
         requests[4]
     );
-    // A timeout has its own status; the model and the event both get
-    // Pebble's reason.
-    assert_eq!(customs.tool_statuses(), [
-        "error", "timeout", "failed", "failed"
+    // Pebble names each outcome: a result the server marked as an error
+    // (`execution`), a timeout, and two calls the closed server could not
+    // take; the model and the event both carry Pebble's reason.
+    assert_eq!(customs.tool_outcomes(), [
+        "execution",
+        "timeout",
+        "unavailable",
+        "unavailable"
     ]);
-    let tools = customs.tool_events();
-    assert_eq!(tools[0].1["error"], "disk full");
+    let tools = customs.tool_completions();
+    assert_eq!(tools[0].1["output"], "disk full");
     assert!(
-        tools[1].1["error"]
+        tools[1].1["output"]
             .as_str()
             .is_some_and(|error| error.contains("did not answer within 1s")),
         "{}",
         tools[1].1
     );
     assert!(
-        tools[2].1["error"]
+        tools[2].1["output"]
             .as_str()
             .is_some_and(|error| error.contains("failed the call to `crash`")),
         "{}",
         tools[2].1
     );
-    assert!(
-        tools.iter().all(|(_, event)| event["duration_ms"].is_u64()),
-        "{tools:?}"
-    );
-    // The crash is one `disconnected`, from the call that found the
-    // connection closed, before that call's own tool event.
-    assert_eq!(customs.phases("notes"), [
-        ("agent".to_owned(), "starting".to_owned()),
-        ("agent".to_owned(), "ready".to_owned()),
-        ("agent".to_owned(), "disconnected".to_owned()),
-        ("agent".to_owned(), "stopped".to_owned()),
+    // The crash is one `McpServerDisconnected`, from the call that found
+    // the connection closed, before that call's own completion.
+    assert_eq!(customs.server_variants("notes"), [
+        ("agent".to_owned(), "McpServerReady".to_owned()),
+        ("agent".to_owned(), "McpServerDisconnected".to_owned()),
     ]);
-    let disconnected = &customs.server_events("notes", "disconnected")[0];
+    let disconnected = &customs.server_events("notes", "McpServerDisconnected")[0];
     assert!(disconnected["error"].is_string(), "{disconnected}");
-    let order: Vec<(String, String)> = customs
-        .all()
+    let order: Vec<String> = customs
+        .pebble()
         .into_iter()
-        .filter(|(_, v)| {
-            (v["kind"] == SERVER_EVENT && v["server"] == "notes" && v["phase"] == "disconnected")
-                || (v["kind"] == TOOL_EVENT && v["tool_call_id"] == "crash")
+        .filter(|(_, variant, payload)| {
+            (variant == "McpServerDisconnected" && payload["server"] == "notes")
+                || (variant == "ToolCallCompleted" && payload["tool_call_id"] == "crash")
         })
-        .map(|(_, v)| {
-            (
-                v["kind"].as_str().unwrap_or("?").to_owned(),
-                v["phase"]
-                    .as_str()
-                    .or(v["status"].as_str())
-                    .unwrap_or("?")
-                    .to_owned(),
-            )
-        })
+        .map(|(_, variant, _)| variant)
         .collect();
-    assert_eq!(order, [
-        (SERVER_EVENT.to_owned(), "disconnected".to_owned()),
-        (TOOL_EVENT.to_owned(), "failed".to_owned()),
-    ]);
+    assert_eq!(order, ["McpServerDisconnected", "ToolCallCompleted"]);
     assert_eq!(
         read(&log),
         "started\ninitialize\ncall fail\ncall crash\ncrash\n"
     );
-    let phases: Vec<String> = customs
-        .phases("slow")
-        .into_iter()
-        .map(|(_, phase)| phase)
-        .collect();
-    assert_eq!(phases, ["starting", "ready", "stopped"]);
+    assert_eq!(customs.server_variants("slow"), [(
+        "agent".to_owned(),
+        "McpServerReady".to_owned()
+    )]);
 }
 
 /// Cancelling the run while a call waits on the server ends the call, the
@@ -563,13 +578,11 @@ async fn cancellation_ends_a_slow_call_and_the_server_process() {
     let requests = requests_text(&provider);
     let pid = pid_in(&requests[1]);
     wait_gone(&pid).await;
-    assert_eq!(customs.tool_statuses(), ["ok", "cancelled"]);
-    let phases: Vec<String> = customs
-        .phases("notes")
-        .into_iter()
-        .map(|(_, phase)| phase)
-        .collect();
-    assert_eq!(phases, ["starting", "ready", "stopped"]);
+    assert_eq!(customs.tool_outcomes(), ["ok", "cancelled"]);
+    assert_eq!(customs.server_variants("notes"), [(
+        "agent".to_owned(),
+        "McpServerReady".to_owned()
+    )]);
 }
 
 /// A retained thread: the second `full` node continues the conversation and
@@ -610,21 +623,17 @@ async fn a_retained_session_registers_the_tools_again_for_the_next_node() {
         requests[2]
     );
     assert!(requests[3].contains("second note"), "{}", requests[3]);
-    assert_eq!(customs.phases("notes"), [
-        ("plan".to_owned(), "starting".to_owned()),
-        ("plan".to_owned(), "ready".to_owned()),
-        ("plan".to_owned(), "stopped".to_owned()),
-        ("implement".to_owned(), "starting".to_owned()),
-        ("implement".to_owned(), "ready".to_owned()),
-        ("implement".to_owned(), "stopped".to_owned()),
+    assert_eq!(customs.server_variants("notes"), [
+        ("plan".to_owned(), "McpServerReady".to_owned()),
+        ("implement".to_owned(), "McpServerReady".to_owned()),
     ]);
-    let tools = customs.tool_events();
+    let tools = customs.tool_completions();
     assert_eq!(
         tools
             .iter()
-            .map(|(node, v)| (node.as_str(), v["status"].as_str().unwrap_or("?")))
+            .map(|(node, v)| (node.as_str(), outcome_of(v)))
             .collect::<Vec<_>>(),
-        [("plan", "ok"), ("implement", "ok")]
+        [("plan", "ok".to_owned()), ("implement", "ok".to_owned())]
     );
     // Two server lifetimes, one per node.
     assert_eq!(
@@ -658,21 +667,17 @@ async fn a_server_that_fails_to_start_is_reported_and_the_others_serve() {
         report.state.errors()
     );
     assert!(requests_text(&provider)[1].contains("still here"));
-    assert_eq!(
-        customs
-            .phases("broken")
-            .into_iter()
-            .map(|(_, p)| p)
-            .collect::<Vec<_>>(),
-        ["starting", "failed"]
-    );
-    let broken = &customs.server_events("broken", "failed")[0];
+    assert_eq!(customs.server_variants("broken"), [(
+        "agent".to_owned(),
+        "McpServerFailed".to_owned()
+    )]);
+    let broken = &customs.server_events("broken", "McpServerFailed")[0];
     let error = broken["error"].as_str().expect("error");
     assert!(
         error.contains("refusing to start: --fail-init"),
         "the server's stderr is in the reason: {error}"
     );
-    let missing = &customs.server_events("missing", "failed")[0];
+    let missing = &customs.server_events("missing", "McpServerFailed")[0];
     assert!(
         missing["error"]
             .as_str()
@@ -680,7 +685,7 @@ async fn a_server_that_fails_to_start_is_reported_and_the_others_serve() {
             .contains("could not launch `/nonexistent/mcp-server`"),
         "{missing}"
     );
-    let slow = &customs.server_events("slow", "failed")[0];
+    let slow = &customs.server_events("slow", "McpServerFailed")[0];
     assert!(
         slow["error"]
             .as_str()
@@ -691,20 +696,16 @@ async fn a_server_that_fails_to_start_is_reported_and_the_others_serve() {
     // Pebble reported each failure with its launch-to-failure time; the
     // handshake timeout took at least its `startup_timeout`.
     for failed in [broken, missing, slow] {
-        assert!(failed["duration_ms"].is_u64(), "{failed}");
+        assert!(failed["startup_ms"].is_u64(), "{failed}");
     }
     assert!(
-        slow["duration_ms"].as_u64().is_some_and(|ms| ms >= 1_000),
+        slow["startup_ms"].as_u64().is_some_and(|ms| ms >= 1_000),
         "{slow}"
     );
-    assert_eq!(
-        customs
-            .phases("notes")
-            .into_iter()
-            .map(|(_, p)| p)
-            .collect::<Vec<_>>(),
-        ["starting", "ready", "stopped"]
-    );
+    assert_eq!(customs.server_variants("notes"), [(
+        "agent".to_owned(),
+        "McpServerReady".to_owned()
+    )]);
     let lines = log_lines(&report);
     assert!(
         lines
@@ -723,9 +724,8 @@ async fn a_server_that_fails_to_start_is_reported_and_the_others_serve() {
 /// The `http` transport reaches a server the run does not own, and the
 /// `sandbox` transport launches one in the scope and reaches it on its port;
 /// the owned one stops with the session. The run has ended when the events
-/// are read, and each mirrored tool event is checked against the Pebble
-/// completion it was derived from: the previous MCP client's test lost a
-/// tool event to timing on macOS CI.
+/// are read, so every completion Pebble published is in the log: the
+/// previous MCP client's test lost a tool event to timing on macOS CI.
 #[tokio::test]
 async fn http_and_sandbox_transports_reach_a_server_on_a_port() {
     let dir = RunDir::new("mcp-http");
@@ -774,16 +774,16 @@ async fn http_and_sandbox_transports_reach_a_server_on_a_port() {
         customs.pebble_completed_tool_names(),
         ["mcp__remote__echo", "mcp__scoped__echo"],
         "server events: {:?}",
-        customs.server_events("scoped", "failed")
+        customs.server_events("scoped", "McpServerFailed")
     );
     // ...and before reading the pid: a scoped call that failed leaves no pid
     // in the request, and the server events and the tool statuses say why.
     assert_eq!(
-        customs.tool_statuses(),
+        customs.tool_outcomes(),
         ["ok", "ok"],
         "scoped server events: {:?}; tool events: {:?}; server log: {:?}; server trace: {:?}; python3 on PATH: {:?}",
-        customs.server_events("scoped", "failed"),
-        customs.tool_events(),
+        customs.server_events("scoped", "McpServerFailed"),
+        customs.tool_completions(),
         read(&log),
         read(&trace),
         env::var_os("PATH").map(|path| env::split_paths(&path)
@@ -793,20 +793,11 @@ async fn http_and_sandbox_transports_reach_a_server_on_a_port() {
     );
     let pid = pid_in(&requests[2]);
     wait_gone(&pid).await;
-    let remote_ready = &customs.server_events("remote", "ready")[0];
-    assert_eq!(remote_ready["placement"], "remote");
-    assert_eq!(remote_ready["transport"], "http");
-    let scoped_ready = &customs.server_events("scoped", "ready")[0];
-    assert_eq!(scoped_ready["placement"], "scope");
-    assert_eq!(scoped_ready["transport"], "sandbox");
-    assert_eq!(
-        customs
-            .phases("scoped")
-            .into_iter()
-            .map(|(_, p)| p)
-            .collect::<Vec<_>>(),
-        ["starting", "ready", "stopped"]
-    );
+    assert_eq!(customs.server_events("remote", "McpServerReady").len(), 1);
+    assert_eq!(customs.server_variants("scoped"), [(
+        "agent".to_owned(),
+        "McpServerReady".to_owned()
+    )]);
     let _ = remote.kill().await;
 }
 
@@ -868,34 +859,25 @@ async fn sse_servers_are_reached_at_their_stream_over_http_and_under_a_sandbox_r
         customs.pebble_completed_tool_names(),
         ["mcp__remote__echo", "mcp__scoped__echo"],
         "server events: {:?}",
-        customs.server_events("scoped", "failed")
+        customs.server_events("scoped", "McpServerFailed")
     );
     assert_eq!(
-        customs.tool_statuses(),
+        customs.tool_outcomes(),
         ["ok", "ok"],
         "scoped server events: {:?}; tool events: {:?}; server log: {:?}",
-        customs.server_events("scoped", "failed"),
-        customs.tool_events(),
+        customs.server_events("scoped", "McpServerFailed"),
+        customs.tool_completions(),
         read(&log)
     );
     // The owned server answered on its stream and stopped with the session.
     let pid = pid_in(&requests[2]);
     wait_gone(&pid).await;
     assert_eq!(read(&log), "started\ninitialize\ncall echo\n");
-    let remote_ready = &customs.server_events("remote", "ready")[0];
-    assert_eq!(remote_ready["placement"], "remote");
-    assert_eq!(remote_ready["transport"], "http");
-    let scoped_ready = &customs.server_events("scoped", "ready")[0];
-    assert_eq!(scoped_ready["placement"], "scope");
-    assert_eq!(scoped_ready["transport"], "sandbox");
-    assert_eq!(
-        customs
-            .phases("scoped")
-            .into_iter()
-            .map(|(_, p)| p)
-            .collect::<Vec<_>>(),
-        ["starting", "ready", "stopped"]
-    );
+    assert_eq!(customs.server_events("remote", "McpServerReady").len(), 1);
+    assert_eq!(customs.server_variants("scoped"), [(
+        "agent".to_owned(),
+        "McpServerReady".to_owned()
+    )]);
     let _ = remote.kill().await;
 }
 

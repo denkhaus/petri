@@ -235,7 +235,7 @@ diagnostic goes away.
 | `[run]` `goal` (string or `{file}`), `working_dir`, `metadata` | goal text, local cwd | `goal`: supported, the run goal when the graph sets none (the graph attribute wins, as in Fabro); `working_dir`, `metadata`: warn (platform-only) |
 | `[run.inputs]` | `{{ inputs.* }}` defaults | supported |
 | `[run.model]` `provider`, `name`, `controls.reasoning_effort`, `controls.speed` | default model and request controls | supported: the defaults an LLM node gets below the graph's `default_model` / `default_provider`; `controls.speed` is the default `speed` |
-| `[run.model.fallbacks]` `"<model>" = [ "provider:model", ... ]` | model fallback chain | supported: chains keyed by the canonical requested model, resolved against the runner's catalog and available providers with Fabro's notices, reasoning effort mapped per target (`NoNearbyReasoningLevel`, `ChainEmpty`); a provider-local model error (the reference's `failover_eligible` mapping) moves a native agent or prompt stage to the next target, the conversation kept; see "Model fallback" in `crates/fabro/FORMAT.md`. Used by code-review and security-review |
+| `[run.model.fallbacks]` `"<model>" = [ "provider:model", ... ]` | model fallback chain | supported: chains keyed by the canonical requested model, resolved against the runner's catalog and available providers with Fabro's notices, reasoning effort mapped per target (`NoNearbyReasoningLevel`, `ChainEmpty`); a provider-local model error (`lithos-llm`'s `failover_eligible`, the rule Pebble applies) moves a native agent or prompt stage to the next target, the conversation kept; on an agent node Pebble runs the chain from the plan's routes and Petri mirrors its events; see "Model fallback" in `crates/fabro/FORMAT.md`. Used by code-review and security-review |
 | `[run.prepare]` `steps[].script`/`command`/`env`, `timeout` (default 5m) | runs before the first node | supported: lowered as command nodes `run_prepare_N` between `start` and its successors, in the selected environment, with the step `env`, the section `timeout` and `on_failure="exit"`; exactly one of `script`/`command` per step (else `unsupported.workflow_toml.run.prepare`) |
 | `[run.execution]` `mode` (`normal`, `dry_run`), `approval` (`prompt`, `auto`) | dry run and auto approve | supported as launch defaults (`Graph.params["fabro.launch"]`, read by the CLI); `--dry-run`, `--auto-approve`, `--interactive`, `--interview-script` win |
 | `[run.environment]` `id`, `image`, `resources`, `network`, `lifecycle`, `labels`, `env` and `[environments.<id>]` `provider` (`local`, `docker`, `daytona`), `image.docker`, `image.dockerfile` (inline or `{path}`), `resources`, `network`, `lifecycle`, `labels`, `env` | sandbox selection | supported: `provider` selects the backend when `--backend` is absent (`local` host, `docker` Docker plugin, `daytona` Daytona plugin); `image.docker` is the scope's container image; `env` is the scope environment, with `{{ secrets.NAME }}` a `$secret` reference resolved at spawn from `PETRI_SECRET_NAME` (a missing secret fails the command `secret_unavailable`); `resources` size a Daytona runner. An unknown `id` or provider is an error. `cwd`, `network`, `lifecycle`, `labels`, `image.dockerfile` warn `ignored.workflow_toml.environments.<id>.<key>` (platform-only; the runner builds no image) |
@@ -369,17 +369,17 @@ default model before the first stage) and `fallback-repeated-tool-effect`
 | Workflow secrets | `{{ secrets.NAME }}` resolves from `PETRI_SECRET_NAME` in the standalone runner; an embedding host supplies its own `SecretProvider` | the platform vault |
 | Output references | `blob://sha256/<hex>` in a local store under `<run_dir>/blobs`, replaceable through the `OutputStore` capability; a structured value's reference carries `#json`. Below Fabro's 100 KiB threshold, a fork also offloads the `for_each` source list (any size) and other fork snapshot values above 4 KiB from every branch child's context, and a fan-in publishes `parallel.results` above 4 KiB as a reference; the agent and prompt preambles and a nested workflow's start context put those back, `stdin_source` and prompted fan-ins read them back, and a condition sees the reference text | `blob://sha256/<hex>` in platform storage, materialized as `file://…/blobs/<hex>.json` for handlers; nothing under 100 KiB is ever a reference |
 | Prompt events | `StepEvent::Custom` with `kind = "fabro.prompt"` / `"fabro.prompt.completed"` (see `crates/fabro/FORMAT.md`) | `stage.prompt` / `prompt.completed` |
-| MCP events | `StepEvent::Custom` with `kind = "fabro.mcp.server"` (`starting`, `ready`, `failed`, `disconnected`, `stopped`; `ready` and `failed` mirror Pebble's `McpServerReady` and `McpServerFailed` and carry its `startup_ms` as `duration_ms`, `disconnected` mirrors `McpServerDisconnected` once per closed connection) and `"fabro.mcp.tool"` (one per proxied call, derived from Pebble's `ToolCallCompleted`, with `status` (`ok`, `error`, `timeout`, `failed`, `cancelled`) and `duration_ms`); the failure line `mcp server \`<name>\` failed to start: ...` on the node's stderr | `agent.mcp.ready` / `agent.mcp.failed`; tool activity only through the generic tool events |
+| MCP events | Pebble's own events in `agent_activity`: `McpServerReady`, `McpServerFailed`, `McpServerDisconnected`, and `ToolCallStarted`/`ToolCallCompleted` under `mcp__<server>__<tool>` (`error_kind` `timeout`, `unavailable`, `cancelled`, `denied`, ...); one `StepEvent::Custom` kind, `fabro.mcp.unavailable`, for a server Petri never named to Pebble because its secret is unavailable; the failure line `mcp server \`<name>\` failed to start: ...` on the node's stderr for both. No Petri restatement of Pebble's server or tool facts (decision `pebble-events-are-the-agent-contract`) | `agent.mcp.ready` / `agent.mcp.failed` / `agent.mcp.disconnected`; tool activity only through the generic tool events |
 | MCP catalog references | `[run.agent.mcps.<name>] id = "..."` is refused at load: the standalone runner has no server-managed catalog | resolved from the server's catalog |
 | MCP secrets | `{{ secrets.NAME }}` resolves as a whole `env` or `headers` value only, from `PETRI_SECRET_NAME` (or the host's provider) at launch; a token inside a command, script or URL is refused at load | resolved anywhere in the transport strings at the run boundary from the vault |
 | MCP `sandbox` transport | launched through the scope's execution environment and reached through the provider's preview URL (the host's loopback, the Docker plugin's port forward into the container, Daytona's preview link with its token header); a provider without preview URLs fails the server with a named reason | a Daytona preview URL; local sandboxes fall back to localhost |
 | MCP stdio working directory | the scope's workspace when the scope shares the host filesystem, else Petri's own directory | the run worker's directory |
-| Model fallback: session handoff | the failed session's record resumes on the next route (`ResumeMode::UseModel`, same session id); the next model continues the unfinished turn with no new input (Pebble's `continue_prompt`), so a tool effect that already ran is never repeated | the session is discarded and a new one runs the original prompt from scratch on the next route, repeating any tool effect |
+| Model fallback: session handoff | Pebble resumes the failed session's record on the next route (`ResumeMode::UseModel`, same session id) and continues the prompt on the history as it stands: the next model answers committed tool results with no new input (`continue_turn`), so a tool effect that already ran is never repeated; a prompt nothing answered yet is asked again (`replay_prompt`) | the session is discarded and a new one runs the original prompt from scratch on the next route, repeating any tool effect |
 | Model fallback: provider-only candidates | a bare provider in a chain resolves to the same model id on that provider when its catalog lists it, else `NoCompatibleModel` | picks the provider's closest model by feature profile and price |
 | Model fallback: unknown selectors | a selector no catalog row names is skipped with a notice unless the provider allows passthrough models | passed through for the provider to validate |
 | Model fallback: configuration errors | a bad chain (provider-named or qualified key, two keys for one model, unknown key or provider) fails the first LLM stage with class `bad_config` | fails run start |
 | Model fallback: ACP agents | no plan; the ACP command owns its model | the same |
-| Model fallback: events | `StepEvent::Custom` kinds `fabro.fallback.{plan,route,usage,failover,stop}` and the once-per-run stderr notices | `agent.failover` events and run notices |
+| Model fallback: events | `StepEvent::Custom` kind `fabro.fallback.plan` and the once-per-run stderr notices; every route fact is Pebble's own event in `agent_activity` (`SessionStarted`, `RouteFailover`, `RouteFailoverStopped`, `AssistantMessage`), with the `model fallback: ...` line on the node's stderr; no `route`, `usage`, `failover` or `stop` kinds and no `metrics.custom.fallback.*` (decision `pebble-events-are-the-agent-contract`) | `agent.failover` events and run notices |
 | Model fallback: recovery | a resumed node starts a new plan at position 0 on the primary; a request in flight at the crash may be sent again | sessions persist server-side |
 | MCP server lifetime | one set of servers per agent node session, started by Pebble while the agent is built and closed with it (a retained thread's next node starts its own); a resumed run starts them again | one set per agent session; the same |
 
@@ -393,7 +393,7 @@ marked "not verified" with the reason, not "passed".
 
 | Stage | Acceptance gate | Branch / commit | Status |
 |---|---|---|---|
-| C1 model fallback and failover (item 9a, task 12) | scripted provider failures exercise selection order, session handling, terminal outcome, and complete usage/events | `swarm/task12-fallback`, commits `240e0c9`..`f0ce08e` and after (evidence `task12-fallback.md`) | passed on the branch with integration merged (tasks 13 to 16 in): selection order and the reference's notices (`fallback::tests`, 9 unit tests); through the binary with both twins injecting failures (`fabro_fallback_blackbox`, 15 cases: primary, qualifying and non-qualifying, a third provider, exhaustion, a tool effect kept across the handoff, cancellation, refusal, timeout, client retries, a workflow retry, effort mapping, repair turns, a retained thread, a prompt node); the outcome and per-route accounting rebuilt from public events (`fallback_events`, 3); the client's own retries and budget (`llm_client`, 2). Reference sequences derived from the pinned source, not captured from the binary |
+| C1 model fallback and failover (item 9a, task 12) | scripted provider failures exercise selection order, session handling, terminal outcome, and complete usage/events | `swarm/task12-fallback`, commits `240e0c9`..`f0ce08e` and after (evidence `task12-fallback.md`) | passed on the branch with integration merged (tasks 13 to 16 in): selection order and the reference's notices (`fallback::tests`, 10 unit tests); through the binary with both twins injecting failures (`fabro_fallback_blackbox`, 15 cases: primary, qualifying and non-qualifying, a third provider, exhaustion, a tool effect kept across the handoff, cancellation, refusal, timeout, client retries, a workflow retry, effort mapping, repair turns, a retained thread, a prompt node); the outcome and per-route accounting rebuilt from public events (`fallback_events`, 3); the client's own retries and budget (`llm_client`, 2). Reference sequences derived from the pinned source, not captured from the binary |
 | C2 MCP execution (item 9b, task 13) | a configured local MCP server's tool effect, hooks, output, events, cancellation and shutdown are verified | `swarm/task13-mcp`, commits `b67d3ee`..`72be261` (evidence `task13-mcp.md`) | passed: merged; the MCP suites and the scripted stdio server (`fabro_mcp_blackbox`, `testdata`) pass in the gate (1192) |
 | C3 skills (item 9c, task 14) | versioned fixtures verify skill discovery, precedence, loading, prompt/tool behavior and events without Fabro | `swarm/task14-skills`, commits `c27fc3e`, `bdd5c5a` (evidence `task14-skills.md`) | passed: merged; the skills suites and fixtures (`testdata/skills`) pass in the gate; skill context is loaded into the system prompt, outside the agent history, so compaction cannot remove it (verified below) |
 | C4 sub-agents (item 9d, task 15) | a parent delegates real work; results, ownership, cancellation, hooks and child identities match the reference | `swarm/task15-subagents`, commits `8861076`..`303f682`, `e8d20e1`, `269daca`, `ad2d472`, the merges `bd14208`, `3cbc1bc` and the task 16 merge (evidence `task15-subagents.md`) | passed: every native agent has Pebble's sub-agent tools (the pinned Fabro has no setting either; `[run.agent] subagents` stays refused because Fabro's parser refuses it); a parent delegates a workspace change to a child, hooks block inside a child, a child's failure is the parent's tool result, concurrent children and a grandchild, an interrupt closes the child, a retained thread keeps a child's result, resume restarts the stage, children never count against the invocation ceiling, accounting reconstructs from the public events. In-process `petri-fabro-steps::subagents` (14, the child memory and skills contract tests included since the Pebble re-pin), black box `fabro_subagents_blackbox` (8, one with an inherited MCP tool). Accepted differences above: nesting under the open-session bound, usage beside the parent's, inherited MCP tools |
@@ -576,8 +576,20 @@ names the decision record under `decisions/`; "gap" names the owner.
 
 ## Library pin
 
-Pebble is pinned at `4c0063327394cd0f1e9fee2c24541b829b93a8f7`, which is
-Pebble `main`. That commit is the `embedder-concerns` batch (Pebble PR #9)
+Pebble is pinned at `430740f1114f859d6d173683f25b5007cf2023ca`, which is
+Pebble `main`. That commit is Pebble PR #12 (`embedder-failover-and-followup`)
+on top of `4c00633`. PR #12 grows `CodingEvent::RouteFailover` with the
+failed route's `usage`, `cost_usd_micros`, `inference_ms`, `tool_ms` and a
+`continuation` (`replay_prompt` or `continue_turn`), adds
+`CodingEvent::RouteFailoverStopped { route, attempt, reason, error }` with
+`reason` `ineligible` or `exhausted` for a prompt Pebble did not fail over
+although routes were named, and gives the steering bus a follow-up delivery
+mode (`SteerableSession::follow_up`, `SteeringBus::follow_up` and
+`follow_up_to`; a message buffered before a session attaches keeps its
+mode). Petri runs its model failover in Pebble on those events and delivers
+human text through the bus (`crates/fabro/steps/src/{fallback,pebble}.rs`).
+`4c0063327394cd0f1e9fee2c24541b829b93a8f7` is the
+`embedder-concerns` batch (Pebble PR #9)
 plus Pebble PR #10 and PR #11. PR #11 adds `CodingEvent::McpServerDisconnected`
 (a server's closed connection, reported once by the call that first found
 it), `startup_ms` on `McpServerReady` and `McpServerFailed` (launch to tools
@@ -600,9 +612,14 @@ profile's filenames Pebble's own), the environment helpers
 (`PromptReport::compactions`), the `SessionProjection` fold Petri's sub-agent
 ledger now reads, fallback routes as a builder option, MCP servers as a tool
 source, a steering bus, and the command line as a library. Petri takes the
-first four here and MCP servers as a tool source (`fabro_steps::pebble::mcp`);
-fallback routes, the steering bus and the command line library are pinned but
-not yet adopted (`fallback.rs` still drives the failover). `petri-readiness-gaps` added the two capabilities the
+first four here, MCP servers as a tool source (`fabro_steps::pebble::mcp`),
+fallback routes (`fabro_steps::fallback` plans, Pebble runs and reports;
+Pebble's `RouteFailover` and `RouteFailoverStopped` are the record) and the
+steering bus (one per node run; deliveries are follow-ups, buffered until
+the session attaches); the command line library is pinned but not adopted.
+Pebble's event stream is the contract for every fact Pebble knows (decision
+`pebble-events-are-the-agent-contract`).
+`petri-readiness-gaps` added the two capabilities the
 readiness review's G07 and G14 asked for and changed no existing behavior:
 `CodingAgentOptions::with_max_tool_rounds` (a prompt ends with
 `Error::ToolRoundsExhausted` and a `ToolRoundsExhausted` event when the
@@ -641,7 +658,7 @@ fails when any of them disagree. The row names are the keys of a record's
 
 | Pin | Revision | Repository | Role |
 |---|---|---|---|
-| `pebble` | `4c0063327394cd0f1e9fee2c24541b829b93a8f7` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
+| `pebble` | `430740f1114f859d6d173683f25b5007cf2023ca` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
 | `lithos_llm` | `a1e3fd37b7153870411701327ac117606753fe90` | `lithoscomputer/lithos-llm` (public) | provider transport and request retries |
 | `sandbox_driver` | `a92c0db6b6a122ca9b6df75de6615544f53c0d47` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `fedab8e6b9b8e2577bee7d93812a318d6adb4aa4` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |

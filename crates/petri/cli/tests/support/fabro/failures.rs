@@ -1,14 +1,18 @@
-//! Failure injection for the twins, and the fallback records a run leaves.
+//! Failure injection for the twins, and the records a run leaves about its
+//! routes.
 //!
 //! Both twins script an error with the same fields (`status`, `error_type`,
 //! `code`, `message`), a hang, and a success that stops on a refusal. A
 //! scenario answers one matching request and is then spent; `repeat` lets
 //! the client's own retries each meet the same failure.
 //!
-//! The fallback decisions a run took are `StepEvent::Custom` payloads whose
-//! `kind` starts with `fabro.fallback.`; the run writes them into the event
-//! log it reports on stderr (`event log: <path>`), which is what a person or
-//! a host reads after the process exits.
+//! What a run reports about its routes is read from the event log it names
+//! on stderr (`event log: <path>`), which is what a person or a host reads
+//! after the process exits: Petri's own `StepEvent::Custom` payloads (the
+//! fallback plan, `fabro.fallback.plan`; the thread resolution,
+//! `fabro.thread`), and Pebble's events inside the `pebble` envelope
+//! (`RouteFailover`, `RouteFailoverStopped`, `SessionStarted`,
+//! `AssistantMessage`, ...), each attributed to its node.
 
 use std::fs;
 use std::path::Path;
@@ -80,38 +84,59 @@ pub(crate) fn any_request(
     Value::Object(scenario)
 }
 
-/// Every `fabro.fallback.*` record of the run, in log order, read from the
-/// event log the run reported.
-pub(crate) fn records(run_dir: &Path) -> Vec<Value> {
+fn event_log(run_dir: &Path) -> Value {
     let text = fs::read_to_string(run_dir.join("events.json")).unwrap_or_default();
-    let log: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    serde_json::from_str(&text).unwrap_or(Value::Null)
+}
+
+/// Every `StepEvent::Custom` record of Petri's own (a `kind` other than the
+/// `pebble` envelope's), in log order, read from the event log the run
+/// reported.
+pub(crate) fn records(run_dir: &Path) -> Vec<Value> {
     let mut out = Vec::new();
-    collect(&log, &mut out);
+    collect(&event_log(run_dir), &mut out, |map| {
+        map.get("kind")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind != "pebble")
+            && map.contains_key("node")
+    });
     out
 }
 
-fn collect(value: &Value, out: &mut Vec<Value>) {
-    match value {
-        Value::Object(map) => {
-            if map
-                .get("kind")
-                .and_then(Value::as_str)
-                .is_some_and(|kind| kind.starts_with("fabro.fallback."))
-            {
-                out.push(value.clone());
-                return;
+/// The payloads of one Pebble event variant attributed to `node`, in log
+/// order: what the run recorded as `agent_activity`.
+pub(crate) fn pebble_events(run_dir: &Path, node: &str, variant: &str) -> Vec<Value> {
+    let mut envelopes = Vec::new();
+    collect(&event_log(run_dir), &mut envelopes, |map| {
+        map.get("kind").and_then(Value::as_str) == Some("pebble") && map["node"] == node
+    });
+    envelopes
+        .into_iter()
+        .filter_map(|envelope| envelope["event"]["event"].get(variant).cloned())
+        .collect()
+}
+
+fn collect(value: &Value, out: &mut Vec<Value>, wanted: impl Fn(&Map<String, Value>) -> bool) {
+    fn walk(value: &Value, out: &mut Vec<Value>, wanted: &dyn Fn(&Map<String, Value>) -> bool) {
+        match value {
+            Value::Object(map) => {
+                if wanted(map) {
+                    out.push(value.clone());
+                    return;
+                }
+                for child in map.values() {
+                    walk(child, out, wanted);
+                }
             }
-            for child in map.values() {
-                collect(child, out);
+            Value::Array(items) => {
+                for item in items {
+                    walk(item, out, wanted);
+                }
             }
+            _ => {}
         }
-        Value::Array(items) => {
-            for item in items {
-                collect(item, out);
-            }
-        }
-        _ => {}
     }
+    walk(value, out, &wanted);
 }
 
 /// The records of one node, by kind.
@@ -119,17 +144,6 @@ pub(crate) fn of_node<'a>(records: &'a [Value], node: &str, kind: &str) -> Vec<&
     records
         .iter()
         .filter(|r| r["node"] == node && r["kind"] == kind)
-        .collect()
-}
-
-/// The `kind` sequence of one node's records, without the `fabro.fallback.`
-/// prefix.
-pub(crate) fn kinds(records: &[Value], node: &str) -> Vec<String> {
-    records
-        .iter()
-        .filter(|r| r["node"] == node)
-        .filter_map(|r| r["kind"].as_str())
-        .map(|k| k.trim_start_matches("fabro.fallback.").to_owned())
         .collect()
 }
 
