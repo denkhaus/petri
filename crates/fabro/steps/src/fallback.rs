@@ -388,7 +388,9 @@ impl Resolved {
 }
 
 /// A `[run.model.fallbacks]` table the run cannot use. Fabro refuses these
-/// at run start; Petri fails the first LLM stage that reads them.
+/// at run start; so does Petri: the `start` stage checks the table through
+/// [`check_table`] before anything runs, and a stage that reads the table
+/// later meets the same error.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
     #[error(
@@ -423,6 +425,18 @@ pub enum ConfigError {
         reference: String,
         message:   String,
     },
+}
+
+/// Check a `[run.model.fallbacks]` table as the `start` stage carries it
+/// (the chains as written, keyed by the requested model): every key and
+/// every reference must resolve against the catalog. `Err` is the message
+/// the run fails with, class `bad_config`.
+pub fn check_table(client: &Client, table: &serde_json::Value) -> Result<(), String> {
+    let chains: BTreeMap<String, Vec<String>> = serde_json::from_value(table.clone())
+        .map_err(|error| format!("`run.model.fallbacks` does not parse: {error}"))?;
+    resolve(client, &chains)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// Resolve every chain against the client's catalog and available providers.

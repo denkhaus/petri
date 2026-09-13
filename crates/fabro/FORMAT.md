@@ -808,9 +808,12 @@ canonical model id lists, in order. Petri builds the plan; on a native agent
 node Pebble runs it (the plan's remaining routes are the builder's
 `fallback_routes`) and reports every move on its own event stream, which is
 the record of the routes (below). The chain is resolved once per run as
-Fabro's server resolves it at run start: a key that names a provider, a
-provider-qualified key, two keys that resolve to one model, or an unknown key
-fail the first LLM stage with class `bad_config`; a candidate on a provider
+Fabro's server resolves it at run start, and so does Petri: the `start`
+stage checks the table against the catalog before anything runs, so a key
+that names a provider, a provider-qualified key, two keys that resolve to one
+model, or an unknown key fail the run at `start` with class `bad_config`,
+before a checkout, a hook or a node (a stage that reads the table later
+meets the same error); a candidate on a provider
 that is not available (`PETRI_LLM_PROVIDERS`, credentials) is skipped with
 Fabro's `model_fallback_skipped` notice, as is a bare provider with no
 offering of the requested model, a bare model no available provider offers,

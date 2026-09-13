@@ -997,6 +997,14 @@ impl Ctx<'_> {
                         config["checkout"] = placeholder(clone);
                     }
                 }
+                // `[run.model.fallbacks]` as written: the `start` stage
+                // checks the table against the catalog before anything
+                // runs, as Fabro's server refuses a bad table at run start.
+                if kind == Kind::Start
+                    && let Some(config) = config.as_object_mut()
+                {
+                    fallbacks::write(&self.settings, config);
+                }
                 (Some(StepRef::new(STAGE_KIND, config)), STRUCTURAL_TIMEOUT)
             }
             Kind::FanIn => {

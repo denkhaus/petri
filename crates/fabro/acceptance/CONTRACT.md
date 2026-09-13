@@ -320,6 +320,13 @@ reports `succeeded`. Oracle cases `succeed_keeps_a_failure_an_explicit_edge_matc
 Fabro with no departure. The `partially_succeed` spelling stays as an
 accepted difference (below).
 
+Retired 2026-09-13: **model fallback configuration errors**. A
+`[run.model.fallbacks]` table the catalog cannot resolve failed the first
+LLM stage with class `bad_config`; it now fails the run at its `start`
+stage, before anything runs, as Fabro's server refuses it at run start
+(`fabro_fallback_blackbox::a_bad_fallback_table_fails_the_run_at_start`).
+The `fallback-resolution` record keeps its two remaining differences.
+
 Retired with review finding G05: **promotion after retries**. The last
 retryable failure was converted by the engine's exhaustion policy before any
 explicit route was considered, so an `outcome=failed` edge did not recover
@@ -378,7 +385,6 @@ default model before the first stage) and `fallback-repeated-tool-effect`
 | Model fallback: session handoff | Pebble resumes the failed session's record on the next route (`ResumeMode::UseModel`, same session id) and continues the prompt on the history as it stands: the next model answers committed tool results with no new input (`continue_turn`), so a tool effect that already ran is never repeated; a prompt nothing answered yet is asked again (`replay_prompt`) | the session is discarded and a new one runs the original prompt from scratch on the next route, repeating any tool effect |
 | Model fallback: provider-only candidates | a bare provider in a chain resolves to the same model id on that provider when its catalog lists it, else `NoCompatibleModel` | picks the provider's closest model by feature profile and price |
 | Model fallback: unknown selectors | a selector no catalog row names is skipped with a notice unless the provider allows passthrough models | passed through for the provider to validate |
-| Model fallback: configuration errors | a bad chain (provider-named or qualified key, two keys for one model, unknown key or provider) fails the first LLM stage with class `bad_config` | fails run start |
 | Model fallback: ACP agents | no plan; the ACP command owns its model | the same |
 | Model fallback: events | `StepEvent::Custom` kind `fabro.fallback.plan` and the once-per-run stderr notices; every route fact is Pebble's own event in `agent_activity` (`SessionStarted`, `RouteFailover`, `RouteFailoverStopped`, `AssistantMessage`), with the `model fallback: ...` line on the node's stderr; no `route`, `usage`, `failover` or `stop` kinds and no `metrics.custom.fallback.*` (decision `pebble-events-are-the-agent-contract`) | `agent.failover` events and run notices |
 | Model fallback: recovery | a resumed node starts a new plan at position 0 on the primary; a request in flight at the crash may be sent again | sessions persist server-side |
