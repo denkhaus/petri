@@ -541,7 +541,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2037,7 +2037,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2301,7 +2301,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2358,7 +2358,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2778,7 +2778,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3096,7 +3096,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 [[package]]
 name = "twin-anthropic"
 version = "0.1.5"
-source = "git+https://github.com/lithoscomputer/twins?rev=fedab8e6b9b8e2577bee7d93812a318d6adb4aa4#fedab8e6b9b8e2577bee7d93812a318d6adb4aa4"
+source = "git+https://github.com/lithoscomputer/twins?rev=ca45f0e50a6716d716aa2f638ca3cf767e88f613#ca45f0e50a6716d716aa2f638ca3cf767e88f613"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3108,12 +3108,28 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "twin-core",
+]
+
+[[package]]
+name = "twin-core"
+version = "0.1.5"
+source = "git+https://github.com/lithoscomputer/twins?rev=ca45f0e50a6716d716aa2f638ca3cf767e88f613#ca45f0e50a6716d716aa2f638ca3cf767e88f613"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "axum",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "twin-openai"
 version = "0.1.5"
-source = "git+https://github.com/lithoscomputer/twins?rev=fedab8e6b9b8e2577bee7d93812a318d6adb4aa4#fedab8e6b9b8e2577bee7d93812a318d6adb4aa4"
+source = "git+https://github.com/lithoscomputer/twins?rev=ca45f0e50a6716d716aa2f638ca3cf767e88f613#ca45f0e50a6716d716aa2f638ca3cf767e88f613"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3126,6 +3142,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "twin-core",
 ]
 
 [[package]]
@@ -3368,7 +3385,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

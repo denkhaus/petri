@@ -4,10 +4,8 @@
 # This is test and parity tooling. It never uses the `fabro` on PATH. Build the
 # binary first, from a confined clone at the exact compatibility revision:
 #
-#   git clone --no-checkout https://github.com/fabro-sh/fabro.git fabro
-#   git -C fabro fetch origin refs/pull/844/head
-#   git -C fabro checkout --detach b6482910e517d00dfc3c4a2f2d3e417c9348f7f6
-#   cargo build --locked -p fabro-cli --manifest-path fabro/Cargo.toml
+#   scripts/corpus-fetch-fabro.sh      # the pin in crates/fabro/corpus-pin.txt
+#   scripts/fabro-provision.sh         # builds and prints the binary's path
 #
 # Usage: capture.sh <fabro-bin> <sandbox-root> <workflow-dir> <workflow-file> [fabro run args...]
 #
