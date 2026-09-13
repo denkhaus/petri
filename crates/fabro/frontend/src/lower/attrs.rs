@@ -2,6 +2,8 @@
 //! which are refused. Anything not listed here is diagnosed: a value that
 //! silently does nothing is the failure this table exists to prevent.
 
+use std::mem;
+
 /// Graphviz attributes that only affect a rendering. Dropped without a word:
 /// they carry no workflow meaning and every real `.fabro` file has some.
 pub(super) const LAYOUT: &[&str] = &[
@@ -211,7 +213,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
             let substitution = previous[j] + usize::from(ca != cb);
             current[j + 1] = substitution.min(previous[j + 1] + 1).min(current[j] + 1);
         }
-        std::mem::swap(&mut previous, &mut current);
+        mem::swap(&mut previous, &mut current);
     }
     previous[b.len()]
 }
