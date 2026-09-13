@@ -23,22 +23,25 @@
 //! runs its native architecture and `runner.arch` says so; set to amd64 on an
 //! arm64 host, the sweep reproduces GitHub's x64 runners under emulation.
 //! Each workflow fires as its own primary trigger with a simulated event
-//! payload — fields real (identity from the pin), resources fabricated
-//! (#999999 exists nowhere server-side, so nothing real can be read or
-//! mutated) — which is what lets `github.event.*` reads and `event_name`
+//! payload — fields real (identity from the pin), resources fabricated.
+//! Fake event resources do not prevent actions from finding real issues
+//! through API searches. This lets `github.event.*` reads and `event_name`
 //! conditions behave as they do on GitHub; `PETRI_SWEEP_EVENT=dispatch`
 //! restores the bare dispatch + empty event.
 //!
-//! The sweep is token-less by default (see [`sweep_token`]);
-//! `PETRI_SWEEP_TOKEN` opts a real token in — `PETRI_SWEEP_TOKEN=$(gh auth
-//! token)` — for a measurement free of GitHub's anonymous rate limit. Opt-in
-//! only: corpus code then runs with that identity, bounded by the token's own
-//! permissions.
+//! The sweep is token-less by default. On macOS, `PETRI_SWEEP_READONLY=1`
+//! loads the dedicated `petri-corpus-readonly` Keychain entry for the current
+//! user. Create it as a fine-grained token with public-repository access and
+//! no added permissions. `scripts/corpus-run-readonly.sh` selects this mode.
+//! Token environment overrides are rejected before any workflow runs.
+//! The Keychain entry's permissions are an operator-managed prerequisite;
+//! its name does not prove that a replacement credential is read-only.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env::{self, consts};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use std::{fs, process};
 
@@ -67,18 +70,122 @@ use tokio::sync::{Semaphore, oneshot};
 use tokio::task::JoinSet;
 use tokio::time;
 
-/// The sweep's `GITHUB_TOKEN`: `PETRI_SWEEP_TOKEN` when the operator opted a
-/// real one in, else **empty**. Empty still resolves `${{ secrets.GITHUB_TOKEN
-/// }}` and `github.token`, and the toolkit treats it as "no auth" — API calls
-/// go anonymous (the setup-* version manifests, github-script reads) and
-/// succeed where a *bogus* value gets `401 Bad credentials`: GitHub accepts
-/// absent credentials and rejects invalid ones. Token-less by default, so
-/// corpus code can never act with the user's identity; it is also the value a
-/// bare machine with no `gh` login gets from the distribution. The anonymous
-/// tier is rate-limited (60/hour/IP), which a whole-corpus sweep exceeds —
-/// hence the opt-in.
-fn sweep_token() -> String {
-    env::var("PETRI_SWEEP_TOKEN").unwrap_or_default()
+// Initialized once at the sweep boundary; failure observers only read it.
+static SWEEP_TOKEN: OnceLock<String> = OnceLock::new();
+
+fn sweep_token() -> &'static str {
+    SWEEP_TOKEN.get().map_or("", String::as_str)
+}
+
+const TOKEN_OVERRIDES: &[&str] = &[
+    "PETRI_SWEEP_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+];
+
+fn readonly_mode(get: impl Fn(&str) -> Option<OsString>) -> Result<bool, String> {
+    for name in TOKEN_OVERRIDES {
+        if get(name).is_some() {
+            return Err(format!(
+                "{name} is forbidden for corpus sweeps; unset it and use scripts/corpus-run-readonly.sh"
+            ));
+        }
+    }
+    match get("PETRI_SWEEP_READONLY") {
+        None => Ok(false),
+        Some(value) if value == "1" => Ok(true),
+        Some(_) => Err("PETRI_SWEEP_READONLY must be unset or 1".into()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn keychain_token() -> Result<String, String> {
+    let account = Command::new("/usr/bin/id")
+        .arg("-un")
+        .output()
+        .await
+        .map_err(|_| "Cannot determine the Keychain account".to_string())?;
+    if !account.status.success() {
+        return Err("Cannot determine the Keychain account".into());
+    }
+    let account = String::from_utf8(account.stdout)
+        .map_err(|_| "Invalid Keychain account name".to_string())?;
+    let output = Command::new("/usr/bin/security")
+        .args([
+            "find-generic-password",
+            "-a",
+            account.trim(),
+            "-s",
+            "petri-corpus-readonly",
+            "-w",
+        ])
+        .output()
+        .await
+        .map_err(|_| "Cannot read the petri-corpus-readonly Keychain entry".to_string())?;
+    if !output.status.success() {
+        return Err("Cannot read the petri-corpus-readonly Keychain entry".into());
+    }
+    let token = String::from_utf8(output.stdout)
+        .map_err(|_| "Invalid credential encoding in Keychain".to_string())?;
+    let token = token.trim_end_matches(['\r', '\n']).to_string();
+    if token.is_empty() {
+        return Err("The petri-corpus-readonly Keychain entry is empty".into());
+    }
+    Ok(token)
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn keychain_token() -> Result<String, String> {
+    Err("Authenticated corpus sweeps require the dedicated macOS Keychain entry".into())
+}
+
+#[test]
+fn corpus_credentials_reject_overrides_without_disclosing_values() {
+    for name in TOKEN_OVERRIDES {
+        for value in ["", "secret-placeholder"] {
+            let error = readonly_mode(|key| {
+                if key == *name {
+                    Some(value.into())
+                } else if key == "PETRI_SWEEP_READONLY" {
+                    Some("1".into())
+                } else {
+                    None
+                }
+            })
+            .expect_err("even empty overrides must be rejected");
+            assert!(error.contains(name));
+            assert!(!error.contains("secret-placeholder"));
+        }
+    }
+    assert!(!readonly_mode(|_| None).unwrap());
+    assert!(readonly_mode(|key| (key == "PETRI_SWEEP_READONLY").then(|| "1".into())).unwrap());
+    assert!(
+        readonly_mode(|key| (key == "PETRI_SWEEP_READONLY").then(|| "unexpected".into())).is_err()
+    );
+}
+
+#[test]
+fn direct_corpus_command_rejects_credentials_before_running_workflows() {
+    let mut command = process::Command::new(env::current_exe().unwrap());
+    for name in TOKEN_OVERRIDES {
+        command.env_remove(name);
+    }
+    let output = command
+        .env("PETRI_SWEEP_TOKEN", "secret-placeholder")
+        .env("PETRI_SWEEP_READONLY", "1")
+        .args(["--ignored", "--exact", "corpus_run_sweep", "--nocapture"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("PETRI_SWEEP_TOKEN is forbidden"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("secret-placeholder"));
+    assert!(!stderr.contains("sweep:"));
 }
 
 fn corpus_root() -> PathBuf {
@@ -98,14 +205,23 @@ fn env_num(name: &str, default: u64) -> u64 {
     clippy::print_stderr,
     reason = "the sweep narrates its progress and names the report it wrote; a test binary has no other sink"
 )]
-async fn corpus_run_sweep() {
+async fn corpus_run_sweep() -> Result<(), String> {
+    let token = if readonly_mode(|name| env::var_os(name))? {
+        keychain_token().await?
+    } else {
+        String::new()
+    };
+    assert!(
+        SWEEP_TOKEN.set(token).is_ok(),
+        "the sweep initializes credentials once"
+    );
     let root = corpus_root();
     if !has_corpus(&root) {
         eprintln!("skipping: corpus not fetched (scripts/corpus-fetch.sh)");
-        return;
+        return Ok(());
     }
     if !testkit::is_docker_ready().await {
-        return;
+        return Ok(());
     }
 
     let source = Arc::new(GitActionSource::new(root.join(".actions-cache")));
@@ -245,8 +361,7 @@ async fn corpus_run_sweep() {
         "an empty `GITHUB_TOKEN` kept the sweep token-less (actions' API calls went \
          anonymous, as on a machine with no `gh` login — rate-limited at 60/hour)"
     } else {
-        "a real `GITHUB_TOKEN` (`PETRI_SWEEP_TOKEN`) authenticated actions' API \
-         calls, so no anonymous rate limit applied"
+        "the dedicated Keychain `GITHUB_TOKEN` authenticated actions' API reads"
     };
     let note = format!(
         "Sweep configuration: host scopes rewritten to the pinned runner images \
@@ -269,6 +384,7 @@ async fn corpus_run_sweep() {
     let path = root.join("RUNS.md");
     fs::write(&path, &markdown).expect("write the runs report");
     eprintln!("wrote {}", path.display());
+    Ok(())
 }
 
 /// Sweep shape: scripts stubbed, host scopes containerized, matrices capped,
@@ -409,7 +525,7 @@ async fn run_one(
         .capability(ActionSourceCap(source.clone()))
         .capability(ActionManifestSourceCap(source))
         .capability(github_actions::ToolCacheCap(tool_cache))
-        .secrets(MapSecrets::from_pairs(&[("GITHUB_TOKEN", &sweep_token())]));
+        .secrets(MapSecrets::from_pairs(&[("GITHUB_TOKEN", sweep_token())]));
     let rt = support::with_object_service(rt, Some(github_objects::cache_dir(&store)));
 
     let (handle_tx, handle_rx) = oneshot::channel();
