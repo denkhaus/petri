@@ -345,6 +345,7 @@ default model before the first stage) and `fallback-repeated-tool-effect`
 |---|---|---|
 | Firing cap | 500 firings per looped node; an explicit limit above 500 is refused at load | unlimited when visit limits are unset or zero |
 | Invocation maximum | a hard 10,000 workflow invocations per run; cannot be raised or disabled | no counterpart |
+| Unknown attributes | a graph, node or edge attribute Fabro does not define is refused at load (`fabro.unknown_attribute`), with the closest Fabro attribute as the hint; the `x.` namespace and the Graphviz layout attributes are dropped silently | accepted silently: the validator has no rule for attribute names, and an unknown attribute does nothing |
 | `outcome=success` | matched as `succeeded` with a warning until 2026-10-04, then refused | accepted, never matches |
 | ACP tool hooks | best effort at `session/request_permission`, with a `fabro.hook.warning` naming the backend, hook, event and missing boundary for each unenforceable hook | ignored silently |
 | `stage_retrying` hook | dispatched before each retry attempt; its decision is ignored | declared, never dispatched |

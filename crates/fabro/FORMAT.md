@@ -1132,6 +1132,7 @@ call to the prompt that compacted, so these three are a breakdown of
 | `acp_command` (legacy) | `unsupported.acp_command` |
 | an unbound `{{ inputs.* }}` (a warning, `fabro.unbound_input`, under `petri check` with no inputs) | `unsupported.template.unbound_input` |
 | ports, HTML strings, undirected graphs, `strict`, anonymous subgraphs | `unsupported.dot.*` |
+| any graph, node or edge attribute Fabro does not define (`tool_hooks.*` included), outside the `x.` namespace | `fabro.unknown_attribute` |
 
 **Accepted until 2026-10-04.** One spelling is a dated shim, with a warning
 that names the date and a `REMOVE AFTER 2026-10-04` comment at every site
@@ -1143,12 +1144,18 @@ later rejection is deliberately stricter. `on_failure="succeed"` and
 plan. `.ai/plans/done/fabro-local-workflows.md` lists the workflows that
 depend on the alias and what to do at the sunset.
 
-Ignored loudly (a warning naming the attribute): `tool_hooks.pre`,
-`tool_hooks.post` and any other attribute Fabro does not define
-(`fabro.unknown_attribute`). Fabro's validator refuses `tool_hooks.*` as
-unknown too; tool hooks are configured through `[[run.hooks]]` (`pre_tool_use`,
-`post_tool_use`), never on a node. Graphviz layout attributes are dropped
-silently.
+**Unknown attributes are refused.** An attribute Fabro does not define on a
+graph, a node or an edge is an error (`fabro.unknown_attribute`), because a
+misspelt attribute that silently did nothing is the failure the attribute
+tables exist to prevent. The hint names the Fabro attribute within two
+character edits when there is one (`max_retrys` suggests `max_retries`);
+for `tool_hooks.pre` and `tool_hooks.post` it points at `[[run.hooks]]`
+(`pre_tool_use`, `post_tool_use`), which is where tool hooks are
+configured, never on a node. Fabro's validator does not check attribute
+names, so this is Petri-stricter. Two families are never diagnosed: the
+Graphviz layout attributes (`color`, `rankdir`, `style`, ...) and the
+extension namespace `x.` (`x.owner="platform"`, `"x.ticket"="PLAT-12"`),
+which tooling and hosts use for attributes Petri carries without reading.
 
 ## Watchdog and circuit breaker
 
@@ -1216,6 +1223,8 @@ Petri-stricter, tested as differences and listed in
 `crates/fabro/acceptance/CONTRACT.md`: the 500-firing cap and its
 `fabro.max_visits_too_large` / `info.budget.default` diagnostics (Fabro is
 unlimited), `outcome=success` after its sunset, the 10,000-invocation maximum,
-`image.dockerfile` and the other platform-only `workflow.toml` warnings, and
+`image.dockerfile` and the other platform-only `workflow.toml` warnings,
+unknown graph, node and edge attributes outside the `x.` namespace
+(`fabro.unknown_attribute`; Fabro has no rule for attribute names), and
 `on_failure="partially_succeed"` in the other direction: Petri accepts a
 spelling Fabro refuses.

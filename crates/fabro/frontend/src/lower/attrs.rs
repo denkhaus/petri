@@ -176,6 +176,46 @@ pub(super) const EDGE: &[&str] = &[
 /// The older Attractor dialect, refused as `unsupported.attractor`.
 pub(super) const ATTRACTOR: &[&str] = &["llm_prompt", "is_codergen", "node_type"];
 
+/// The extension namespace. An attribute under it belongs to tooling or a
+/// host, carries no workflow meaning to Petri, and is dropped without a
+/// word, as a layout attribute is. Everything else Fabro does not define is
+/// refused: a misspelt attribute that silently did nothing is the failure
+/// this table exists to prevent.
+pub(super) const EXTENSION_PREFIX: &str = "x.";
+
+/// The attribute in `known` closest to `key`, when it is close enough to be
+/// the one the author meant: within two single-character edits, the
+/// distance of a typo (`max_retrys`) or a swapped separator
+/// (`stack_child_workflow`).
+pub(super) fn closest<'a>(key: &str, known: &[&'a str]) -> Option<&'a str> {
+    const MAX_DISTANCE: usize = 2;
+    known
+        .iter()
+        .copied()
+        .filter(|candidate| *candidate != key)
+        .map(|candidate| (edit_distance(key, candidate), candidate))
+        .filter(|(distance, _)| *distance <= MAX_DISTANCE)
+        .min_by_key(|(distance, candidate)| (*distance, candidate.len()))
+        .map(|(_, candidate)| candidate)
+}
+
+/// The Levenshtein distance between two attribute names.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    let mut current = vec![0; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let substitution = previous[j] + usize::from(ca != cb);
+            current[j + 1] = substitution.min(previous[j + 1] + 1).min(current[j] + 1);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[b.len()]
+}
+
 /// The Fabro fidelity modes.
 pub(super) const FIDELITIES: &[&str] = &[
     "full",
@@ -194,3 +234,34 @@ pub(super) const QUESTION_TYPES: &[&str] = &[
     "multi_select",
     "freeform",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closest_names_a_typo_and_stays_quiet_on_an_unrelated_name() {
+        assert_eq!(closest("max_retrys", NODE), Some("max_retries"));
+        assert_eq!(
+            closest("stack_child_workflow", NODE),
+            Some("stack.child_workflow")
+        );
+        assert_eq!(
+            closest("stack.child_workflo", NODE),
+            Some("stack.child_workflow")
+        );
+        assert_eq!(closest("frobnicate", NODE), None);
+        assert_eq!(
+            closest("label", NODE),
+            None,
+            "an exact match is not a suggestion"
+        );
+    }
+
+    #[test]
+    fn edit_distance_counts_single_character_edits() {
+        assert_eq!(edit_distance("", "abc"), 3);
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
+        assert_eq!(edit_distance("model", "model"), 0);
+    }
+}

@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 pub use compaction::{CompactionSettings, DEFAULT_PRESERVE_TURNS, DEFAULT_THRESHOLD_PERCENT};
-use frontend::{CompileInputs, Diagnostics, FileSource, Lowered, Span};
+use frontend::{CompileInputs, Diagnostic, Diagnostics, FileSource, Lowered, Span};
 pub use imports::IMPORT_ERROR;
 use ir::placeholder::{ADMISSION_HOOKS_BY_STEP, ADMISSION_HOOKS_META, EXPR_PLACEHOLDER_KEY};
 use ir::validate::loop_reachable;
@@ -513,13 +513,32 @@ impl Ctx<'_> {
                 );
                 continue;
             }
-            if known.contains(&key) || attrs::LAYOUT.contains(&key) {
+            if known.contains(&key)
+                || attrs::LAYOUT.contains(&key)
+                || key.starts_with(attrs::EXTENSION_PREFIX)
+            {
                 continue;
             }
-            self.diags.warning(
-                "fabro.unknown_attribute",
-                attr.span.clone(),
-                format!("`{key}` on {what} is not a Fabro attribute and is ignored"),
+            let hint = if key.starts_with("tool_hooks.") {
+                "tool hooks are configured through `[[run.hooks]]` in workflow.toml \
+                 (`pre_tool_use`, `post_tool_use`), never on a node"
+                    .to_string()
+            } else if let Some(candidate) = attrs::closest(key, known) {
+                format!("did you mean `{candidate}`?")
+            } else {
+                format!(
+                    "an attribute Petri should carry without reading goes under the `{}` \
+                     namespace",
+                    attrs::EXTENSION_PREFIX
+                )
+            };
+            self.diags.push(
+                Diagnostic::error(
+                    "fabro.unknown_attribute",
+                    attr.span.clone(),
+                    format!("`{key}` on {what} is not a Fabro attribute"),
+                )
+                .with_hint(hint),
             );
         }
     }

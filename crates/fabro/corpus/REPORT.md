@@ -6,7 +6,7 @@
 |---|---|---|
 | lowered clean | 17 | 53% |
 | lowered with warnings | 14 | 43% |
-| rejected with a specific `unsupported.*` code | 1 | 3% |
+| rejected with a specific code (`unsupported.*`, `fabro.unknown_attribute`) | 1 | 3% |
 | **failed for any other reason** | 0 | 0% |
 | **panicked** | 0 | 0% |
 
@@ -25,7 +25,6 @@
 | `deprecated.auto_status` | 8 |
 | `fabro.internal_context` | 1 |
 | `fabro.prompt_missing` | 40 |
-| `fabro.unknown_attribute` | 31 |
 | `ignored.workflow_toml.environments.code-review.image.dockerfile` | 1 |
 | `ignored.workflow_toml.run.artifacts` | 1 |
 | `ignored.workflow_toml.run.checkpoint` | 1 |
