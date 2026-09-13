@@ -210,7 +210,7 @@ impl ExecutionObserver for LiveChildren {
 
     fn on_lifecycle(&self, record: &CoordinatorRecord) {
         let mut seen = self.0.lock().expect("not poisoned");
-        match &record.event {
+        match &record.body {
             CoordinatorEvent::InvocationDeclared {
                 invocation,
                 call: Some(_),

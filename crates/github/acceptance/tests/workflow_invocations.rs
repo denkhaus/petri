@@ -46,7 +46,7 @@ async fn sweep_transforms_nested_graphs_and_updates_call_digests() {
         "{:?}",
         report.state.errors()
     );
-    assert_eq!(report.lifecycle.iter().filter(|record| matches!(record.event,
+    assert_eq!(report.lifecycle.iter().filter(|record| matches!(record.body,
         CoordinatorEvent::InvocationFinished { invocation, .. } if invocation != InvocationId::ROOT
     )).count(), 4);
 }
@@ -131,7 +131,7 @@ jobs:
         .lifecycle
         .iter()
         .filter(|record| {
-            matches!(record.event, CoordinatorEvent::InvocationDeclared {
+            matches!(record.body, CoordinatorEvent::InvocationDeclared {
                 call: Some(_),
                 sandbox: SandboxBinding::Isolated,
                 ..
@@ -276,7 +276,7 @@ jobs:
     assert_eq!(report.status, RunStatus::Failed);
     assert!(log_lines(&report).contains(&"child-ready".into()));
     assert!(!log_lines(&report).contains(&"child-leaked".into()));
-    assert!(report.lifecycle.iter().any(|record| matches!(&record.event,
+    assert!(report.lifecycle.iter().any(|record| matches!(&record.body,
         CoordinatorEvent::InvocationFinished { invocation, result }
             if *invocation != InvocationId::ROOT && result.status == RunStatus::Cancelled
     )));
@@ -318,7 +318,7 @@ impl ExecutionObserver for CancelOnChildLog {
     }
 
     fn on_lifecycle(&self, record: &CoordinatorRecord) {
-        match &record.event {
+        match &record.body {
             CoordinatorEvent::ExecutionDeclared {
                 execution,
                 invocation,

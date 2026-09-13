@@ -373,7 +373,11 @@ fn inspect_reports_torn_logs_as_incomplete_and_corrupt_logs_as_errors() {
     let coordinator = run_dir.join("coordinator.jsonl");
     let text = fs::read_to_string(&coordinator).expect("reads");
     let mut lines: Vec<&str> = text.lines().collect();
-    assert!(lines.pop().is_some_and(|last| last.contains("RunFinished")));
+    assert!(
+        lines
+            .pop()
+            .is_some_and(|last| last.contains("run.finished"))
+    );
     fs::write(&coordinator, format!("{}\n", lines.join("\n"))).expect("writes");
     let (output, document) = inspect(&run_dir);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));

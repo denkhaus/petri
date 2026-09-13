@@ -215,11 +215,7 @@ impl CoordinatorStore {
     /// append costs the record, not a copy of every declared invocation.
     pub fn append(&mut self, event: CoordinatorEvent) -> Result<CoordinatorRecord, StoreError> {
         self.state.check(&event)?;
-        let record = CoordinatorRecord {
-            seq: self.next_seq,
-            event,
-            recorded_at: driver::recorded_now(),
-        };
+        let record = CoordinatorRecord::external(self.next_seq, driver::recorded_now(), event);
         let mut encoded = serde_json::to_vec(&record).map_err(StoreError::Encode)?;
         encoded.push(b'\n');
         let path = self.root.join(COORDINATOR_FILE);
@@ -229,9 +225,9 @@ impl CoordinatorStore {
             .and_then(|()| self.log.sync_data())
             .map_err(|source| io_error("append", &path, source))?;
         // Nothing touched the state since `check` accepted the event.
-        self.state.apply_checked(&record.event);
+        self.state.apply_checked(&record.body);
         self.next_seq += 1;
-        self.write_invocation_projection(&record.event)?;
+        self.write_invocation_projection(&record.body)?;
         Ok(record)
     }
 

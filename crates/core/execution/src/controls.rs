@@ -361,7 +361,7 @@ impl ExecutionObserver for ControlService {
             execution,
             invocation,
             ..
-        } = &record.event
+        } = &record.body
         {
             self.inner.live().executions.insert(*execution, *invocation);
         }

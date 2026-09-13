@@ -1976,7 +1976,7 @@ async fn recovery_redelivers_with_stable_identities() {
     // The root execution's finish: the branch children finished before it.
     let cut = lines
         .iter()
-        .position(|line| line.contains("ExecutionFinished") && line.contains("\"execution\":0"))
+        .position(|line| line.contains("execution.finished") && line.contains("\"execution\":0"))
         .expect("the root execution finished");
     fs::write(&coordinator, format!("{}\n", lines[..cut].join("\n"))).expect("writes");
 

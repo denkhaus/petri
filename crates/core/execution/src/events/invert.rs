@@ -191,18 +191,18 @@ fn coordinator_record(event: &RunEvent) -> Result<CoordinatorRecord, InvertError
         EventBody::RunFinished { status } => CoordinatorEvent::RunFinished { status: *status },
         body => {
             let note = note_of(id, body, None)?.ok_or(InvertError::UnexpectedBody { id })?;
-            CoordinatorEvent::RunNote {
+            CoordinatorEvent::RunNoteRecorded {
                 execution: event.execution,
                 kind:      note.kind,
                 payload:   note.payload,
             }
         }
     };
-    Ok(CoordinatorRecord {
-        seq: id.seq,
-        event: coordinator,
+    Ok(CoordinatorRecord::external(
+        id.seq,
         recorded_at,
-    })
+        coordinator,
+    ))
 }
 
 /// The external engine record the first event of one derives from.
@@ -652,11 +652,7 @@ mod tests {
     };
 
     fn record(seq: u64, event: CoordinatorEvent) -> CoordinatorRecord {
-        CoordinatorRecord {
-            seq,
-            event,
-            recorded_at: 1_000 + seq,
-        }
+        CoordinatorRecord::external(seq, 1_000 + seq, event)
     }
 
     #[test]
@@ -691,7 +687,7 @@ mod tests {
                 },
                 middleware_state: BTreeMap::new(),
             }),
-            record(4, CoordinatorEvent::RunNote {
+            record(4, CoordinatorEvent::RunNoteRecorded {
                 execution: Some(ExecutionId::new(1)),
                 kind:      "hook".into(),
                 payload:   serde_json::json!({ "point": "run_finished" }),

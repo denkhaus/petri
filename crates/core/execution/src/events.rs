@@ -756,7 +756,7 @@ impl Projection {
             seq:    record.seq,
             index:  0,
         };
-        let (invocation, execution, body) = match &record.event {
+        let (invocation, execution, body) = match &record.body {
             CoordinatorEvent::RunStarted {
                 format_version,
                 root,
@@ -878,7 +878,7 @@ impl Projection {
             // A run-level hook report: the same `host_note` a firing's hook
             // report is (and a hook's agent activity the same
             // `hook_activity`), with no subject, since no firing owns it.
-            CoordinatorEvent::RunNote {
+            CoordinatorEvent::RunNoteRecorded {
                 execution,
                 kind,
                 payload,

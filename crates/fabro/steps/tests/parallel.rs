@@ -1162,7 +1162,7 @@ async fn a_cancel_before_the_fan_in_keeps_the_finished_branch_result() {
         thread::spawn(move || {
             wait_until(Duration::from_secs(20), "a finished and b started", || {
                 workspace.join("started_b").exists()
-                    && coordinator_records(&run_dir, "InvocationFinished") >= 1
+                    && coordinator_records(&run_dir, "invocation.finished") >= 1
             });
             handle.cancel_root();
         });
@@ -1226,7 +1226,7 @@ async fn a_kill_after_the_cancel_closes_the_fork_as_killed() {
             wait_until(
                 Duration::from_secs(20),
                 "the cancel reached every child",
-                || coordinator_records(&run_dir, "InvocationCancelRequested") >= 3,
+                || coordinator_records(&run_dir, "invocation.cancel.requested") >= 3,
             );
             handle.cancel_root();
         });
@@ -1330,7 +1330,7 @@ async fn resume_keeps_a_finished_branch_and_finishes_the_unfinished_one() {
     // root log ends with a's branch step finished; b's log has no finish.
     let coordinator = dir.path().join("coordinator.jsonl");
     truncate_after(&coordinator, |line| {
-        line.contains("InvocationFinished") && line.contains(&format!("\"invocation\":{child_a}"))
+        line.contains("invocation.finished") && line.contains(&format!("\"invocation\":{child_a}"))
     });
     truncate_after(&log_of(0), |line| {
         line.contains("step.finished") && line.contains("\"id\":\"a\"")

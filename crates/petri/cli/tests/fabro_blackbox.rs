@@ -530,7 +530,7 @@ async fn an_unused_required_entry_fails_verification_without_rewriting_the_run_s
     // The persisted run stands as the engine reported it.
     let coordinator = fs::read_to_string(case.run_dir.join("coordinator.jsonl")).expect("log");
     assert!(
-        coordinator.contains(r#""RunFinished":{"status":"success"}"#),
+        coordinator.contains(r#""event":"run.finished","status":"success"}"#),
         "{coordinator}"
     );
 }

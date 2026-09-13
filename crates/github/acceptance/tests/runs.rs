@@ -623,7 +623,7 @@ impl ExecutionObserver for SweepFailures {
         }
     }
     fn on_lifecycle(&self, record: &CoordinatorRecord) {
-        if let CoordinatorEvent::InvocationFinished { invocation, result } = &record.event
+        if let CoordinatorEvent::InvocationFinished { invocation, result } = &record.body
             && *invocation != InvocationId::ROOT
             && result.status == ir::RunStatus::Failed
             && let Some(failure) = self

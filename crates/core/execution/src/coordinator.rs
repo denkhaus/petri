@@ -1079,7 +1079,7 @@ impl Coordinator {
         report: &driver::ExecutionReport,
     ) -> Result<(), CoordinatorError> {
         for note in &report.run_notes {
-            self.append(CoordinatorEvent::RunNote {
+            self.append(CoordinatorEvent::RunNoteRecorded {
                 execution: Some(execution),
                 kind:      note.kind.clone(),
                 payload:   note.payload.clone(),

@@ -166,7 +166,7 @@ async fn resume_folds_a_final_outcome_before_reissuing_pending_routing() {
     .expect("coordinator log decodes");
     let mut coordinator_prefix = Vec::new();
     for record in decoded.records {
-        let declared = matches!(record.event, CoordinatorEvent::ExecutionDeclared { .. });
+        let declared = matches!(record.body, CoordinatorEvent::ExecutionDeclared { .. });
         serde_json::to_writer(&mut coordinator_prefix, &record).expect("record encodes");
         coordinator_prefix.push(b'\n');
         if declared {
@@ -838,7 +838,7 @@ async fn assert_terminal_parent_recovers_child(cancel_recorded: bool) {
     let mut prefix = Vec::new();
     for record in lifecycle.records {
         let cancellation = matches!(
-            record.event,
+            record.body,
             CoordinatorEvent::InvocationCancelRequested { .. }
         );
         if cancellation && !cancel_recorded {

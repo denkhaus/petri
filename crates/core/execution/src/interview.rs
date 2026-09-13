@@ -812,7 +812,7 @@ impl ExecutionObserver for InterviewDispatcher {
 
     fn on_lifecycle(&self, record: &CoordinatorRecord) {
         let mut state = self.inner.state();
-        match &record.event {
+        match &record.body {
             CoordinatorEvent::ExecutionDeclared {
                 execution,
                 invocation,

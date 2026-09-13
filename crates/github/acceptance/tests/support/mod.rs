@@ -325,7 +325,7 @@ impl ExecutionObserver for WorkflowEvents {
             execution,
             invocation: InvocationId::ROOT,
             ..
-        } = record.event
+        } = record.body
         {
             self.root_executions
                 .lock()

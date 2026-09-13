@@ -338,9 +338,9 @@ async fn the_breaker_state_is_restored_on_resume() {
     let kept: Vec<&str> = text
         .lines()
         .filter(|line| {
-            !(line.contains("\"RunFinished\"")
-                || line.contains("\"InvocationFinished\"")
-                || (line.contains("\"ExecutionFinished\"") && line.contains("terminal")))
+            !(line.contains("\"run.finished\"")
+                || line.contains("\"invocation.finished\"")
+                || (line.contains("\"execution.finished\"") && line.contains("terminal")))
         })
         .collect();
     fs::write(&coordinator, format!("{}\n", kept.join("\n"))).expect("rewrite");
