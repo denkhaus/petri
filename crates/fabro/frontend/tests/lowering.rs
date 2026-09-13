@@ -1545,17 +1545,102 @@ fn structural_mistakes_are_specific_errors() {
 }
 
 #[test]
-fn unused_attributes_warn_and_unbounded_agent_repairs_are_rejected() {
-    let diags = diagnostics(&dot(r#"
-        a [prompt="x", frobnicate="yes"]
-        start -> a -> exit
-    "#));
-    assert!(
-        diags
-            .iter()
-            .any(|diagnostic| diagnostic.code == "fabro.unknown_attribute"),
-        "{diags:?}"
+fn unknown_attributes_are_refused_with_the_closest_name_as_the_hint() {
+    // An attribute Fabro does not define is an error, not a warning: the
+    // workflow does not load.
+    let lowered = load(
+        "w.fabro",
+        &dot(r#"
+            a [prompt="x", frobnicate="yes"]
+            start -> a -> exit
+        "#),
+        &NoFiles,
+        &CompileInputs::new(),
     );
+    assert!(
+        lowered.graph.is_none(),
+        "an unknown attribute rejects the workflow"
+    );
+    let unknown: Vec<&frontend::Diagnostic> = lowered
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "fabro.unknown_attribute")
+        .collect();
+    assert_eq!(unknown.len(), 1, "{:?}", lowered.diagnostics);
+    assert!(unknown[0].is_error());
+    assert!(
+        unknown[0]
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("`x.`")),
+        "an unrelated name points at the extension namespace: {:?}",
+        unknown[0].hint
+    );
+    // A typo names the attribute the author meant, on nodes, edges and the
+    // graph alike.
+    let typo = diagnostics(&dot(r#"
+        graph [default_modle="m"]
+        a [prompt="x", max_retrys=3]
+        start -> a
+        a -> exit [conditon="outcome=succeeded"]
+    "#));
+    let hints: Vec<String> = typo
+        .iter()
+        .filter(|d| d.code == "fabro.unknown_attribute")
+        .map(|d| d.hint.clone().unwrap_or_default())
+        .collect();
+    assert_eq!(hints.len(), 3, "{typo:?}");
+    assert!(
+        hints.iter().any(|h| h.contains("`default_model`")),
+        "{hints:?}"
+    );
+    assert!(
+        hints.iter().any(|h| h.contains("`max_retries`")),
+        "{hints:?}"
+    );
+    assert!(hints.iter().any(|h| h.contains("`condition`")), "{hints:?}");
+    // The extension namespace is never diagnosed, wherever it appears.
+    assert!(
+        codes(&dot(r#"
+            graph ["x.owner"="platform"]
+            a [prompt="x", "x.ticket"="PLAT-12"]
+            start -> a -> exit ["x.note"="generated"]
+        "#))
+        .is_empty(),
+        "`x.` attributes are carried without a word"
+    );
+}
+
+/// `[run.model.fallbacks]` rides on the `start` node as written, beside
+/// every LLM node's copy, so the start stage can check the table against
+/// the catalog before anything runs.
+#[test]
+fn the_start_node_carries_the_fallback_table() {
+    let files = files(&[(
+        "wf/workflow.toml",
+        "[run.model.fallbacks]\n\"gpt-5.6-sol\" = [\"anthropic:claude-sonnet-5\"]\n",
+    )]);
+    let lowered = load(
+        "wf/workflow.fabro",
+        &dot(r#"
+            a [prompt="x", backend="api", model="gpt-5.6-sol"]
+            start -> a -> exit
+        "#),
+        &files,
+        &CompileInputs::new(),
+    );
+    let graph = lowered.graph.expect("a graph");
+    let table = json!({ "gpt-5.6-sol": ["anthropic:claude-sonnet-5"] });
+    assert_eq!(node(&graph, "start").step.config["fallbacks"], table);
+    assert_eq!(node(&graph, "a").step.config["fallbacks"], table);
+    assert!(
+        node(&graph, "exit").step.config.get("fallbacks").is_none(),
+        "only `start` checks the table"
+    );
+}
+
+#[test]
+fn unbounded_agent_repairs_are_rejected() {
     assert!(
         codes(&dot(r#"
             a [prompt="x", output_retries=101]
@@ -2000,15 +2085,23 @@ fn thread_ids_without_full_fidelity_warn_and_bad_modes_are_errors() {
         a [prompt="x", tool_hooks.pre="echo", tool_hooks.post="echo"]
         start -> a -> exit
     "#));
-    let unknown: Vec<&str> = unknown
+    let unknown: Vec<&frontend::Diagnostic> = unknown
         .iter()
         .filter(|d| d.code == "fabro.unknown_attribute")
-        .map(|d| d.message.as_str())
         .collect();
     assert_eq!(unknown.len(), 2, "{unknown:?}");
     assert!(
-        unknown.iter().all(|m| m.contains("tool_hooks.")),
+        unknown
+            .iter()
+            .all(|d| d.is_error() && d.message.contains("tool_hooks.")),
         "{unknown:?}"
+    );
+    assert!(
+        unknown.iter().all(|d| d
+            .hint
+            .as_deref()
+            .is_some_and(|h| h.contains("[[run.hooks]]"))),
+        "the hint names where tool hooks are configured: {unknown:?}"
     );
 }
 

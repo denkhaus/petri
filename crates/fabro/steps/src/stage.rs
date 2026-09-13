@@ -9,6 +9,11 @@
 //! through [`record`]; `start` is the first, so `sandbox_ready` and every
 //! later stage hook find it. The step itself does what `noop` did: it
 //! returns its resolved config as its output.
+//!
+//! `start` also carries the run's `[run.model.fallbacks]` table and checks
+//! it against the model catalog before anything else: a table the run
+//! cannot use fails the run at run start, as Fabro's server refuses it,
+//! not at the first LLM stage that would have read it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -23,9 +28,10 @@ use ir::{Outcome, ScopeId, StepKindId, Value};
 use serde::Deserialize;
 use steps::{Step, StepCtx};
 
-use crate::checkout;
 use crate::hooks::{BLOCKED_CLASS, record_report, view_of};
 use crate::outcome::Stage;
+use crate::pebble::PebbleClient;
+use crate::{checkout, fallback};
 
 pub const KIND: StepKindId = STAGE_KIND;
 
@@ -100,33 +106,39 @@ pub fn record(ctx: &StepCtx) {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct StageConfig {
-    pub node:     String,
-    pub kind:     String,
-    pub label:    String,
+    pub node:      String,
+    pub kind:      String,
+    pub label:     String,
     /// The run's merged `[[run.hooks]]`, on `start` and `exit`.
-    pub hooks:    Value,
+    pub hooks:     Value,
     /// The workflow's name, for `FABRO_WORKFLOW`.
-    pub workflow: String,
+    pub workflow:  String,
     /// The run context at spawn.
-    pub kv:       Value,
+    pub kv:        Value,
     /// `[run.clone]` and the repository the host bound, on the root
     /// `start` stage: the workspace is checked out from it first.
-    pub checkout: Value,
+    pub checkout:  Value,
+    /// `[run.model.fallbacks]` as written, on `start`: checked against the
+    /// catalog before anything runs, so a table the run cannot use fails
+    /// the run where Fabro's server refuses it, at run start, and not at
+    /// the first LLM stage that would have read it.
+    pub fallbacks: Value,
     #[serde(flatten)]
-    pub rest:     serde_json::Map<String, Value>,
+    pub rest:      serde_json::Map<String, Value>,
 }
 
 impl Default for StageConfig {
     fn default() -> Self {
         Self {
-            node:     String::new(),
-            kind:     String::new(),
-            label:    String::new(),
-            hooks:    Value::Null,
-            workflow: String::new(),
-            kv:       Value::Null,
-            checkout: Value::Null,
-            rest:     serde_json::Map::new(),
+            node:      String::new(),
+            kind:      String::new(),
+            label:     String::new(),
+            hooks:     Value::Null,
+            workflow:  String::new(),
+            kv:        Value::Null,
+            checkout:  Value::Null,
+            fallbacks: Value::Null,
+            rest:      serde_json::Map::new(),
         }
     }
 }
@@ -146,6 +158,17 @@ impl Step for StageStep {
 
     async fn run(&self, config: StageConfig, ctx: StepCtx) -> Outcome {
         record(&ctx);
+        // Configuration first: a `[run.model.fallbacks]` table the catalog
+        // cannot resolve ends the run before a checkout, a hook or a node
+        // spends anything on it.
+        if config.kind == "start"
+            && !config.fallbacks.is_null()
+            && let Some(client) = ctx.capability::<PebbleClient>()
+            && let Err(message) = fallback::check_table(&client.0, &config.fallbacks)
+        {
+            return Stage::failed(message, "bad_config", Some(frontend_fabro::Policy::Exit))
+                .into_outcome(&config.node);
+        }
         // The checkout comes first: the sandbox is "ready" once the
         // repository is in it, as Fabro's clone precedes `sandbox_ready`.
         if config.kind == "start"

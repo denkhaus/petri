@@ -21,15 +21,21 @@ use frontend_fabro::Fabro;
 
 pub mod runs;
 
+/// The one non-`unsupported.*` code that is a specific rejection: the
+/// diagnostic names the attribute and, when there is one, the attribute
+/// the author meant.
+const UNKNOWN_ATTRIBUTE: &str = "fabro.unknown_attribute";
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Class {
     /// Lowered with no diagnostics at all.
     Clean,
     /// Lowered; warnings only.
     Warnings,
-    /// Rejected, and every error is an `unsupported.*` code.
+    /// Rejected, and every error is a specific code: `unsupported.*` or
+    /// `fabro.unknown_attribute`.
     Unsupported,
-    /// Rejected with at least one error that is not `unsupported.*`.
+    /// Rejected with at least one error that is not a specific code.
     OtherError,
     /// The frontend panicked. Never acceptable.
     Panicked,
@@ -187,7 +193,7 @@ pub fn lower_one(root: &Path, file: &str) -> (Outcome, Option<Artifact>) {
             } else if diagnostics
                 .iter()
                 .filter(|d| d.is_error())
-                .all(|d| d.unsupported_feature().is_some())
+                .all(|d| d.unsupported_feature().is_some() || d.code == UNKNOWN_ATTRIBUTE)
             {
                 Class::Unsupported
             } else {
@@ -243,7 +249,7 @@ pub fn report(outcomes: &[Outcome], pin: &str) -> String {
         ("lowered clean", Class::Clean),
         ("lowered with warnings", Class::Warnings),
         (
-            "rejected with a specific `unsupported.*` code",
+            "rejected with a specific code (`unsupported.*`, `fabro.unknown_attribute`)",
             Class::Unsupported,
         ),
         ("**failed for any other reason**", Class::OtherError),

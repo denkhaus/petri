@@ -102,6 +102,56 @@ fn plan_routes_of(records: &[Value], node: &str) -> Vec<String> {
         .collect()
 }
 
+/// A `[run.model.fallbacks]` table the run cannot use fails the run at
+/// `start`, before any node runs and before any request leaves: Fabro's
+/// server refuses such a table at run start, and the first LLM stage is
+/// too late to learn about a configuration error.
+#[tokio::test]
+async fn a_bad_fallback_table_fails_the_run_at_start() {
+    let mut case = Case::new("fallback-bad-table");
+    let openai = Twin::start(OPENAI, &case.root.join("twin-openai"), vec![]).await;
+    case.redirect(&openai);
+    // The key names a provider; keys name a requested model.
+    let workflow = agent_workflow(
+        &case,
+        OPENAI,
+        "",
+        "[run.model.fallbacks]\nopenai = [\"anthropic:claude-sonnet-5\"]\n",
+    );
+    let finished = case.run_with(&workflow, &[], no_client_retries()).await;
+    finished.assert_code(1);
+    assert_eq!(
+        finished.status_line(),
+        Some("failed"),
+        "{}",
+        finished.stderr
+    );
+    let nodes = finished.finished_nodes();
+    assert!(
+        nodes.contains(&("failure".to_owned(), "start".to_owned())),
+        "{nodes:?}"
+    );
+    assert!(
+        !nodes.iter().any(|(_, node)| node == "agent"),
+        "nothing ran after start: {nodes:?}"
+    );
+    let context = finished.final_context();
+    assert_eq!(context["failure_class"], json!("bad_config"), "{context:?}");
+    let document = finished.inspect();
+    let failure =
+        document["executions"][0]["engine"]["context"]["nodes"]["start"]["failure"].to_string();
+    assert!(
+        failure.contains("names provider `openai`"),
+        "the failure names the key and the provider: {failure}"
+    );
+    assert!(
+        requests(&openai, &case).is_empty(),
+        "no request left the runner"
+    );
+    finished.assert_no_leaked_processes().await;
+    openai.stop();
+}
+
 /// The primary answers: the plan names the chain and nothing advances.
 #[tokio::test]
 async fn a_successful_primary_request_never_leaves_its_route() {

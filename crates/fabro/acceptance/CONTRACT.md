@@ -331,6 +331,13 @@ accepted the request differences) and the `fallback-repeated-tool-effect`
 record (the baseline defect) are deleted; a recurrence is reported as an
 unresolved `request` or `artifact` difference.
 
+Retired 2026-09-13: **model fallback configuration errors**. A
+`[run.model.fallbacks]` table the catalog cannot resolve failed the first
+LLM stage with class `bad_config`; it now fails the run at its `start`
+stage, before anything runs, as Fabro's server refuses it at run start
+(`fabro_fallback_blackbox::a_bad_fallback_table_fails_the_run_at_start`).
+The `fallback-resolution` record keeps its two remaining differences.
+
 Retired with review finding G05: **promotion after retries**. The last
 retryable failure was converted by the engine's exhaustion policy before any
 explicit route was considered, so an `outcome=failed` edge did not recover
@@ -355,6 +362,7 @@ default model before the first stage).
 |---|---|---|
 | Firing cap | 500 firings per looped node; an explicit limit above 500 is refused at load | unlimited when visit limits are unset or zero |
 | Invocation maximum | a hard 10,000 workflow invocations per run; cannot be raised or disabled | no counterpart |
+| Unknown attributes | a graph, node or edge attribute Fabro does not define is refused at load (`fabro.unknown_attribute`), with the closest Fabro attribute as the hint; the `x.` namespace and the Graphviz layout attributes are dropped silently | accepted silently: the validator has no rule for attribute names, and an unknown attribute does nothing |
 | `outcome=success` | matched as `succeeded` with a warning until 2026-10-04, then refused | accepted, never matches |
 | ACP tool hooks | best effort at `session/request_permission`, with a `fabro.hook.warning` naming the backend, hook, event and missing boundary for each unenforceable hook | ignored silently |
 | `stage_retrying` hook | dispatched before each retry attempt; its decision is ignored | declared, never dispatched |
@@ -386,7 +394,6 @@ default model before the first stage).
 | MCP stdio working directory | the scope's workspace when the scope shares the host filesystem, else Petri's own directory | the run worker's directory |
 | Model fallback: provider-only candidates | a bare provider in a chain resolves to the same model id on that provider when its catalog lists it, else `NoCompatibleModel` | picks the provider's closest model by feature profile and price |
 | Model fallback: unknown selectors | a selector no catalog row names is skipped with a notice unless the provider allows passthrough models | passed through for the provider to validate |
-| Model fallback: configuration errors | a bad chain (provider-named or qualified key, two keys for one model, unknown key or provider) fails the first LLM stage with class `bad_config` | fails run start |
 | Model fallback: ACP agents | no plan; the ACP command owns its model | the same |
 | Model fallback: events | `StepEvent::Custom` kind `fabro.fallback.plan` and the once-per-run stderr notices; every route fact is Pebble's own event in `agent_activity` (`SessionStarted`, `RouteFailover`, `RouteFailoverStopped`, `AssistantMessage`), with the `model fallback: ...` line on the node's stderr; no `route`, `usage`, `failover` or `stop` kinds and no `metrics.custom.fallback.*` (decision `pebble-events-are-the-agent-contract`) | `agent.failover` events and run notices |
 | Model fallback: recovery | a resumed node starts a new plan at position 0 on the primary; a request in flight at the crash may be sent again | sessions persist server-side |

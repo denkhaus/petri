@@ -1,0 +1,9 @@
+id = "unknown-attributes-refused"
+title = "Petri refuses an attribute Fabro does not define"
+scenarios = ["*"]
+bundles = ["*"]
+fabro = "Accepted silently: the validator has no rule for attribute names, and an unknown attribute does nothing."
+petri = "Refused at load (`fabro.unknown_attribute`) with the closest Fabro attribute as the hint; the `x.` namespace and the Graphviz layout attributes are dropped silently."
+user_visible_effect = "A workflow with a misspelt or foreign attribute loads on Fabro and does not load on Petri."
+reason = "A misspelt attribute that silently does nothing is the failure the attribute tables exist to prevent; tooling attributes have the `x.` namespace."
+acceptance = "No required bundle carries such an attribute; the comparison has no shape for a load rejection."
