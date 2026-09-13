@@ -96,11 +96,12 @@ tool and a gate), `fallback-failover` (task 12's capture: a 503 after a
 completed tool effect and the fall back to Anthropic), `skills-precedence`
 (task 14's capture: the three skill directories, the reference prompt
 section and `use_skill` tool, the repository's copy winning). Baseline defects of
-the pinned Fabro found by the matrix: it repeats a completed tool effect
-on failover (`fallback-repeated-tool-effect`). That record lists the failed
-assertion under `known_defects`: the cell reports it as a baseline defect,
-the coverage report counts the Fabro engine record as passed with a note
-naming the record, and Petri must still pass the assertion. The five cells
+the pinned Fabro found by the matrix: none at `05ebd0fd`. The previous pin
+(`b6482910`) repeated a completed tool effect on failover, recorded as
+`fallback-repeated-tool-effect` with the failed assertion under
+`known_defects`; since fabro-sh/fabro runs an agent stage's failover inside
+Pebble, the live cell shows the append running once, the assertion passes on
+both engines, and the record is retired. The five cells
 are required cells of `scenarios/matrix.json` (backend `host`, the engine's
 agent, `test` naming the `fabro_differential` test), satisfied by the engine
 records the tests write.
@@ -320,6 +321,16 @@ reports `succeeded`. Oracle cases `succeed_keeps_a_failure_an_explicit_edge_matc
 Fabro with no departure. The `partially_succeed` spelling stays as an
 accepted difference (below).
 
+Retired with the Fabro re-pin to `05ebd0fd` (2026-09-13): **model fallback
+session handoff**. The pinned Fabro now runs an agent stage's failover inside
+Pebble, so it resumes the failed session's record on the next route as Petri
+does: in `fallback-failover` the append runs once on both engines, the
+fallback route's first request carries the history on both, and the request
+sequences and counts match. The `fallback-session-handoff` record (which
+accepted the request differences) and the `fallback-repeated-tool-effect`
+record (the baseline defect) are deleted; a recurrence is reported as an
+unresolved `request` or `artifact` difference.
+
 Retired with review finding G05: **promotion after retries**. The last
 retryable failure was converted by the engine's exhaustion policy before any
 explicit route was considered, so an `outcome=failed` edge did not recover
@@ -336,10 +347,9 @@ when they were written, and `scripts/oracle-regenerate.sh` can add one.
 These stay in the contract. They are tested as Petri differences, not as
 reference expectations. Each row is one decision record under
 `crates/fabro/acceptance/decisions/`, which is the index the differential
-comparison loads; two records found by the matrix have no row here:
+comparison loads; one record found by the matrix has no row here:
 `fabro-run-title-call` (Fabro's run-title request on the provider's small
-default model before the first stage) and `fallback-repeated-tool-effect`
-(a baseline defect, not an accepted Petri behaviour).
+default model before the first stage).
 
 | Difference | Petri | Fabro |
 |---|---|---|
@@ -374,7 +384,6 @@ default model before the first stage) and `fallback-repeated-tool-effect`
 | MCP secrets | `{{ secrets.NAME }}` resolves as a whole `env` or `headers` value only, from `PETRI_SECRET_NAME` (or the host's provider) at launch; a token inside a command, script or URL is refused at load | resolved anywhere in the transport strings at the run boundary from the vault |
 | MCP `sandbox` transport | launched through the scope's execution environment and reached through the provider's preview URL (the host's loopback, the Docker plugin's port forward into the container, Daytona's preview link with its token header); a provider without preview URLs fails the server with a named reason | a Daytona preview URL; local sandboxes fall back to localhost |
 | MCP stdio working directory | the scope's workspace when the scope shares the host filesystem, else Petri's own directory | the run worker's directory |
-| Model fallback: session handoff | Pebble resumes the failed session's record on the next route (`ResumeMode::UseModel`, same session id) and continues the prompt on the history as it stands: the next model answers committed tool results with no new input (`continue_turn`), so a tool effect that already ran is never repeated; a prompt nothing answered yet is asked again (`replay_prompt`) | the session is discarded and a new one runs the original prompt from scratch on the next route, repeating any tool effect |
 | Model fallback: provider-only candidates | a bare provider in a chain resolves to the same model id on that provider when its catalog lists it, else `NoCompatibleModel` | picks the provider's closest model by feature profile and price |
 | Model fallback: unknown selectors | a selector no catalog row names is skipped with a notice unless the provider allows passthrough models | passed through for the provider to validate |
 | Model fallback: configuration errors | a bad chain (provider-named or qualified key, two keys for one model, unknown key or provider) fails the first LLM stage with class `bad_config` | fails run start |
