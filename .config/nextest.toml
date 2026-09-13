@@ -8,6 +8,17 @@ filter = "package(petri-github-acceptance) | (package(petri-driver) & binary(doc
 test-group = "external"
 
 # Catch a blocked runtime or teardown even when an async timeout cannot run.
+# The Fabro black box cells that run in a container each start one: under
+# the full gate, with the release build and the remote Docker test beside
+# them, an unbounded set starves itself past the cells' deadlines. Bound how
+# many run at once; the host cells stay unbounded.
+[test-groups.fabro-docker]
+max-threads = 4
+
+[[profile.default.overrides]]
+filter = "package(petri-cli) & test(/docker/)"
+test-group = "fabro-docker"
+
 [[profile.default.overrides]]
 filter = "package(petri-execution) & test(an_execution_restart_keeps_the_container_identity_and_workspace)"
 slow-timeout = { period = "60s", terminate-after = 3 }

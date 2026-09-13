@@ -544,10 +544,14 @@ names the decision record under `decisions/`; "gap" names the owner.
    (`implement_child_runs_successfully_docker`); the manager loop, the
    child's deterministic check and the parent's context all run inside the
    scope.
-4. Docker coverage is thin (seven planned cells, one of them an ACP turn). The ACP agent backend is
-   claimed through a scripted ACP agent only (the `acp` scenario family,
-   "ACP agent backend" in the readiness table below); real ACP client
-   products and Daytona are gated separately and not claimed.
+4. Every scenario runs on both backends since 2026-09-13: each of the 45
+   scenario files has a host cell and a Docker cell (the Docker set was
+   seven cells before). The container cells run under a bounded Nextest
+   group (`fabro-docker`, `.config/nextest.toml`) so the full gate cannot
+   starve them past their deadlines. The ACP agent backend is claimed
+   through a scripted ACP agent only (the `acp` scenario family, "ACP agent
+   backend" in the readiness table below); real ACP client products and
+   Daytona are gated separately and not claimed.
 5. `fix-ci` is excluded by the owner's decision of 2026-09-07.
 6. Hosted CI's first run (2026-09-08) failed at its dependency setup: the
    private-dependency deploy keys did not exist. The owner made Pebble,
@@ -720,7 +724,7 @@ it.
 | The pinned Fabro comparison matrix as a required compatibility job; nightly adds repetitions | `fabro compatibility (ubuntu-24.04)`: cached pinned build, `test:fabro:differential` (five live cells, zero unresolved differences) | met; the compatibility job passed on the runs above and in the nightly on `2463979` (34405186288, 34476177672) |
 | A machine-readable record per scenario | `tests/support/fabro/record.rs`, one record per scenario cell, `compatibility.differential` from the engine records | met |
 | Full failure bundles and compact success results retained in CI | the two `actions/upload-artifact` steps per job; the job summary carries `coverage.md` | met; artifacts and summaries on the runs above |
-| Coverage report with required, passed, failed, blocked, excluded; skips and exclusions never count | `scripts/fabro-coverage-report.py`, `--strict` in routine CI (a blocked cell is shown, not failed) and `--readiness` in `mise run check:fabro:readiness` (the final gate: every required cell passed, blocked cells included); with bundles fetched and every gate required: required 61 (the three readiness cells, the five differential cells and the five `acp` cells included), blocked 0 (the `implement/child-runs-successfully@docker/openrouter` cell has run in a container since 2026-09-10), excluded 6 (`fix-ci`). A pinned-Fabro assertion a decision record lists under `known_defects` counts as passed with a note naming the record; any other failed assertion fails the cell | met |
+| Coverage report with required, passed, failed, blocked, excluded; skips and exclusions never count | `scripts/fabro-coverage-report.py`, `--strict` in routine CI (a blocked cell is shown, not failed) and `--readiness` in `mise run check:fabro:readiness` (the final gate: every required cell passed, blocked cells included); with bundles fetched and every gate required: required 99 since 2026-09-13 (54 host cells: the three readiness cells, the five differential cells and the routing oracle included; 45 Docker cells, one per scenario file), blocked 0 (the `implement/child-runs-successfully@docker/openrouter` cell has run in a container since 2026-09-10), excluded 6 (`fix-ci`). A pinned-Fabro assertion a decision record lists under `known_defects` counts as passed with a note naming the record; any other failed assertion fails the cell | met |
 | Every bundle materializes with verified dependencies and concrete inputs | `bundles.lock.json`, the fetcher (5 of 5 verified locally); concrete inputs per scenario | met; `implement-issue` runs as inline graphs of the bundle's shape on both backends (the pinned bundle's own verify node needs the Fabro toolchain) |
 | Every required scenario and backend cell passes with no skips, unmatched calls, unexpected interviews, or unused replies | the strict coverage report plus each record's `services[].unmatched_requests` and interview receipt | met; no blocked cell since 2026-09-10 |
 | Final context, files, side effects meet independent expectations | each scenario's assertions, recorded per record; the readiness suites assert files, Git state and the public stream | met |

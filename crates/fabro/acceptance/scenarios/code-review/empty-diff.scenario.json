@@ -19,6 +19,9 @@
       {
         "message": "base",
         "write": {
+          ".gitignore": {
+            "text": "__pycache__/\n*.pyc\n"
+          },
           "src/app.py": {
             "file": "fixtures/app-base.py"
           },
