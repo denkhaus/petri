@@ -8,11 +8,11 @@
 //! `RouteFailover`, `RouteFailoverStopped`, `AssistantMessage`).
 //!
 //! The expected request sequences are derived from the pinned Fabro's
-//! source (`handler/llm/api.rs` at `b6482910`: `fallback_plan`,
-//! `failover_agent_session`, `complete_one_shot_request`); the reference
-//! binary was not run against the twins. Where Petri keeps the conversation
-//! across a model change (Fabro rebuilds the session from the original
-//! prompt), the case says so.
+//! source (at `05ebd0fd`: `handler/llm/fallback.rs` `fallback_plan` and
+//! `handler/llm/pebble.rs` `complete_one_shot_request`; an agent stage's
+//! failover runs inside Pebble); the reference binary was not run against
+//! the twins here. The differential cell (`fabro_differential.rs`,
+//! `fallback-failover`) is where the two binaries meet.
 
 mod support;
 

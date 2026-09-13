@@ -12,10 +12,10 @@ tracked defect, an accepted migration, or an explicit exclusion.
 | What | Value |
 |---|---|
 | Fabro repository | `fabro-sh/fabro` |
-| Reference commit | `b6482910e517d00dfc3c4a2f2d3e417c9348f7f6` (committed 2026-09-05T18:05Z) |
-| Where it lives | `refs/pull/844/head`; not on `main` at freeze time |
-| Pin file | `crates/fabro/corpus-pin.txt` (the `# ref:` line names the pull ref) |
-| Fabro version string | `fabro 0.347.0-nightly.0 (b648291 ...)` |
+| Reference commit | `05ebd0fd1beec214b558f4b478e36bd08b507dc7` (committed 2026-09-13T14:42Z) |
+| Where it lives | `main` (the merge of fabro-sh/fabro#867) |
+| Pin file | `crates/fabro/corpus-pin.txt` (no `# ref:` line: the commit is on `main`) |
+| Fabro version string | `fabro 0.355.0-nightly.0 (05ebd0f ...)` |
 | Fixtures | `crates/fabro/oracle/expected/*.json`, each with `fabro_commit` equal to the pin |
 
 Rules:
@@ -684,7 +684,7 @@ fails when any of them disagree. The row names are the keys of a record's
 | `lithos_llm` | `a1e3fd37b7153870411701327ac117606753fe90` | `lithoscomputer/lithos-llm` (public) | provider transport and request retries |
 | `sandbox_driver` | `ddb32e19e763299319ecf6aebc8961298db80c0c` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `ca45f0e50a6716d716aa2f638ca3cf767e88f613` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
-| `fabro_reference` | `b6482910e517d00dfc3c4a2f2d3e417c9348f7f6` | `fabro-sh/fabro` (public, `refs/pull/844/head`) | the reference Fabro the corpus, oracle, bundles, and differential matrix use |
+| `fabro_reference` | `05ebd0fd1beec214b558f4b478e36bd08b507dc7` | `fabro-sh/fabro` (public, `main`) | the reference Fabro the corpus, oracle, bundles, and differential matrix use |
 | `runner_image` | `f8bbbfd81934` | `lithoscomputer/sandbox-images` (public) | the default runner images (`ghcr.io/lithoscomputer/ubuntu-*`) Docker and Daytona scopes start from (`RUNNER_PIN` in `crates/core/executor-sandbox/src/backend.rs`; PyYAML present since `df708f910111`) |
 
 A change to Pebble or lithos-llm runs the owning
