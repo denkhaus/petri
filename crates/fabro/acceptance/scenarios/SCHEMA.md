@@ -151,9 +151,11 @@ that uses it until a service is implemented.
 }
 ```
 
-- `interrupt_when.file` sends SIGINT once the named workspace file exists
-  (`container_file` for a file inside the run's container). This is how a
-  case cancels a run the way a person does, tied to an observed event.
+- `interrupt_when.file` sends SIGINT once the named workspace file exists:
+  on the host the harness reads the workspace, in a container it reads
+  `/workspace/<file>` through `docker cp`, so one scenario serves both
+  backends (`container_file` names a container path outright). This is how
+  a case cancels a run the way a person does, tied to an observed event.
 - `interrupt_when.request` sends SIGINT once the named twin scenario has been
   consumed: a cancellation timed to a provider request the run made.
 - `interrupt_when.stderr` sends SIGINT once a stderr line of the run
