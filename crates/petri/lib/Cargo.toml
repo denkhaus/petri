@@ -42,7 +42,7 @@ tokio-util = { workspace = true }
 # harness uses (`crates/petri/cli`), with `lithos-llm`'s credential types.
 lithos-llm = { workspace = true, features = ["runtime"] }
 tokio = { workspace = true, features = ["net"] }
-twin-openai = { git = "https://github.com/lithoscomputer/twins", rev = "fedab8e6b9b8e2577bee7d93812a318d6adb4aa4" }
-twin-anthropic = { git = "https://github.com/lithoscomputer/twins", rev = "fedab8e6b9b8e2577bee7d93812a318d6adb4aa4" }
+twin-openai = { git = "https://github.com/lithoscomputer/twins", rev = "ca45f0e50a6716d716aa2f638ca3cf767e88f613" }
+twin-anthropic = { git = "https://github.com/lithoscomputer/twins", rev = "ca45f0e50a6716d716aa2f638ca3cf767e88f613" }
 # The twins export Axum routers; the proof serves them on an ephemeral port.
 axum = "0.8"

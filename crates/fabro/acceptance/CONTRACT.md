@@ -683,9 +683,9 @@ fails when any of them disagree. The row names are the keys of a record's
 | `pebble` | `69969420c9017ca15ac6c175c820a0cb8090866a` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
 | `lithos_llm` | `a1e3fd37b7153870411701327ac117606753fe90` | `lithoscomputer/lithos-llm` (public) | provider transport and request retries |
 | `sandbox_driver` | `ddb32e19e763299319ecf6aebc8961298db80c0c` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
-| `twins` | `fedab8e6b9b8e2577bee7d93812a318d6adb4aa4` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
+| `twins` | `ca45f0e50a6716d716aa2f638ca3cf767e88f613` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
 | `fabro_reference` | `b6482910e517d00dfc3c4a2f2d3e417c9348f7f6` | `fabro-sh/fabro` (public, `refs/pull/844/head`) | the reference Fabro the corpus, oracle, bundles, and differential matrix use |
-| `runner_image` | `506a3433f7af` | `lithoscomputer/sandbox-images` (public) | the default runner images (`ghcr.io/lithoscomputer/ubuntu-*`) Docker and Daytona scopes start from (`RUNNER_PIN` in `crates/core/executor-sandbox/src/backend.rs`; PyYAML present since `df708f910111`) |
+| `runner_image` | `f8bbbfd81934` | `lithoscomputer/sandbox-images` (public) | the default runner images (`ghcr.io/lithoscomputer/ubuntu-*`) Docker and Daytona scopes start from (`RUNNER_PIN` in `crates/core/executor-sandbox/src/backend.rs`; PyYAML present since `df708f910111`) |
 
 A change to Pebble or lithos-llm runs the owning
 repository's required checks before Petri moves its pin; then this table, the
