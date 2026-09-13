@@ -19,10 +19,10 @@
 //! HTTP or, with `protocol = "sse"`, the older SSE transport. A `sandbox`
 //! server is launched in the scope's execution environment and reached over
 //! the same two protocols through the environment's route to its port
-//! (`ExecEnv::preview_url`, handed to Pebble as sandbox-driver's
-//! `PreviewUrls` facet by [`super::environment::PortRoutes`]): the host's own
-//! loopback, the Docker plugin's forward into the container, or Daytona's
-//! preview link with its token header. A streamable HTTP server is reached
+//! (`ExecEnv::preview_url`, handed to Pebble as its own `PortRoutes` contract
+//! by [`super::environment::ScopePortRoutes`]): the host's own loopback, the
+//! Docker plugin's forward into the container, or Daytona's preview link with
+//! its token header. A streamable HTTP server is reached
 //! at the route itself; an SSE server serves its event stream at `/sse`
 //! under it ([`SSE_PATH`]), where Fabro has always reached one. Pebble
 //! releases the route when the server stops. Secrets in `env` and `headers`

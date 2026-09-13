@@ -43,7 +43,7 @@ use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
 
-use environment::{PebbleEnvironment, PortRoutes, elapsed_ms};
+use environment::{PebbleEnvironment, ScopePortRoutes, elapsed_ms};
 use execution::hooks::HookServiceHandle;
 use executor::Masker;
 use ir::{Attempt, Control, FiringId, LogStream, ScopeId, StepEvent, Value};
@@ -319,7 +319,7 @@ impl NativeSession {
                 .redactor(redactor)
                 .human_input(provider)
                 .mcp_servers(servers.servers)
-                .port_routes(Arc::new(PortRoutes::new(env)));
+                .port_routes(Arc::new(ScopePortRoutes::new(env)));
             builder = compaction::install(builder, compaction_policy);
             if let Some(middleware) = tool_hooks {
                 builder = builder.tool_middleware(middleware);

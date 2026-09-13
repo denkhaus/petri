@@ -945,9 +945,11 @@ the scope's execution environment through Pebble's `Environment::exec`
 (`bash -c` for a `script`) and reached over the same two protocols through
 the environment's route to its port: a streamable HTTP server at the route
 itself, an SSE server's stream at `/sse` under it, where Fabro has always
-reached one. Pebble takes that route as sandbox-driver's `PreviewUrls` facet;
-Petri hands it `fabro_steps::pebble::environment::PortRoutes`, which answers
-from `ExecEnv::preview_url` (the sandbox-driver `access/preview_url`
+reached one. Pebble takes that route as its own `PortRoutes` contract
+(`pebble_coding_agent::mcp::PortRoutes`, so Petri shares no sandbox crate
+with Pebble to implement it); Petri hands it
+`fabro_steps::pebble::environment::ScopePortRoutes`, which answers from
+`ExecEnv::preview_url` (the sandbox-driver `access/preview_url`
 operation): the host's own loopback on a host scope; a forward the Docker
 plugin opens on Petri's loopback and bridges into the container, so nothing
 is published on the daemon and a remote daemon works the same; Daytona's
@@ -959,7 +961,7 @@ inside does, and releases the route when the server stops
 the handshake, so one that nothing answers at fails after `startup_timeout`
 rather than at once. An environment that offers no preview URL fails
 the server with Pebble's reason (`no route to port <port> in the
-environment: capability preview_urls is not supported ...`).
+environment: the environment does not route to its ports`).
 
 Failure behavior follows Fabro. A server that does not start (a launch error,
 no handshake within `startup_timeout`, a protocol error) is reported by
