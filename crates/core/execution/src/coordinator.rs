@@ -1195,7 +1195,10 @@ impl Coordinator {
             cancel_before_run &= !decoded.log.events().any(|event| {
                 matches!(
                     event,
-                    Event::CancelRequested { scope } | Event::KillRequested { scope }
+                    Event::CancelRequested {
+                        target: engine::CancelTarget::Scope(scope)
+                    }
+                    | Event::KillRequested { scope }
                         if *scope == ir::CancelScopeId::ROOT
                 )
             });

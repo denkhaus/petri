@@ -13,7 +13,7 @@ pub struct AdmitRequest {
     pub decision_id: DecisionId,
 }
 
-/// The result persisted in `Event::Admitted`.
+/// The result persisted in `Event::AdmissionDecided`.
 #[derive(Clone, Debug)]
 pub struct AdmissionResolution {
     pub decision: Admission,

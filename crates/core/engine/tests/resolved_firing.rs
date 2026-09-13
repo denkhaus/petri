@@ -161,10 +161,9 @@ fn the_payload_identifies_the_firing() {
     b.add_step("only", scope, NOOP);
     let graph = b.build();
 
-    let (state, commands) = apply(
-        EngineState::new(graph),
-        Event::ExecutionStarted(engine::EngineStart::default()),
-    );
+    let (state, commands) = apply(EngineState::new(graph), Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let decision_id = commands
         .iter()
         .find_map(|command| match command {
@@ -172,7 +171,7 @@ fn the_payload_identifies_the_firing() {
             _ => None,
         })
         .expect("execution start asks for admission");
-    let (state, commands) = apply(state, Event::Admitted {
+    let (state, commands) = apply(state, Event::AdmissionDecided {
         decision_id,
         decision: Admission::Admit,
         trace: Vec::new(),
@@ -184,7 +183,7 @@ fn the_payload_identifies_the_firing() {
             _ => None,
         })
         .expect("attempt start asks for admission");
-    let (state, commands) = apply(state, Event::Admitted {
+    let (state, commands) = apply(state, Event::AdmissionDecided {
         decision_id,
         decision: Admission::Admit,
         trace: Vec::new(),

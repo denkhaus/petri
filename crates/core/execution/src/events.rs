@@ -90,9 +90,8 @@ use std::{fs, io};
 use driver::lifecycle::{BUDGET_PAUSED_KIND, BUDGET_RESUMED_KIND, BudgetNote, Note};
 use driver::{BranchMap, BranchRef, BranchRole};
 use engine::{
-    Admission, DecisionId, EngineExit, EngineState, EntryPoint, Event, EventRecord,
-    EventSource as RecordSource, GroupDecision, Intervention, RouteApplied, RouteDecision,
-    WeightedDraw,
+    Admission, CancelTarget, DecisionId, EngineExit, EngineState, EntryPoint, Event, EventOrigin,
+    EventRecord, GroupDecision, Intervention, RouteApplied, RouteDecision, WeightedDraw,
 };
 use ir::placeholder::is_placeholder_item;
 use ir::{
@@ -135,7 +134,12 @@ pub use invert::{
 /// carries the weighted draw, an `AgentActivity` carries the step's own
 /// attributes beside the envelope, and a delivered answer carries the value
 /// it was decoded from.
-pub const EVENT_CONTRACT_VERSION: u32 = 2;
+///
+/// Version 3 is one vocabulary for records and events: a public event is
+/// named after its record (`step.finished`, `routing.resolved`) and carries
+/// the stored record unchanged under `record`, with what Petri derived
+/// beside it under `derived`.
+pub const EVENT_CONTRACT_VERSION: u32 = 3;
 
 /// The `StepEvent::Custom` key under which a backend's own event envelope
 /// rides, with `kind` naming the backend.
@@ -165,11 +169,11 @@ pub enum RecordOrigin {
     Core,
 }
 
-impl From<RecordSource> for RecordOrigin {
-    fn from(source: RecordSource) -> Self {
-        match source {
-            RecordSource::External => Self::External,
-            RecordSource::Core => Self::Core,
+impl From<EventOrigin> for RecordOrigin {
+    fn from(origin: EventOrigin) -> Self {
+        match origin {
+            EventOrigin::External => Self::External,
+            EventOrigin::Core => Self::Core,
         }
     }
 }
@@ -923,14 +927,14 @@ impl Projection {
         };
 
         match &record.event {
-            Event::ExecutionStarted(start) => emit(None, EventBody::ExecutionStarted {
+            Event::ExecutionStarted { start } => emit(None, EventBody::ExecutionStarted {
                 entry:           start.entry,
                 execution_index: start.execution_index,
                 context:         start.context.clone(),
                 prior_firings:   start.prior_firings.clone(),
                 max_executions:  start.max_executions,
             }),
-            Event::TokenEmitted(_) => {}
+            Event::TokenEmitted { .. } => {}
             Event::StepStarted { firing, .. } => {
                 track.started.insert(*firing);
                 emit(subject_of(state, track, *firing), EventBody::AttemptStarted);
@@ -941,7 +945,7 @@ impl Projection {
                     },
                 );
             }
-            Event::StepProgress { firing, ev } => {
+            Event::StepProgressRecorded { firing, ev } => {
                 let subject = subject_of(state, track, *firing);
                 match ev {
                     StepEvent::Log { stream, line } => emit(subject, EventBody::OutputLine {
@@ -1021,7 +1025,7 @@ impl Projection {
                     });
                 }
             }
-            Event::Admitted {
+            Event::AdmissionDecided {
                 decision_id,
                 decision,
                 trace,
@@ -1064,7 +1068,7 @@ impl Projection {
                     );
                 }
             }
-            Event::RouteApplied(applied) => {
+            Event::RouteApplied { applied } => {
                 let firing = applied.firing();
                 let subject = subject_of(state, track, firing);
                 let route = applied_route(state, applied);
@@ -1173,11 +1177,15 @@ impl Projection {
                     }
                 }
             }
-            Event::CancelRequested { scope } => emit(None, EventBody::CancelRequested {
+            Event::CancelRequested {
+                target: CancelTarget::Scope(scope),
+            } => emit(None, EventBody::CancelRequested {
                 scope: Some(*scope),
                 group: None,
             }),
-            Event::CancelGroupRequested { node } => {
+            Event::CancelRequested {
+                target: CancelTarget::Group(node),
+            } => {
                 let group = state.graph().node(*node).map(node_ref);
                 emit(None, EventBody::CancelRequested { scope: None, group });
             }
@@ -1271,9 +1279,7 @@ impl Projection {
             .collect();
         if matches!(
             &record.event,
-            Event::CancelRequested { .. }
-                | Event::CancelGroupRequested { .. }
-                | Event::KillRequested { .. }
+            Event::CancelRequested { .. } | Event::KillRequested { .. }
         ) {
             for firing in cancelling {
                 emit(
@@ -1377,7 +1383,7 @@ impl Projection {
                     seq:    record.seq,
                     index:  u32::try_from(index).unwrap_or(u32::MAX),
                 },
-                origin: record.source.into(),
+                origin: record.origin.into(),
                 invocation,
                 execution: Some(execution),
                 parent: parent.clone(),

@@ -82,7 +82,7 @@ fn step_summaries(report: &RunReportPlus) -> Vec<String> {
         .log
         .events()
         .filter_map(|e| match e {
-            engine::Event::StepProgress {
+            engine::Event::StepProgressRecorded {
                 ev: ir::StepEvent::Custom(value),
                 ..
             } => value

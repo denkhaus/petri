@@ -429,7 +429,7 @@ async fn a_javascript_action_runs_with_the_runner_contract() {
         .filter(|e| {
             matches!(
                 e,
-                engine::Event::StepProgress {
+                engine::Event::StepProgressRecorded {
                     ev: ir::StepEvent::Custom(v),
                     ..
                 } if v.get("github/step_summary").is_some()

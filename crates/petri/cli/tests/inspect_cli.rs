@@ -133,7 +133,7 @@ fn inspect_reconstructs_a_restarted_run_with_children_after_the_process_exits() 
     assert_eq!(document, again);
     assert_eq!(snapshot(&run_dir), before, "inspection changed the run dir");
 
-    assert_eq!(document["inspect_format_version"], Value::from(1));
+    assert_eq!(document["inspect_format_version"], Value::from(2));
     assert_eq!(document["complete"], Value::Bool(true));
     assert_eq!(document["status"], Value::from("success"));
 

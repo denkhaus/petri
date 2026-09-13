@@ -168,7 +168,7 @@ async fn react_cleanup_stale_branch_caches_runs() {
         .log
         .events()
         .filter_map(|e| match e {
-            engine::Event::StepProgress {
+            engine::Event::StepProgressRecorded {
                 ev: ir::StepEvent::Log { line, .. },
                 ..
             } => Some(line.clone()),

@@ -1256,11 +1256,11 @@ async fn a_prepared_result_keeps_the_original_attempt_evidence() {
         })
         .expect("the original evidence is recorded");
     assert_eq!(
-        evidence["original"]["Failure"]["class"],
+        evidence["original"]["failure"]["class"],
         json!("exit_status:3")
     );
     assert_eq!(
-        evidence["effective"]["PartialSuccess"]["underlying"]["class"],
+        evidence["effective"]["partial_success"]["underlying"]["class"],
         json!("exit_status:3")
     );
     assert_eq!(evidence["reason"], json!("the host accepts this failure"));
@@ -1386,11 +1386,11 @@ async fn an_exhausted_retry_is_prepared_as_the_final_effective_result() {
     let evidence = result_prepared_note(&outcome.events, "work");
     assert_eq!(evidence["attempt"], json!(2));
     assert_eq!(
-        evidence["original"]["PartialSuccess"]["underlying"]["class"],
+        evidence["original"]["partial_success"]["underlying"]["class"],
         json!("retry_requested")
     );
     assert_eq!(
-        evidence["effective"]["Failure"]["class"],
+        evidence["effective"]["failure"]["class"],
         json!("retry_requested")
     );
     assert_eq!(
@@ -1503,7 +1503,7 @@ async fn a_fabro_exhaustion_decision_is_prepared_before_its_record() {
     let evidence = result_prepared_note(&outcome.events, "work");
     assert_eq!(evidence["attempt"], json!(2));
     assert_eq!(
-        evidence["original"]["Failure"]["class"],
+        evidence["original"]["failure"]["class"],
         json!("retry_requested")
     );
 }
@@ -1558,11 +1558,11 @@ async fn an_ordinary_failure_is_prepared_before_its_record_and_routes_on_the_eff
     assert_eq!(work.routes, vec!["done".to_owned()]);
     let evidence = result_prepared_note(&outcome.events, "work");
     assert_eq!(
-        evidence["original"]["Failure"]["class"],
+        evidence["original"]["failure"]["class"],
         json!("exit_status:3")
     );
     assert_eq!(
-        evidence["effective"]["PartialSuccess"]["underlying"]["class"],
+        evidence["effective"]["partial_success"]["underlying"]["class"],
         json!("exit_status:3")
     );
     let note = position_of(
@@ -2161,7 +2161,7 @@ async fn the_milestone_workflow_runs_through_the_embedding_boundary() {
         })
         .expect("the original evidence is recorded");
     assert_eq!(
-        evidence["original"]["Failure"]["class"],
+        evidence["original"]["failure"]["class"],
         json!("exit_status:3")
     );
 

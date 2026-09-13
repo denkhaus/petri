@@ -309,7 +309,7 @@ async fn an_artifact_carrying_a_registered_value_is_masked() {
         .log
         .events()
         .filter_map(|e| match e {
-            engine::Event::StepProgress {
+            engine::Event::StepProgressRecorded {
                 ev: ir::StepEvent::Artifact { name, uri },
                 ..
             } => Some((name.to_string(), uri.clone())),

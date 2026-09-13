@@ -48,7 +48,7 @@ pub(crate) fn derive_fold_event(
     is_restart_edge: impl Fn(ir::EdgeId) -> bool,
 ) -> Option<FoldEvent<'_>> {
     match event {
-        Event::ExecutionStarted(_) => Some(FoldEvent::ExecutionStarted),
+        Event::ExecutionStarted { .. } => Some(FoldEvent::ExecutionStarted),
         Event::StepFinished {
             firing,
             attempt,
@@ -60,7 +60,7 @@ pub(crate) fn derive_fold_event(
                 outcome,
             })
         }
-        Event::RouteApplied(applied) => {
+        Event::RouteApplied { applied } => {
             let decision = applied.decision();
             let restart = matches!(decision, RouteDecision::Emit(edge) if is_restart_edge(edge));
             Some(FoldEvent::RouteApplied {

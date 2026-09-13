@@ -7,7 +7,7 @@ use std::thread;
 
 use driver::{EventObserver, ObserveError};
 use engine::{
-    EngineState, Event, EventLog, EventRecord, EventSource, InvalidRecords, LOG_VERSION,
+    EngineState, Event, EventLog, EventOrigin, EventRecord, InvalidRecords, LOG_VERSION,
     UnsupportedLogVersion,
 };
 use serde::{Deserialize, Serialize};
@@ -121,45 +121,56 @@ struct Header {
     version: u32,
 }
 
-/// One `events.jsonl` line: the core's record, field for field, with the
-/// driver's recording time beside it. Spelled out rather than flattened: a
-/// flattened record loses the integer map keys some events carry.
-#[derive(Deserialize)]
-struct StoredRecord {
-    seq:         u64,
-    source:      EventSource,
-    event:       Event,
-    recorded_at: u64,
+/// One `events.jsonl` line: the core's record with the driver's recording
+/// time beside it, `{"seq", "origin", "recorded_at", "body"}`. `body` is the
+/// engine event as the engine serializes it, tagged by `event`. The public
+/// event stream carries this same line, unchanged, as a record's `record`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StoredEngineRecord {
+    pub seq:         u64,
+    pub origin:      EventOrigin,
+    /// Milliseconds since the Unix epoch when the driver appended the record.
+    pub recorded_at: u64,
+    pub body:        Event,
 }
 
-impl StoredRecord {
-    fn into_parts(self) -> (EventRecord, u64) {
+impl StoredEngineRecord {
+    pub fn new(record: &EventRecord, recorded_at: u64) -> Self {
+        Self {
+            seq: record.seq,
+            origin: record.origin,
+            recorded_at,
+            body: record.event.clone(),
+        }
+    }
+
+    pub fn into_parts(self) -> (EventRecord, u64) {
         (
             EventRecord {
                 seq:    self.seq,
-                source: self.source,
-                event:  self.event,
+                origin: self.origin,
+                event:  self.body,
             },
             self.recorded_at,
         )
     }
 }
 
-/// [`StoredRecord`] for writing, over a borrowed record.
+/// [`StoredEngineRecord`] for writing, over a borrowed record.
 #[derive(Serialize)]
 struct StoredRecordRef<'a> {
     seq:         u64,
-    source:      EventSource,
-    event:       &'a Event,
+    origin:      EventOrigin,
     recorded_at: u64,
+    body:        &'a Event,
 }
 
 fn encode_record(record: &EventRecord, recorded_at: u64) -> Result<Vec<u8>, serde_json::Error> {
     let mut line = serde_json::to_vec(&StoredRecordRef {
         seq: record.seq,
-        source: record.source,
-        event: &record.event,
+        origin: record.origin,
         recorded_at,
+        body: &record.event,
     })?;
     line.push(b'\n');
     Ok(line)
@@ -183,7 +194,7 @@ pub fn decode_engine_log(bytes: &[u8]) -> Result<DecodedEngineLog, EngineLogDeco
     let mut records = Vec::new();
     let mut recorded_at = Vec::new();
     for (index, line) in lines.enumerate() {
-        let stored: StoredRecord =
+        let stored: StoredEngineRecord =
             serde_json::from_slice(line).map_err(|source| EngineLogDecodeError::BadRecord {
                 line: index + 2,
                 source,
@@ -400,10 +411,8 @@ mod tests {
     fn record(seq: u64) -> EventRecord {
         EventRecord {
             seq,
-            source: EventSource::External,
-            event: Event::CancelRequested {
-                scope: CancelScopeId::ROOT,
-            },
+            origin: EventOrigin::External,
+            event: Event::cancel_scope(CancelScopeId::ROOT),
         }
     }
 

@@ -37,14 +37,14 @@ fn routing_tokens_appear_in_the_log() {
         .state
         .log
         .events()
-        .filter(|e| matches!(e, Event::TokenEmitted(_)))
+        .filter(|e| matches!(e, Event::TokenEmitted { .. }))
         .count();
     // One seed, two from the fan-out, two into the join.
     assert_eq!(tokens, 5);
     assert!(
         matches!(
             h.state.log.events().next(),
-            Some(Event::ExecutionStarted(_))
+            Some(Event::ExecutionStarted { .. })
         ),
         "the compatibility spelling normalizes before the append"
     );
@@ -87,7 +87,9 @@ fn the_log_round_trips_through_serde() {
 #[test]
 fn engine_state_round_trips_through_serde() {
     let mut h = Harness::new(diamond());
-    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
+    h.feed(Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let starts = h.take_starts();
     h.finish(starts[0].0, Outcome::success(json!({"ok": true})));
 
@@ -135,10 +137,9 @@ fn out_of_order_events_are_errors_not_panics() {
     assert!(commands.is_empty());
     assert_eq!(state.errors(), &[engine::RunError::NotStarted]);
 
-    let (state, _) = apply(
-        state,
-        Event::ExecutionStarted(engine::EngineStart::default()),
-    );
+    let (state, _) = apply(state, Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let (state, _) = apply(state, Event::StepFinished {
         firing:  ir::FiringId::new(99),
         attempt: ir::Attempt::FIRST,
@@ -207,11 +208,13 @@ fn fingerprint_defaults_to_none() {
 #[test]
 fn step_progress_changes_nothing() {
     let mut h = Harness::new(diamond());
-    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
+    h.feed(Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let starts = h.take_starts();
     let before = h.state.pending_count();
     h.commands.clear();
-    h.feed(Event::StepProgress {
+    h.feed(Event::StepProgressRecorded {
         firing: starts[0].0,
         ev:     ir::StepEvent::Log {
             stream: ir::LogStream::Stdout,
@@ -224,7 +227,7 @@ fn step_progress_changes_nothing() {
         h.state
             .log
             .events()
-            .any(|e| matches!(e, Event::StepProgress { .. })),
+            .any(|e| matches!(e, Event::StepProgressRecorded { .. })),
         "it is still recorded"
     );
 }
@@ -239,17 +242,20 @@ fn records_say_whether_they_came_from_outside_or_from_the_core() {
     assert!(
         external
             .iter()
-            .all(|e| !matches!(e, Event::TokenEmitted(_) | Event::NodeExpanded { .. })),
+            .all(|e| !matches!(e, Event::TokenEmitted { .. } | Event::NodeExpanded { .. })),
         "routed tokens and splices are the core's own"
     );
-    assert!(matches!(external.first(), Some(Event::ExecutionStarted(_))));
+    assert!(matches!(
+        external.first(),
+        Some(Event::ExecutionStarted { .. })
+    ));
 
     let core_records = h
         .state
         .log
         .records()
         .iter()
-        .filter(|r| r.source == engine::EventSource::Core)
+        .filter(|r| r.origin == engine::EventOrigin::Core)
         .count();
     assert!(core_records > 0, "routing produced events of its own");
     assert_eq!(

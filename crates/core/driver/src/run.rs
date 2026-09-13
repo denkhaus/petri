@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use engine::{
-    Admission, CANCEL_ESCALATION_KEY, Command, DecisionId, EngineExit, EngineStart, EngineState,
-    Event, EventLog, GroupDecision, ReplayMismatch, ResolvedFiring, RouteDecision, apply,
+    Admission, CANCEL_ESCALATION_KEY, CancelTarget, Command, DecisionId, EngineExit, EngineStart,
+    EngineState, Event, EventLog, GroupDecision, ReplayMismatch, ResolvedFiring, RouteDecision,
+    apply,
 };
 use executor::{
     AcquireContext, EnvError, EnvHandle, EnvironmentId, Executor, NoProgress, ProgressSink,
@@ -332,7 +333,7 @@ impl RunHandle {
     pub async fn cancel(&self, scope: ir::CancelScopeId) {
         let _ = self
             .tx
-            .send(Signal::Inject(Event::CancelRequested { scope }))
+            .send(Signal::Inject(Event::cancel_scope(scope)))
             .await;
     }
 
@@ -971,7 +972,9 @@ impl Driver {
     async fn run_loop(mut self) -> ExecutionReport {
         self.caps = self.caps.with(self.handle());
         match self.resume.take() {
-            None => self.feed(Event::ExecutionStarted(self.start.clone())),
+            None => self.feed(Event::ExecutionStarted {
+                start: self.start.clone(),
+            }),
             Some(resume) => {
                 // Observers see the regenerated suffix first — the records past
                 // the loaded prefix, which the crash kept off disk — before any
@@ -1134,13 +1137,13 @@ impl Driver {
                     .find(|candidate| candidate.name == node && candidate.cancel_group.is_some())
                     .map(|node| node.id);
                 if let Some(node) = target {
-                    self.feed(Event::CancelGroupRequested { node });
+                    self.feed(Event::cancel_group(node));
                 }
                 let _ = ack.send(target.is_some());
             }
-            Signal::Inject(Event::CancelRequested { scope })
-                if scope == ir::CancelScopeId::ROOT =>
-            {
+            Signal::Inject(Event::CancelRequested {
+                target: CancelTarget::Scope(scope),
+            }) if scope == ir::CancelScopeId::ROOT => {
                 self.on_root_cancel();
             }
             Signal::Inject(Event::KillRequested { scope }) if scope == ir::CancelScopeId::ROOT => {
@@ -1154,7 +1157,7 @@ impl Driver {
                 // The External record `feed` appends takes the next seq.
                 let seq = self.engine.log.len() as u64;
                 self.note_expiry(firing, &event);
-                self.feed(Event::StepProgress { firing, ev: event });
+                self.feed(Event::StepProgressRecorded { firing, ev: event });
                 if let Some(ack) = ack {
                     self.acknowledge_durable(seq, ack);
                 }
@@ -1198,7 +1201,7 @@ impl Driver {
                 if !self.engine.has_pending_admission(decision_id) {
                     return;
                 }
-                self.feed(Event::Admitted {
+                self.feed(Event::AdmissionDecided {
                     decision_id,
                     decision: resolution.decision,
                     trace: resolution.trace,
@@ -1275,7 +1278,7 @@ impl Driver {
                 continue;
             };
             let ev = StepEvent::Custom(self.sink.mask_value(&value));
-            let commands = self.apply_event(Event::StepProgress { firing, ev });
+            let commands = self.apply_event(Event::StepProgressRecorded { firing, ev });
             debug_assert!(commands.is_empty(), "a progress record derives no commands");
         }
     }
@@ -1329,7 +1332,7 @@ impl Driver {
         self.record_notes(firing, &decision.notes);
         match decision.admission {
             Admission::Admit => self.resolve_admission(AdmitRequest { decision_id }),
-            decision => self.feed(Event::Admitted {
+            decision => self.feed(Event::AdmissionDecided {
                 decision_id,
                 decision,
                 trace: vec![engine::MiddlewareKey::new("host.before_attempt")],
@@ -1557,9 +1560,7 @@ impl Driver {
             self.kill_root();
             return;
         }
-        self.feed(Event::CancelRequested {
-            scope: ir::CancelScopeId::ROOT,
-        });
+        self.feed(Event::cancel_scope(ir::CancelScopeId::ROOT));
         self.arm_cleanup_timer();
     }
 

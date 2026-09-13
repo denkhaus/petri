@@ -126,8 +126,8 @@ async fn a_dynamic_scope_resumes_its_durable_lease_and_rejects_corrupt_provenanc
     for line in lines {
         prefix.push_str(line);
         prefix.push('\n');
-        let record: engine::EventRecord = serde_json::from_str(line).unwrap();
-        if matches!(record.event, Event::StepStarted { firing: candidate, .. } if candidate == firing)
+        let record: execution::StoredEngineRecord = serde_json::from_str(line).unwrap();
+        if matches!(record.body, Event::StepStarted { firing: candidate, .. } if candidate == firing)
         {
             break;
         }

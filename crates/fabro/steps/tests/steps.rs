@@ -259,7 +259,7 @@ struct Answerer {
 
 impl EventObserver for Answerer {
     fn on_record(&self, record: &EventRecord, _recorded_at: u64, _state: &EngineState) {
-        let Event::StepProgress { firing, ev } = &record.event else {
+        let Event::StepProgressRecorded { firing, ev } = &record.event else {
             return;
         };
         let Some(question) = Question::from_event(ev) else {
@@ -497,7 +497,7 @@ struct CountQuestions(Arc<Mutex<Vec<Question>>>);
 
 impl EventObserver for CountQuestions {
     fn on_record(&self, record: &EventRecord, _recorded_at: u64, _: &EngineState) {
-        if let Event::StepProgress { ev, .. } = &record.event
+        if let Event::StepProgressRecorded { ev, .. } = &record.event
             && let Some(question) = Question::from_event(ev)
         {
             self.0.lock().expect("not poisoned").push(question);
@@ -512,7 +512,7 @@ struct SteerThenAnswer {
 
 impl EventObserver for SteerThenAnswer {
     fn on_record(&self, record: &EventRecord, _recorded_at: u64, _: &EngineState) {
-        let Event::StepProgress { firing, ev } = &record.event else {
+        let Event::StepProgressRecorded { firing, ev } = &record.event else {
             return;
         };
         let Some(question) = Question::from_event(ev) else {

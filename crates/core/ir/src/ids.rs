@@ -73,14 +73,64 @@ macro_rules! impl_id_api {
     };
 }
 
+/// An id reads from a JSON number, or from the string a JSON object key
+/// spells one as. A record that holds a map keyed by ids (`prior_firings`)
+/// is read through serde's buffered content when the record is an internally
+/// tagged enum, and the buffer keeps every object key as a string; without
+/// the string form those maps would not read back.
+macro_rules! impl_id_deserialize {
+    ($name:ident [$($impl_generics:tt)*] [$($type_generics:tt)*], $repr:ty, [$($extra:expr),*]) => {
+        impl $($impl_generics)* Deserialize<'de> for $name $($type_generics)* {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                struct IdVisitor;
+
+                impl serde::de::Visitor<'_> for IdVisitor {
+                    type Value = $repr;
+
+                    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                        write!(f, concat!("a ", stringify!($name), " as a number"))
+                    }
+
+                    fn visit_u64<E: serde::de::Error>(self, raw: u64) -> Result<$repr, E> {
+                        <$repr>::try_from(raw).map_err(|_| E::custom(format!(
+                            "{raw} is out of range for a {}",
+                            stringify!($name)
+                        )))
+                    }
+
+                    fn visit_i64<E: serde::de::Error>(self, raw: i64) -> Result<$repr, E> {
+                        u64::try_from(raw)
+                            .ok()
+                            .and_then(|raw| <$repr>::try_from(raw).ok())
+                            .ok_or_else(|| E::custom(format!(
+                                "{raw} is out of range for a {}",
+                                stringify!($name)
+                            )))
+                    }
+
+                    fn visit_str<E: serde::de::Error>(self, raw: &str) -> Result<$repr, E> {
+                        raw.parse::<$repr>().map_err(|_| E::custom(format!(
+                            "`{raw}` is not a {}",
+                            stringify!($name)
+                        )))
+                    }
+                }
+
+                deserializer.deserialize_any(IdVisitor).map(|raw| Self(raw $(, $extra)*))
+            }
+        }
+    };
+}
+
 macro_rules! id_newtype {
     ($(#[$meta:meta])* $name:ident<S = $default:ty>, $repr:ty) => {
         $(#[$meta])*
-        #[derive(Serialize, Deserialize)]
+        #[derive(Serialize)]
         #[serde(transparent)]
         pub struct $name<S = $default>(pub $repr, PhantomData<S>);
 
         impl_id_api!($name [<S>] [<S>], $repr, [PhantomData]);
+        impl_id_deserialize!($name [<'de, S>] [<S>], $repr, [PhantomData]);
 
         // Manual impls rather than derives: a derive would demand the same trait of
         // the space marker, and the marker is phantom — the id is a `$repr` whatever
@@ -121,13 +171,12 @@ macro_rules! id_newtype {
     };
     ($(#[$meta:meta])* $name:ident, $repr:ty) => {
         $(#[$meta])*
-        #[derive(
-            Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-        )]
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
         #[serde(transparent)]
         pub struct $name(pub $repr);
 
         impl_id_api!($name [] [], $repr, []);
+        impl_id_deserialize!($name [<'de>] [], $repr, []);
     };
 }
 

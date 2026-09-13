@@ -139,12 +139,12 @@ fn a_header_version_mismatch_is_rejected() {
 #[test]
 fn out_of_sequence_records_are_rejected() {
     let mut bytes = host::encode_events(&engine::EventLog::new(), &[]);
-    let event = serde_json::to_string(&engine::Event::ExecutionStarted(
-        engine::EngineStart::default(),
-    ))
+    let event = serde_json::to_string(&engine::Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    })
     .expect("an event serializes");
     bytes.extend(
-        format!("{{\"seq\":3,\"source\":\"External\",\"event\":{event},\"recorded_at\":1}}\n")
+        format!("{{\"seq\":3,\"origin\":\"external\",\"recorded_at\":1,\"body\":{event}}}\n")
             .as_bytes(),
     );
     match host::decode_events(&bytes) {

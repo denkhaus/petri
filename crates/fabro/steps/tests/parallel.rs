@@ -1333,9 +1333,9 @@ async fn resume_keeps_a_finished_branch_and_finishes_the_unfinished_one() {
         line.contains("InvocationFinished") && line.contains(&format!("\"invocation\":{child_a}"))
     });
     truncate_after(&log_of(0), |line| {
-        line.contains("StepFinished") && line.contains("\"id\":\"a\"")
+        line.contains("step.finished") && line.contains("\"id\":\"a\"")
     });
-    truncate_before(&log_of(child_b), |line| line.contains("StepFinished"));
+    truncate_before(&log_of(child_b), |line| line.contains("step.finished"));
 
     let rt = runtime_retaining(dir.path(), Retention::Always);
     let resumed = host::resume(&rt).await.expect("resumes");
@@ -1554,7 +1554,7 @@ async fn a_resumed_run_reads_the_offloaded_results_after_the_fork() {
         .path()
         .join("invocations/0000000000000000/executions/0000000000000000/events.jsonl");
     truncate_before(&root_log, |line| {
-        line.contains("StepFinished") && line.contains("\"stdout\":\"[{")
+        line.contains("step.finished") && line.contains("\"stdout\":\"[{")
     });
     let rt = runtime_retaining(dir.path(), Retention::Always);
     let resumed = host::resume(&rt).await.expect("resumes");

@@ -8,7 +8,7 @@ mod support;
 use std::time::{Duration, Instant};
 
 use driver::RunConfig;
-use engine::{Event, EventSource};
+use engine::{Event, EventOrigin};
 use executor::Retention;
 use ir::{CancelScopeId, GraphBuilder, RunStatus, ScopeId};
 use serde_json::json;
@@ -39,8 +39,8 @@ fn assert_kill_in_log(report: &driver::ExecutionReport) {
         .filter(|r| matches!(r.event, Event::KillRequested { .. }))
         .map(|r| {
             assert_eq!(
-                r.source,
-                EventSource::External,
+                r.origin,
+                EventOrigin::External,
                 "the kill is in the log as External"
             );
             r.seq

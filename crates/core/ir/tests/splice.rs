@@ -226,7 +226,7 @@ fn splice_policy_and_splices_default_on_deserialization() {
                 "max": { "secs": 60, "nanos": 0 },
                 "jitter": true
             },
-            "retry_on": { "statuses": ["Failure", "TimedOut"], "failure_classes": [] },
+            "retry_on": { "statuses": ["failure", "timed_out"], "failure_classes": [] },
             "on_exhaustion": "Fail"
         },
         "expand": null
@@ -235,7 +235,7 @@ fn splice_policy_and_splices_default_on_deserialization() {
     assert_eq!(node.splice_policy, SplicePolicy::Deny);
 
     let outcome: Outcome = serde_json::from_value(json!({
-        "status": "Success",
+        "status": "success",
         "output": null,
         "metrics": {}
     }))

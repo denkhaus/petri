@@ -33,7 +33,9 @@ fn deliveries(h: &Harness) -> Vec<(FiringId, Control)> {
 #[test]
 fn a_deliver_to_a_live_firing_produces_one_command() {
     let mut h = Harness::new(chain());
-    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
+    h.feed(Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let starts = h.take_starts();
     let (firing, _) = starts[0];
     h.commands.clear();
@@ -58,7 +60,9 @@ fn a_deliver_to_a_live_firing_produces_one_command() {
 #[test]
 fn repeated_delivers_are_a_stream() {
     let mut h = Harness::new(chain());
-    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
+    h.feed(Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let starts = h.take_starts();
     let (firing, _) = starts[0];
     h.commands.clear();
@@ -82,7 +86,9 @@ fn repeated_delivers_are_a_stream() {
 #[test]
 fn a_deliver_to_a_dead_or_unknown_firing_is_a_logged_noop() {
     let mut h = Harness::new(chain());
-    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
+    h.feed(Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let starts = h.take_starts();
     let (firing, _) = starts[0];
     h.finish(firing, Outcome::success(Value::Null));
@@ -129,7 +135,9 @@ fn a_deliver_to_an_awaiting_retry_firing_is_a_noop() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
+    h.feed(Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let starts = h.take_starts();
     let (firing, _) = starts[0];
     h.finish(firing, Outcome::failure("first try"));
@@ -157,7 +165,9 @@ fn a_deliver_to_an_awaiting_retry_firing_is_a_noop() {
 #[test]
 fn cancel_and_kill_do_not_ride_the_per_firing_path() {
     let mut h = Harness::new(chain());
-    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
+    h.feed(Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let starts = h.take_starts();
     let (firing, _) = starts[0];
     h.commands.clear();
@@ -186,7 +196,9 @@ fn cancel_and_kill_do_not_ride_the_per_firing_path() {
 #[test]
 fn replay_is_byte_identical_with_control_requests_in_the_log() {
     let mut h = Harness::new(chain());
-    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
+    h.feed(Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let starts = h.take_starts();
     let (firing, _) = starts[0];
     h.feed(Event::ControlRequested {

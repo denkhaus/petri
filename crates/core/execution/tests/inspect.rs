@@ -102,7 +102,7 @@ async fn a_finished_run_inspects_complete_with_its_context() {
 
     assert!(first.complete, "{:?}", first.incomplete);
     assert_eq!(first.status.as_deref(), Some("success"));
-    assert_eq!(first.inspect_format_version, 1);
+    assert_eq!(first.inspect_format_version, 2);
     assert_eq!(first.root.final_execution.map(ExecutionId::raw), Some(0));
     assert_eq!(first.invocations.len(), 1);
     assert_eq!(first.executions.len(), 1);
@@ -459,7 +459,7 @@ async fn a_torn_engine_log_is_incomplete_and_a_short_one_is_a_prefix() {
     let text = fs::read_to_string(&path).expect("reads");
     let keep = text
         .lines()
-        .position(|line| line.contains("RoutingResolved"))
+        .position(|line| line.contains("routing.resolved"))
         .expect("a routing decision")
         + 1;
     damage(&path, keep, b"{\"seq\":");
@@ -533,7 +533,7 @@ async fn a_log_that_diverges_from_replay_is_an_error() {
     let rewritten: Vec<String> = text
         .lines()
         .map(|line| {
-            if !changed && line.contains("StepFinished") && line.contains("alpha") {
+            if !changed && line.contains("step.finished") && line.contains("alpha") {
                 changed = true;
                 line.replace("alpha", "omega")
             } else {
@@ -563,7 +563,7 @@ async fn an_unsupported_format_is_an_error() {
     assert!(
         matches!(error, InspectError::UnsupportedFormat {
             found:    1,
-            expected: 3,
+            expected: 4,
         }),
         "{error}"
     );
@@ -595,8 +595,8 @@ async fn the_document_serializes_with_its_version_first_class() {
     let dir = finished_run("inspect-json").await;
     let inspection: RunInspection = inspect_run(dir.path()).expect("inspects");
     let json = serde_json::to_value(&inspection).expect("encodes");
-    assert_eq!(json["inspect_format_version"], json!(1));
-    assert_eq!(json["coordinator_format_version"], json!(3));
+    assert_eq!(json["inspect_format_version"], json!(2));
+    assert_eq!(json["coordinator_format_version"], json!(4));
     assert_eq!(json["complete"], json!(true));
     assert_eq!(json["status"], json!("success"));
     assert_eq!(json["root"]["final_execution"], json!(0));

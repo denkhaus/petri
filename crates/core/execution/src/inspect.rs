@@ -53,8 +53,10 @@ use crate::{
 
 /// The version of the [`RunInspection`] document. Bumped whenever a field
 /// changes shape or meaning; additions that keep every existing field intact
-/// do not bump it.
-pub const INSPECT_FORMAT_VERSION: u32 = 1;
+/// do not bump it. Version 2 spells every enum the document carries from a
+/// record (`Admission`, `RouteDecision`, `EngineExit`, `EntryPoint`,
+/// `Status`, `RunStatus`) with snake-case tags, as the logs do.
+pub const INSPECT_FORMAT_VERSION: u32 = 2;
 
 /// Why a run directory could not be reconstructed.
 ///
@@ -857,7 +859,7 @@ fn inspect_engine(state: &EngineState, log: &EventLog) -> EngineInspection {
                 failure:    outcome.status.failure_info().cloned(),
                 is_final:   final_attempts.contains(&(*firing, *attempt)),
             }),
-            Event::RouteApplied(applied) => {
+            Event::RouteApplied { applied } => {
                 let firing = applied.firing();
                 let node = node_of(firing);
                 routes.push(match applied {

@@ -21,8 +21,10 @@ fn a_rejected_resume_does_not_provision_run_services() {
     // No external start can reproduce this core record.
     let log = engine::EventLog::try_from_records(engine::LOG_VERSION, vec![engine::EventRecord {
         seq:    0,
-        source: engine::EventSource::Core,
-        event:  engine::Event::ExecutionStarted(engine::EngineStart::default()),
+        origin: engine::EventOrigin::Core,
+        event:  engine::Event::ExecutionStarted {
+            start: engine::EngineStart::default(),
+        },
     }])
     .expect("structurally valid log");
     assert!(

@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use engine::EventSource;
+use engine::EventOrigin;
 use execution::events::{EventSource as PublicSource, invert, replay_run, verify_lossless};
 use execution::{host, read_engine_log};
 use ir::{GraphBuilder, RunStatus, ScopeId};
@@ -49,7 +49,7 @@ async fn a_run_inverts_to_its_external_records_and_replays_to_the_same_stream() 
         .log
         .records()
         .iter()
-        .filter(|record| record.source == EventSource::External)
+        .filter(|record| record.origin == EventOrigin::External)
         .count();
     assert_eq!(records.len(), external);
     assert!(

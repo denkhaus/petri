@@ -212,7 +212,7 @@ impl ExecutionObserver for StallWatchdog {
     ) {
         self.touch();
         match &record.event {
-            Event::StepProgress { ev, .. } => {
+            Event::StepProgressRecorded { ev, .. } => {
                 if let Some(question) = Question::from_event(ev) {
                     self.block(execution, question.id);
                 } else if let Some(expired) = QuestionExpired::from_event(ev) {

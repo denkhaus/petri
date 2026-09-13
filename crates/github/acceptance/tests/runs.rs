@@ -763,7 +763,7 @@ fn step_log(state: &EngineState, firing: ir::FiringId) -> Vec<String> {
         .log
         .events()
         .filter_map(|e| match e {
-            Event::StepProgress {
+            Event::StepProgressRecorded {
                 firing: f,
                 ev: ir::StepEvent::Log { line, .. },
             } if *f == firing => Some(line.clone()),

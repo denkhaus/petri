@@ -55,6 +55,7 @@ impl Token {
 /// to `Failure` with `class: "retry_requested"` plus a matching `retry_on`, not
 /// to a new variant.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Status {
     Success,
     /// Soft failure or partial completion. Routing-visible, and success-like.
@@ -79,6 +80,7 @@ pub enum Status {
 /// [`SplicePolicy`](crate::SplicePolicy), whose derived order *is* its
 /// authority order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StatusKind {
     Success,
     PartialSuccess,
@@ -509,6 +511,7 @@ impl RunContext {
 
 /// Progress reported by a running step. Carries no coordination meaning.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StepEvent {
     Log { stream: LogStream, line: String },
     Artifact { name: SmolStr, uri: String },
@@ -516,6 +519,7 @@ pub enum StepEvent {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LogStream {
     Stdout,
     Stderr,
@@ -527,6 +531,7 @@ pub enum LogStream {
 /// machinery, so this enum is non-exhaustive from day one. `Steer` and
 /// `Approve` shipped as [`Control::Deliver`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Control {
     /// Ask the step to stop: the polite ladder (TERM, grace, KILL).
@@ -544,6 +549,7 @@ pub enum Control {
 
 /// How a whole run ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RunStatus {
     Success,
     Failed,

@@ -328,7 +328,7 @@ async fn the_breaker_state_is_restored_on_resume() {
     let lines: Vec<&str> = text.lines().collect();
     let cut = lines
         .iter()
-        .position(|line| line.contains("\"StepFinished\"") && line.contains("Failure"))
+        .position(|line| line.contains("\"step.finished\"") && line.contains("failure"))
         .expect("the failure record")
         + 1;
     fs::write(&events, format!("{}\n", lines[..cut].join("\n"))).expect("truncate");
@@ -340,7 +340,7 @@ async fn the_breaker_state_is_restored_on_resume() {
         .filter(|line| {
             !(line.contains("\"RunFinished\"")
                 || line.contains("\"InvocationFinished\"")
-                || (line.contains("\"ExecutionFinished\"") && line.contains("Terminal")))
+                || (line.contains("\"ExecutionFinished\"") && line.contains("terminal")))
         })
         .collect();
     fs::write(&coordinator, format!("{}\n", kept.join("\n"))).expect("rewrite");

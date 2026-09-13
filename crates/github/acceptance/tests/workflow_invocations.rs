@@ -299,7 +299,7 @@ impl ExecutionObserver for CancelOnChildLog {
         _recorded_at: u64,
         _state: &engine::EngineState,
     ) {
-        if let engine::Event::StepProgress {
+        if let engine::Event::StepProgressRecorded {
             ev: ir::StepEvent::Log { line, .. },
             ..
         } = &record.event

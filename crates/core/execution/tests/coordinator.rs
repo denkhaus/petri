@@ -7,7 +7,7 @@ use execution::{
     CallSite, Coordinator, CoordinatorEvent, CoordinatorInvocationClient, CoordinatorOptions,
     CoordinatorStore, ExecutionId, FoldEvent, GraphDigest, InvocationClient as _, InvocationId,
     InvocationRequest, JsonlEngineLog, Middleware, MiddlewareError, RouteCall, RouteNext,
-    SandboxBinding, SandboxMode, SecretBindings, decode_coordinator_log,
+    SandboxBinding, SandboxMode, SecretBindings, StoredEngineRecord, decode_coordinator_log,
 };
 use executor::Retention;
 use ir::{
@@ -15,7 +15,7 @@ use ir::{
     StepRef,
 };
 use runtime::engine::{
-    DEFAULT_MAX_EXECUTIONS, EngineExit, EngineStart, EntryPoint, Event, EventRecord, MiddlewareKey,
+    DEFAULT_MAX_EXECUTIONS, EngineExit, EngineStart, EntryPoint, Event, MiddlewareKey,
     RouteDecision,
 };
 use runtime::steps::{Step, StepCtx};
@@ -182,10 +182,10 @@ async fn resume_folds_a_final_outcome_before_reissuing_pending_routing() {
     let mut lines = events.lines();
     let mut engine_prefix = format!("{}\n", lines.next().expect("engine header"));
     for line in lines {
-        let record: EventRecord = serde_json::from_str(line).expect("engine record");
+        let record: StoredEngineRecord = serde_json::from_str(line).expect("engine record");
         engine_prefix.push_str(line);
         engine_prefix.push('\n');
-        if matches!(record.event, Event::StepFinished { .. }) {
+        if matches!(record.body, Event::StepFinished { .. }) {
             break;
         }
     }
@@ -761,7 +761,7 @@ async fn completing_a_parent_cancels_each_descendant_once() {
         assert_eq!(
             log.events()
                 .filter(|event| matches!(
-                    event, Event::CancelRequested { scope } if *scope == ir::CancelScopeId::ROOT
+                    event, Event::CancelRequested { target: engine::CancelTarget::Scope(scope) } if *scope == ir::CancelScopeId::ROOT
                 ))
                 .count(),
             1,
@@ -858,8 +858,8 @@ async fn assert_terminal_parent_recovers_child(cancel_recorded: bool) {
     let mut lines = events.lines();
     let mut prefix = format!("{}\n", lines.next().expect("engine header"));
     for line in lines {
-        let record: EventRecord = serde_json::from_str(line).expect("engine record");
-        let cancellation = matches!(record.event, Event::CancelRequested { .. });
+        let record: StoredEngineRecord = serde_json::from_str(line).expect("engine record");
+        let cancellation = matches!(record.body, Event::CancelRequested { .. });
         if cancellation && !cancel_recorded {
             break;
         }

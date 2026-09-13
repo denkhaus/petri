@@ -11,8 +11,12 @@ use crate::{ExecutionId, GraphDigest, InvocationId, ParentCallKey, SandboxLeaseI
 /// execution provenance in the resource ledger. Version 3 stamps every record
 /// with `recorded_at`, the wall-clock time the store appended it, so replay
 /// recovers the original run, invocation and execution times; a version 2 run
-/// has none and is refused, never migrated.
-pub const COORDINATOR_FORMAT_VERSION: u32 = 3;
+/// has none and is refused, never migrated. Version 4 spells every record as
+/// `{"seq", "origin", "recorded_at", "body"}`, with `body` tagged by `event`
+/// under a `<subject>.<verb>` name (`execution.declared`), `RunNote` renamed
+/// `RunNoteRecorded`, and snake-case tags on every enum inside a record; a
+/// version 3 run is refused, never migrated.
+pub const COORDINATOR_FORMAT_VERSION: u32 = 4;
 
 /// Name-only child secret bindings. Plaintext is not representable here.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

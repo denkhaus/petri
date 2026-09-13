@@ -71,7 +71,7 @@ fn markers(log: &EventLog) -> usize {
         .filter(|event| {
             matches!(
                 event,
-                Event::StepProgress {
+                Event::StepProgressRecorded {
                     ev: StepEvent::Custom(value),
                     ..
                 } if value["kind"] == "durable-test"

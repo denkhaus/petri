@@ -748,11 +748,9 @@ pub(crate) fn apply_prepared_splice(
     });
 
     for seed in prepared.seeds {
-        queue.push_back(Event::TokenEmitted(Token::seeded(
-            seed.edge,
-            seed.generation,
-            seed.payload,
-        )));
+        queue.push_back(Event::TokenEmitted {
+            token: Token::seeded(seed.edge, seed.generation, seed.payload),
+        });
     }
 }
 

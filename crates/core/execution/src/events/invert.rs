@@ -16,8 +16,7 @@ use std::path::Path;
 
 use driver::lifecycle::{BUDGET_PAUSED_KIND, BUDGET_RESUMED_KIND, BudgetNote, Note};
 use engine::{
-    DecisionId, EngineStart, EngineState, Event, EventLog, EventRecord,
-    EventSource as RecordSource, GroupDecision,
+    DecisionId, EngineStart, EngineState, Event, EventLog, EventOrigin, EventRecord, GroupDecision,
 };
 use ir::{Attempt, Control, FiringId, Graph, StepEvent, Value};
 use serde::Serialize;
@@ -91,7 +90,7 @@ pub fn invert(events: &[RunEvent]) -> Result<InvertedRun, InvertError> {
                     .push(InvertedRecord {
                         record:      EventRecord {
                             seq:    event.id.seq,
-                            source: RecordSource::External,
+                            origin: EventOrigin::External,
                             event:  engine_event(event)?,
                         },
                         recorded_at: event.recorded_at,
@@ -216,21 +215,23 @@ fn engine_event(event: &RunEvent) -> Result<Event, InvertError> {
             context,
             prior_firings,
             max_executions,
-        } => Event::ExecutionStarted(EngineStart {
-            entry:           *entry,
-            context:         context.clone(),
-            prior_firings:   prior_firings.clone(),
-            execution_index: *execution_index,
-            max_executions:  *max_executions,
-        }),
+        } => Event::ExecutionStarted {
+            start: EngineStart {
+                entry:           *entry,
+                context:         context.clone(),
+                prior_firings:   prior_firings.clone(),
+                execution_index: *execution_index,
+                max_executions:  *max_executions,
+            },
+        },
         EventBody::ExecutionAdmitted {
             decision, trace, ..
-        } => Event::Admitted {
+        } => Event::AdmissionDecided {
             decision_id: DecisionId::ExecutionStart,
             decision:    decision.clone(),
             trace:       trace.clone(),
         },
-        EventBody::AttemptAdmitted { decision, trace } => Event::Admitted {
+        EventBody::AttemptAdmitted { decision, trace } => Event::AdmissionDecided {
             decision_id: DecisionId::attempt_start(firing_of(event)?, attempt_of(event)?),
             decision:    decision.clone(),
             trace:       trace.clone(),
@@ -262,11 +263,11 @@ fn engine_event(event: &RunEvent) -> Result<Event, InvertError> {
         },
         EventBody::CancelRequested {
             scope: Some(scope), ..
-        } => Event::CancelRequested { scope: *scope },
+        } => Event::cancel_scope(*scope),
         EventBody::CancelRequested {
             scope: None,
             group: Some(group),
-        } => Event::CancelGroupRequested { node: group.id },
+        } => Event::cancel_group(group.id),
         EventBody::CancelRequested {
             scope: None,
             group: None,
@@ -363,7 +364,7 @@ fn attempt_of(event: &RunEvent) -> Result<Attempt, InvertError> {
 }
 
 fn progress(event: &RunEvent, ev: StepEvent) -> Result<Event, InvertError> {
-    Ok(Event::StepProgress {
+    Ok(Event::StepProgressRecorded {
         firing: firing_of(event)?,
         ev,
     })
@@ -510,7 +511,7 @@ pub fn verify_lossless(run_dir: &Path) -> Result<InvertedRun, LosslessError> {
             .log
             .records()
             .iter()
-            .filter(|record| record.source == RecordSource::External)
+            .filter(|record| record.origin == EventOrigin::External)
             .map(|record| InvertedRecord {
                 record:      record.clone(),
                 recorded_at: usize::try_from(record.seq)

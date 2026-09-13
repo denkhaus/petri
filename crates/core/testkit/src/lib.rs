@@ -220,7 +220,7 @@ pub fn log_lines(report: &ExecutionReport) -> Vec<String> {
         .log
         .events()
         .filter_map(|e| match e {
-            engine::Event::StepProgress {
+            engine::Event::StepProgressRecorded {
                 ev: ir::StepEvent::Log { line, .. },
                 ..
             } => Some(line.clone()),

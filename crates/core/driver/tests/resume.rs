@@ -13,7 +13,7 @@ use driver::{
     CANCELLED_BEFORE_RESUME, Driver, ExecutionReport, KILLED_BEFORE_RESUME, ResumeError,
     ResumeInfo, RunConfig, RunHandle,
 };
-use engine::{CANCEL_ESCALATION_KEY, Command, Event, EventLog, EventRecord, EventSource};
+use engine::{CANCEL_ESCALATION_KEY, Command, Event, EventLog, EventOrigin, EventRecord};
 use executor::SecretProvider as _;
 use ir::{
     Arm, BinOp, Control, FiringId, Graph, GraphBuilder, Outcome, RunStatus, ScopeId, StepRef, Value,
@@ -340,7 +340,7 @@ async fn an_unstarted_firing_gets_its_ack_on_resume() {
 /// Observer that remembers every `(seq, source)` it is handed, in order.
 #[derive(Default)]
 struct SeqObserver {
-    seen: Mutex<Vec<(u64, EventSource)>>,
+    seen: Mutex<Vec<(u64, EventOrigin)>>,
 }
 
 #[async_trait::async_trait]
@@ -349,7 +349,7 @@ impl driver::EventObserver for SeqObserver {
         self.seen
             .lock()
             .expect("not poisoned")
-            .push((record.seq, record.source));
+            .push((record.seq, record.origin));
     }
 }
 
@@ -374,8 +374,8 @@ async fn observers_see_the_regenerated_suffix_first() {
     });
     let cut = routing + 1;
     assert_eq!(
-        report.state.log.records()[cut].source,
-        EventSource::Core,
+        report.state.log.records()[cut].origin,
+        EventOrigin::Core,
         "the cut lands after the resolved decision but before its applied route"
     );
     let prefix = report.state.log.prefix(cut);
@@ -404,7 +404,7 @@ async fn observers_see_the_regenerated_suffix_first() {
     );
     assert!(
         seen.iter()
-            .any(|(seq, source)| suffix.contains(seq) && *source == EventSource::Core),
+            .any(|(seq, source)| suffix.contains(seq) && *source == EventOrigin::Core),
         "Core records are in the notified suffix"
     );
     let mut sorted = seen_seqs.clone();
@@ -1058,9 +1058,9 @@ async fn a_tampered_record_refuses_to_resume() {
     let records = encoded["records"].as_array_mut().expect("records");
     let token = records
         .iter_mut()
-        .find(|r| r["event"].get("TokenEmitted").is_some())
+        .find(|r| r["event"]["event"] == "token.emitted")
         .expect("a routed token");
-    token["event"]["TokenEmitted"]["payload"] = json!("tampered");
+    token["event"]["payload"] = json!("tampered");
     let tampered: EventLog = serde_json::from_value(encoded).expect("still decodes");
 
     let executor: Arc<dyn executor::Executor> =
