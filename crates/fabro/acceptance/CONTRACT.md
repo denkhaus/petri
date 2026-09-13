@@ -576,8 +576,30 @@ names the decision record under `decisions/`; "gap" names the owner.
 
 ## Library pin
 
-Pebble is pinned at `430740f1114f859d6d173683f25b5007cf2023ca`, which is
-Pebble `main`. That commit is Pebble PR #12 (`embedder-failover-and-followup`)
+Pebble is pinned at `69969420c9017ca15ac6c175c820a0cb8090866a`, which is
+Pebble `main`. That commit is Pebble PRs #13, #14, #15 and #16 on top of
+`430740f`. PR #13 folds the command line's closing summary onto
+`SessionProjection` and adds `SessionProjection.retries` and
+`PromptDelta.retries`, one per `LlmRetry` across the tree. PR #14 fixes the
+two tests that flaked in Pebble's own CI (the MCP fixture's bind and the
+sub-agent tool order) with no loosened assertion. PR #15 makes the route to
+an environment-hosted MCP server's port Pebble's own contract,
+`pebble_coding_agent::mcp::PortRoutes` (`route(port) -> PortRoute { url,
+headers }`, `release(port)`, `PortRouteError::Unsupported` or `Failed`),
+which `CodingAgentBuilder::port_routes` now takes, and drops sandbox-driver
+from the `mcp` feature; Petri implements it as
+`fabro_steps::pebble::environment::ScopePortRoutes` over
+`ExecEnv::preview_url`, and its sandbox-driver pin no longer has to match
+Pebble's. PR #16 completes `SessionProjection` for embedders: the summary
+call's `usage` and `cost_usd_micros` on `CompactionCompleted` and (when the
+model answered) `CompactionFailed`, the failover history as
+`SessionProjection.failovers` and `failover_stopped` with `PromptDelta.failovers`,
+each descendant's `provider` and `model` on `DescendantAccount`,
+`McpServerProjection.startup_ms`, and `SkillsDiscovered` announced again on a
+warm start. Petri takes the pin and the `PortRoutes` contract here and reads
+nothing new from the projection yet.
+`430740f1114f859d6d173683f25b5007cf2023ca` is Pebble PR #12
+(`embedder-failover-and-followup`)
 on top of `4c00633`. PR #12 grows `CodingEvent::RouteFailover` with the
 failed route's `usage`, `cost_usd_micros`, `inference_ms`, `tool_ms` and a
 `continuation` (`replay_prompt` or `continue_turn`), adds
@@ -599,10 +621,10 @@ answer within `tool_timeout`, the shutdown of started MCP servers when
 server until its `startup_timeout` before the handshake; Petri mirrors the
 first three as the `disconnected` phase, `duration_ms` on `ready` and
 `failed`, and `status = "timeout"` (`crates/fabro/FORMAT.md`, "MCP
-servers"). PR #10 moves the sandbox-driver pin under Pebble's `mcp` feature
-to `a92c0db6b6a122ca9b6df75de6615544f53c0d47`; Petri pins the same
-revision and enables the feature, so the `PreviewUrls` trait object crosses
-the crate boundary. The `embedder-concerns` batch sits on top of
+servers"). PR #10 moved the sandbox-driver pin under Pebble's `mcp` feature
+to `a92c0db6b6a122ca9b6df75de6615544f53c0d47`, and Petri pinned the same
+revision so the `PreviewUrls` trait object crossed the crate boundary; PR
+#15 (above) ends that coupling. The `embedder-concerns` batch sits on top of
 `petri-readiness-gaps` `6b7d26e0f791edf3381b110b78db1c5507c94f66`, which sat
 on the readiness batch's `408638fe982ace5b570e04ba808be3a32d4001f7`. The
 `embedder-concerns` batch moves concerns both embedders wrote into Pebble:
@@ -658,7 +680,7 @@ fails when any of them disagree. The row names are the keys of a record's
 
 | Pin | Revision | Repository | Role |
 |---|---|---|---|
-| `pebble` | `430740f1114f859d6d173683f25b5007cf2023ca` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
+| `pebble` | `69969420c9017ca15ac6c175c820a0cb8090866a` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
 | `lithos_llm` | `a1e3fd37b7153870411701327ac117606753fe90` | `lithoscomputer/lithos-llm` (public) | provider transport and request retries |
 | `sandbox_driver` | `a92c0db6b6a122ca9b6df75de6615544f53c0d47` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `fedab8e6b9b8e2577bee7d93812a318d6adb4aa4` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
@@ -670,7 +692,9 @@ repository's required checks before Petri moves its pin; then this table, the
 manifests, and the affected evidence records move together. The library batch
 the readiness work asked for is inside the pinned revisions (Pebble `4c00633`,
 sandbox-driver `a92c0db6`); the twins are pinned in both test crates that
-serve them.
+serve them. Since Pebble `6996942` the sandbox-driver pin is Petri's alone:
+Pebble's `mcp` feature no longer names the crate, so the two move
+independently.
 
 ## Readiness gate checklist
 
