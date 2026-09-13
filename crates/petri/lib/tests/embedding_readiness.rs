@@ -681,7 +681,7 @@ fn project(events: &[RunEvent]) -> Projected {
             }
             EventBody::QuestionAsked { .. } => out.questions.push(node.clone()),
             EventBody::ControlDelivered {
-                control: DeliveredControl::Answer { answer },
+                control: DeliveredControl::Answer { answer, .. },
                 deliverable: true,
             } => out.answers.push(answer.choice.clone().unwrap_or_default()),
             EventBody::NodeExpanded { .. } => out.expansions += 1,

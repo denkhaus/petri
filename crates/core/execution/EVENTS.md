@@ -1,9 +1,19 @@
 # The public event contract
 
 `execution::events` is the versioned event stream an embedding host projects a
-run from. This file is the contract for `EVENT_CONTRACT_VERSION` 1. The Rust
+run from. This file is the contract for `EVENT_CONTRACT_VERSION` 2. The Rust
 types in `crates/core/execution/src/events.rs` are authoritative for field
 detail; this file states the guarantees.
+
+Version 2 made the stream lossless for replay ("Inversion" below). It added
+fields, never changed one: `origin` on every event; `run_started.format_version`; `graph_registered`;
+`invocation_declared.secret_bindings` and `.admission`;
+`execution_declared.context`, `.prior_firings`, `.max_executions` and
+`.middleware_state`; `execution_started.prior_firings` and
+`.max_executions`; `execution_admitted.decision` and `.trace`;
+`RouteChoice.draw`; `AgentActivity.attributes`; and the `value` a delivered
+answer was decoded from. A version 1 consumer that ignores unknown fields
+reads a version 2 stream, apart from the new `graph_registered` event.
 
 ## Sources and identity
 
@@ -23,6 +33,14 @@ the ordinal of this event among the events one record produced. Within one
 source the order is total. Every event carries `invocation` and `execution`
 when it has them, and `parent` (the calling execution, firing, attempt and call
 slot) for a nested invocation.
+
+`origin` says who appended the record: `external` for every coordinator
+record and for an engine record the driver applied (an execution's start, an
+admission, a step's start, progress and result, a routing decision, an
+elapsed retry, a host's cancel, kill or control), `core` for a record the
+engine produced while draining (a routed token, an applied route, a splice,
+a cascading cancel). Replay consumes the external records and regenerates
+the core ones.
 
 `subject` names the node (`NodeRef`: id, instance name, step kind, the
 frontend's `meta` verbatim) and, when the event is about a firing, the firing
@@ -62,14 +80,19 @@ with `BranchRole`, never with node names.
 
 ## Events
 
-Run and invocation events (coordinator log): `run_started`, `run_finished`,
-`invocation_declared` (with the parent link, graph digest, sandbox binding and
-initial context), `invocation_finished` (with the `InvocationResult`),
+Run and invocation events (coordinator log): `run_started` (the root, the
+middleware chain and the coordinator format version), `run_finished`,
+`graph_registered` (a graph's digest, before any invocation declares it),
+`invocation_declared` (with the parent link, graph digest, sandbox binding,
+initial context, the name-only secret bindings and the admission gate),
+`invocation_finished` (with the `InvocationResult`),
 `invocation_cancel_requested` (with the `reason` the requester gave, when it
 gave one: `stall_timeout`, `interrupt`, `control`), `stall_timeout` (derived
 beside the cancel request the stall watchdog made, with the budget and the
-idle time), `execution_declared` (predecessor, index, entry),
-`execution_finished` (the engine exit: terminal status or restart).
+idle time), `execution_declared` (predecessor, index, entry, and the rest of
+the engine start: context, inherited firing counts, restart limit, and the
+middleware state), `execution_finished` (the engine exit: terminal status or
+restart).
 
 Run controls (coordinator log): `run_paused`, `run_unpaused`, derived from
 the `RunPaused` and `RunUnpaused` records the control service appends through
@@ -89,23 +112,23 @@ Execution events (engine log), each attributed to a subject where one exists:
 
 | Event | When |
 | --- | --- |
-| `execution_started`, `execution_admitted` | the execution's own start and admission |
+| `execution_started`, `execution_admitted` | the execution's own start (entry, index, context, inherited firing counts, restart limit) and admission (`admitted` and `reason` beside the decision itself and its trace) |
 | `visit_started` | a firing exists for a node whose join was satisfied |
 | `attempt_admitted` | the host or middleware decided on an attempt (`Admit`, `Skip`, `Block`, with the trace) |
 | `attempt_started` | the attempt was dispatched to its step |
 | `attempt_finished` | an attempt returned; `final` says whether it is the firing's outcome, `exhausted` whether retries ran out |
 | `retry_scheduled`, `retry_elapsed` | the backoff between attempts |
 | `visit_completed` | the firing's final record exists; `executed` is false for a synthesized completion (false precondition, cancelled scope, blocked or skipped admission); `attempts` is the count |
-| `routes_resolved` | one `RouteChoice` per group with the decision, resolved target, interventions (overrides, jumps, blocks) and whether a weighted draw happened |
+| `routes_resolved` | one `RouteChoice` per group with the decision, resolved target, interventions (overrides, jumps, blocks), whether a weighted draw happened and the draw itself (tier, candidates, roll, total) when one did |
 | `route_applied` | one applied route: edge (with target, transition, back), jump, or none |
 | `fork_started`, `branch_completed`, `fork_completed` | a fork's branches start; a branch reaches its end; the fork's branches are all accounted for, in branch order, with the `disposition` that closed them (`joined`, `cancelled`, `killed`; see "Fork closure"). All three carry the `ForkOccurrence` of the fork visit; `branch_completed`'s subject is the branch's last firing with its visit, attempt and generation. A static fork's branches are its routing groups; a `for_each` expansion's branches are its clones, in item order, and the fork is the node that fanned out into the template (Fabro's `parallel` node), so both fan-outs carry the same identities |
 | `node_expanded` | a `for_each` expansion with its clones |
-| `question_asked`, `control_delivered` | a question on the firing's progress channel; a host control decoded as an answer when it is one, with whether the firing could receive it |
+| `question_asked`, `control_delivered` | a question on the firing's progress channel; a host control decoded as an answer when it is one (beside the delivered `value` it was decoded from), with whether the firing could receive it |
 | `question_expired` | the step reported that its question's answer deadline passed (`steps::QuestionExpired` on the progress channel): the question id, how long it waited (`waited_ms`), and the option it took on its own (`default`, by key) when it had one. The attempt's outcome follows as `attempt_finished`; a host never infers a timeout from that outcome |
 | `wait_state_changed` | `awaiting_admission`, `running`, `awaiting_answer`, `awaiting_retry`, `cancelling`; a delivered answer or the question's expiry ends `awaiting_answer` |
 | `cancel_requested`, `kill_requested` | the two stop tiers, scope or group |
 | `output_line`, `artifact_recorded` | step output and artifacts |
-| `agent_activity` | a backend's own event envelope (`kind` names the backend; for `pebble` the envelope is Pebble's `CodingAgentEvent`) with the session, parent session, tool call, stream and stream sequence read out of it. A native agent's sub-agents are on the same stream: the lifecycle (`SubAgentSpawned`, `SubAgentTurnStarted`, `SubAgentCompleted`, `SubAgentFailed`, `SubAgentClosed`) under the parent's session, a child's own events under the child's session with `parent_session` naming its immediate parent, all attributed to the parent stage (`crates/fabro/FORMAT.md`, "Native Pebble"). A stage's own agent only: a hook's agent is `hook_activity` |
+| `agent_activity` | a backend's own event envelope (`kind` names the backend; for `pebble` the envelope is Pebble's `CodingAgentEvent`) with the session, parent session, tool call, stream and stream sequence read out of it, and the step's own keys beside `kind` and `event` verbatim as `attributes` (the native backend records `node`, `firing`, `attempt` and `scope`). A native agent's sub-agents are on the same stream: the lifecycle (`SubAgentSpawned`, `SubAgentTurnStarted`, `SubAgentCompleted`, `SubAgentFailed`, `SubAgentClosed`) under the parent's session, a child's own events under the child's session with `parent_session` naming its immediate parent, all attributed to the parent stage (`crates/fabro/FORMAT.md`, "Native Pebble"). A stage's own agent only: a hook's agent is `hook_activity` |
 | `hook_activity` | one event a hook's own agent produced: `hook {point, hook}` names the hook operation (with the subject's firing and attempt, one execution of one hook) and `activity` is the same `AgentActivity` an `agent_activity` carries, in its own session. Attributed to the firing whose hook ran (or, for a run-level point, to no subject), and never to the stage's own agent, so a consumer summing `agent_activity` never counts a hook's model requests as the stage's. From the `hook.activity` notes the hook service's report carries, recorded before the `hook` note |
 | `budget_paused`, `budget_resumed` | an executor-enforced attempt budget stopped counting (the attempt asked a question; `remaining_ms` is the active-work time left, `pending_questions` how many wait) and counted again (its last pending question was answered); from the driver's durable `budget_paused`/`budget_resumed` notes |
 | `host_note` | a `driver::lifecycle::Note` the host or the driver recorded: `result_prepared` (original attempt evidence beside an adjusted result), `transition` (overrides, best-effort problems, a block), `hook` (a hook service report: the point, the decision, each hook's state, duration, message and `usage`: the model requests it made, the tool calls its agent started, the backend's token counts in the `pebble.usage` shape, cost and timings). A run-level hook report is the same `hook` note from the coordinator log, with no subject |
@@ -225,6 +248,41 @@ cancellation, and this contract does not claim it does.
   epoch when the projector saw the record), absent on replay. A backend's live
   stream chunks that never reached the step's progress channel are not in the
   contract.
+
+## Inversion
+
+The stream is lossless for the records replay consumes. Every coordinator
+record and every engine record of `external` origin (the ones the host fed
+the engine: an execution's start, admissions, step starts, progress and
+finishes, routing decisions, elapsed retries, host cancels, kills and
+delivered controls) derives at least one event, and the first event derived
+from such a record (`index` 0) carries everything the record did.
+`execution::events::invert` rebuilds the records from the events alone: the
+coordinator log whole, and each execution's external records. Records of
+`core` origin (routed tokens, applied routes, splices, cascading cancels)
+derive events too (`visit_started`, `route_applied`, `node_expanded`, the
+fork events, and a `cancel_requested` the engine issued itself), but replay
+regenerates them from the external records, so inversion skips them by
+their `origin`.
+
+The first event of an external engine record is one of: `execution_started`,
+`execution_admitted`, `attempt_admitted`, `attempt_started`,
+`attempt_finished`, `retry_elapsed`, `routes_resolved`, `cancel_requested`,
+`kill_requested`, `control_delivered`, `output_line`, `artifact_recorded`,
+`question_asked`, `question_expired`, `agent_activity`, `hook_activity`,
+`host_note`, `budget_paused`, `budget_resumed`, `step_custom`. Its subject
+names the firing and attempt the record was about. A firing's identity is
+therefore never inferred from a `visit_started`; it is stated on every event
+of the firing.
+
+`execution::events::verify_lossless` is the proof, run over a run dir: it
+projects the run, inverts the stream, checks the inverted coordinator log and
+external records against the stored ones, replays the inverted records
+through the engine and checks the regenerated logs against the stored ones
+whole, then re-projects the regenerated logs and checks the stream is the
+same, event for event. The standalone host runs it at the end of every run
+beside `engine::verify_replay` (`RunOptions::verify_replay`, on by default),
+so every run in the test suites is a round-trip case.
 
 ## Secrets
 

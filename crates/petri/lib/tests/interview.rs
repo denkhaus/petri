@@ -746,7 +746,7 @@ async fn a_cancelled_reply_is_delivered_and_recorded_apart_from_a_timeout() {
         events.iter().any(|event| matches!(
             &event.body,
             EventBody::ControlDelivered {
-                control: DeliveredControl::Answer { answer },
+                control: DeliveredControl::Answer { answer, .. },
                 deliverable: true,
             } if answer.cancelled
         )),

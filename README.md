@@ -1225,6 +1225,10 @@ no platform vocabulary in them:
   run dir after the fact, and `EventProjector::primed`
   attaches at resume. Every event names its run, invocation, execution,
   node (with the frontend's `meta`), firing, visit, attempt and branch role.
+  The stream is lossless for replay: `invert` rebuilds the coordinator log
+  and every execution's external engine records from the events, and
+  `verify_lossless` proves the round trip at the end of every run beside
+  `verify_replay`.
 - **Awaited extension points.** `Runtime::hooks` installs
   `driver::lifecycle::ExecutionHooks`: `before_attempt` (pause, skip or block
   an attempt), `prepare_result` (adjust the effective result; the original is

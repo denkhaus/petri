@@ -778,7 +778,7 @@ impl Timeline {
                 }
                 (
                     EventBody::ControlDelivered {
-                        control: DeliveredControl::Answer { answer },
+                        control: DeliveredControl::Answer { answer, .. },
                         deliverable: true,
                     },
                     Some(entry),
