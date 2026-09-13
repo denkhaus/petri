@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use fabro_steps::pebble::PebbleClient;
 use fabro_steps::pebble::environment::PebbleEnvironment;
-use fabro_steps::pebble::mcp::SERVER_EVENT;
 use fabro_steps::register;
 use frontend::MapFiles;
 use ir::{CancelScopeId, Graph, RunStatus, ScopeId};
@@ -31,7 +30,7 @@ use testkit::{RunDir, output_of};
 use tokio::fs;
 use tokio::process::Command;
 use tokio::sync::mpsc;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
 fn graph(extra: &str) -> Graph {
@@ -406,18 +405,17 @@ async fn steering_and_attributed_events_reach_the_native_session() {
     );
 }
 
-/// Reports the firing whose native session has started building: the node
-/// has named its MCP servers to Pebble (`fabro.mcp.server` `starting`), and
-/// the build waits on them.
+/// Reports the firing of node `a` once its step has started: the native
+/// session's build begins at once and, here, waits on an MCP server that
+/// never answers.
 struct BuildStarted(mpsc::Sender<ir::FiringId>);
 impl EventObserver for BuildStarted {
-    fn on_record(&self, record: &EventRecord, _recorded_at: u64, _: &EngineState) {
-        if let Event::StepProgress {
-            firing,
-            ev: ir::StepEvent::Custom(value),
-        } = &record.event
-            && value["kind"] == SERVER_EVENT
-            && value["phase"] == "starting"
+    fn on_record(&self, record: &EventRecord, _recorded_at: u64, state: &EngineState) {
+        if let Event::StepStarted { firing, .. } = &record.event
+            && state
+                .firing_node(*firing)
+                .and_then(|id| state.graph().node(id))
+                .is_some_and(|node| node.name == "a")
         {
             let _ = self.0.try_send(*firing);
         }
@@ -467,17 +465,25 @@ async fn a_delivery_before_the_session_is_built_runs_as_a_follow_up() {
     let run = tokio::spawn(driver.run());
     let firing = timeout(Duration::from_secs(10), receive.recv())
         .await
-        .expect("the build starts")
+        .expect("the step starts")
         .expect("firing");
-    assert_eq!(
-        handle
+    // The step is started before its control channel is live; the build
+    // holds for the server's startup timeout, so a short retry lands the
+    // delivery well inside it.
+    let mut disposition = DeliverDisposition::NotLive;
+    for _ in 0..50 {
+        disposition = handle
             .deliver(
                 firing,
-                ir::Control::Deliver(json!({"text":"Also check the docs"}))
+                ir::Control::Deliver(json!({"text":"Also check the docs"})),
             )
-            .await,
-        DeliverDisposition::Delivered
-    );
+            .await;
+        if disposition == DeliverDisposition::Delivered {
+            break;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(disposition, DeliverDisposition::Delivered);
     let report = timeout(Duration::from_secs(30), run)
         .await
         .expect("run settles")

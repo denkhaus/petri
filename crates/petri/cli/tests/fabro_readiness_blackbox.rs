@@ -671,15 +671,13 @@ fn assert_common_phases(setup: &Setup, finished: &Finished) {
     let records = failures::records(&finished.run_dir);
     let plan = failures::of_node(&records, "draft_docs", "fabro.fallback.plan");
     assert_eq!(plan.len(), 1, "{records:?}");
-    let failover = failures::of_node(&records, "draft_docs", "fabro.fallback.failover");
+    // The move is Pebble's own event, attributed to the node.
+    let failover = failures::pebble_events(&finished.run_dir, "draft_docs", "RouteFailover");
     assert_eq!(failover.len(), 1, "{records:?}");
-    assert_eq!(failures::route(&failover[0]["from"]), "openai/gpt-5.6-sol");
-    assert_eq!(
-        failures::route(&failover[0]["to"]),
-        "anthropic/claude-sonnet-5"
-    );
+    assert_eq!(failover[0]["from"], json!("openai/gpt-5.6-sol"));
+    assert_eq!(failover[0]["to"], json!("anthropic/claude-sonnet-5"));
     // The notes thread has one plan, on its first node; every later node
-    // reuses the primary route and none fails over.
+    // reuses the thread on the primary and none fails over.
     assert_eq!(
         failures::of_node(&records, "plan", "fabro.fallback.plan").len(),
         1,
@@ -687,17 +685,21 @@ fn assert_common_phases(setup: &Setup, finished: &Finished) {
     );
     for node in ["plan", "write", "delegate", "polish", "review"] {
         assert!(
-            failures::of_node(&records, node, "fabro.fallback.failover").is_empty(),
+            failures::pebble_events(&finished.run_dir, node, "RouteFailover").is_empty(),
             "the notes thread never left its primary: {records:?}"
         );
-        let route = failures::of_node(&records, node, "fabro.fallback.route");
-        assert_eq!(route.len(), 1, "{node}: {records:?}");
-        assert_eq!(route[0]["position"], json!(0), "{node}: {}", route[0]);
         assert_eq!(
-            route[0]["reused"],
+            failures::of_node(&records, node, "fabro.fallback.plan").len(),
+            usize::from(node == "plan"),
+            "a reused thread has no plan of its own: {node}: {records:?}"
+        );
+        let thread = failures::of_node(&records, node, "fabro.thread");
+        assert_eq!(thread.len(), 1, "{node}: {records:?}");
+        assert_eq!(
+            thread[0]["reused"],
             json!(node != "plan"),
             "{node}: {}",
-            route[0]
+            thread[0]
         );
     }
 
@@ -783,6 +785,11 @@ fn project(events: &[RunEvent]) -> Projected {
                         .or_default() += 1;
                 }
             }
+            EventBody::AgentActivity(activity) if activity.backend == "pebble" => {
+                for kind in pebble_kinds(&activity.envelope) {
+                    *out.kinds.entry((node.clone(), kind)).or_default() += 1;
+                }
+            }
             EventBody::HostNote { kind, .. } if kind == "hook" => {
                 *out.hook_notes.entry(node.clone()).or_default() += 1;
             }
@@ -811,6 +818,34 @@ fn count(projected: &Projected, node: &str, kind: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// The kinds a Pebble envelope counts under: `pebble:<Variant>`, and
+/// `pebble:McpToolCallCompleted` for a completed call to an MCP tool that
+/// reached its server (a call a hook denied, or whose arguments Pebble
+/// refused, completes without one).
+fn pebble_kinds(envelope: &Value) -> Vec<String> {
+    let (variant, payload) = match &envelope["event"] {
+        Value::String(name) => (name.clone(), Value::Null),
+        Value::Object(map) => match map.iter().next() {
+            Some((name, payload)) => (name.clone(), payload.clone()),
+            None => return Vec::new(),
+        },
+        _ => return Vec::new(),
+    };
+    let mut kinds = vec![format!("pebble:{variant}")];
+    if variant == "ToolCallCompleted"
+        && payload["tool_name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("mcp__"))
+        && !matches!(
+            payload["error_kind"].as_str(),
+            Some("denied" | "invalid_arguments")
+        )
+    {
+        kinds.push("pebble:McpToolCallCompleted".to_owned());
+    }
+    kinds
+}
+
 /// The item 9 facilities as the public stream carries them, every family
 /// attributed to its stage: skill discovery (C3), MCP server and tool
 /// lifecycle (C2), the sub-agent lifecycle under the parent's session (C4),
@@ -823,20 +858,21 @@ fn assert_public_projection(events: &[RunEvent]) {
         count(&projected, "plan", "fabro.skills") >= 1,
         "{projected:#?}"
     );
-    // C2: the write's server started, was ready and stopped; one proxied call.
+    // C2: the write's server was ready and one proxied call completed, on
+    // Pebble's own events.
     assert!(
-        count(&projected, "write", "fabro.mcp.server") >= 3,
+        count(&projected, "write", "pebble:McpServerReady") >= 1,
         "{projected:#?}"
     );
     assert_eq!(
-        count(&projected, "write", "fabro.mcp.tool"),
+        count(&projected, "write", "pebble:McpToolCallCompleted"),
         1,
         "{projected:#?}"
     );
     // The MCP tool is still on the session after the compaction: the review
     // called it on the compacted thread (one pre and one post hook report).
     assert_eq!(
-        count(&projected, "review", "fabro.mcp.tool"),
+        count(&projected, "review", "pebble:McpToolCallCompleted"),
         1,
         "{projected:#?}"
     );
@@ -887,20 +923,26 @@ fn assert_public_projection(events: &[RunEvent]) {
         })
         .expect("the compaction event");
     assert!(compaction["usage"].is_object(), "{compaction}");
-    // C1: the docs thread's plan and failover; the reused route afterwards.
+    // C1: the docs thread's plan (Petri's) and its failover (Pebble's); the
+    // second docs node reuses the thread with no plan of its own.
     assert_eq!(
         count(&projected, "draft_docs", "fabro.fallback.plan"),
         1,
         "{projected:#?}"
     );
     assert_eq!(
-        count(&projected, "draft_docs", "fabro.fallback.failover"),
+        count(&projected, "draft_docs", "pebble:RouteFailover"),
         1,
         "{projected:#?}"
     );
     assert_eq!(
-        count(&projected, "draft_docs", "fabro.fallback.route"),
-        2,
+        count(&projected, "finish_docs", "fabro.fallback.plan"),
+        0,
+        "{projected:#?}"
+    );
+    assert_eq!(
+        count(&projected, "finish_docs", "fabro.thread"),
+        1,
         "{projected:#?}"
     );
     // Hooks: every tool hook that ran is a `fabro.hook` report on its stage
@@ -993,9 +1035,12 @@ async fn the_combined_workflow_runs_end_to_end_through_the_binary() {
         "the docs thread continues on the fallback route: {second}"
     );
     let records = failures::records(&finished.run_dir);
-    let reused = &failures::of_node(&records, "finish_docs", "fabro.fallback.route")[0];
+    let reused = &failures::of_node(&records, "finish_docs", "fabro.thread")[0];
     assert_eq!(reused["reused"], json!(true), "{reused}");
-    assert_eq!(reused["position"], json!(1), "{reused}");
+    // The reused thread's session starts on the route the thread reached.
+    let sessions = failures::pebble_events(&finished.run_dir, "finish_docs", "SessionStarted");
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+    assert_eq!(failures::route(&sessions[0]), "anthropic/claude-sonnet-5");
 
     // Final status, context and the invocations through the inspection.
     let document = finished.inspect();
@@ -1058,11 +1103,11 @@ async fn the_combined_workflow_reports_an_exhausted_chain_and_keeps_its_work() {
     assert_common_phases(&setup, &finished);
     assert_eq!(setup.anthrop.consumed(), ["docs-down-too"]);
     let records = failures::records(&finished.run_dir);
-    let stop = failures::of_node(&records, "draft_docs", "fabro.fallback.stop");
+    let stop = failures::pebble_events(&finished.run_dir, "draft_docs", "RouteFailoverStopped");
     assert_eq!(stop.len(), 1, "{records:?}");
     assert_eq!(stop[0]["reason"], json!("exhausted"), "{}", stop[0]);
     assert!(
-        failures::of_node(&records, "finish_docs", "fabro.fallback.route").is_empty(),
+        failures::of_node(&records, "finish_docs", "fabro.thread").is_empty(),
         "the second docs node never ran"
     );
     let nodes = finished.finished_nodes();
@@ -1083,12 +1128,12 @@ async fn the_combined_workflow_reports_an_exhausted_chain_and_keeps_its_work() {
     let events = public_events(&setup.case.run_dir);
     let projected = project(&events);
     assert_eq!(
-        count(&projected, "draft_docs", "fabro.fallback.stop"),
+        count(&projected, "draft_docs", "pebble:RouteFailoverStopped"),
         1,
         "{projected:#?}"
     );
     assert_eq!(
-        count(&projected, "draft_docs", "fabro.fallback.failover"),
+        count(&projected, "draft_docs", "pebble:RouteFailover"),
         1,
         "{projected:#?}"
     );
@@ -1198,7 +1243,7 @@ async fn the_combined_workflow_is_cancelled_during_a_childs_tool_and_leaks_nothi
         "{projected:#?}"
     );
     assert_eq!(
-        count(&projected, "write", "fabro.mcp.tool"),
+        count(&projected, "write", "pebble:McpToolCallCompleted"),
         1,
         "{projected:#?}"
     );

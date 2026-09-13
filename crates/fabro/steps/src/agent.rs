@@ -405,11 +405,6 @@ impl Step for AgentStep {
             Err(AgentError::Failed { class, message }) => return fail(message, &class),
             Err(AgentError::Model(failure)) => return fail(failure.to_string(), &failure.class()),
         };
-        if config.backend == AgentBackend::Api {
-            fallback::Stage::of(&ctx)
-                .route(&plan, reused, session.session_id().as_deref())
-                .await;
-        }
         let mut turns = 0;
         let result = Box::pin(run_session(
             &config,
@@ -467,10 +462,7 @@ impl Step for AgentStep {
             Err(AgentError::Failed { class, message }) => fail(message, &class),
             Err(AgentError::Model(failure)) => fail(failure.to_string(), &failure.class()),
         };
-        let mut custom = session.metrics(turns);
-        if config.backend == AgentBackend::Api {
-            custom.extend(fallback::metrics(&plan));
-        }
+        let custom = session.metrics(turns);
         outcome.metrics = Metrics {
             duration_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
             custom,

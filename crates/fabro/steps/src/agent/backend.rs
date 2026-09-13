@@ -175,12 +175,6 @@ impl Session {
             Self::Pebble(session) => Some(session.plan()),
         }
     }
-    pub(crate) fn session_id(&self) -> Option<String> {
-        match self {
-            Self::Acp(_) => None,
-            Self::Pebble(session) => Some(session.session_id()),
-        }
-    }
     pub(crate) async fn shutdown(
         &mut self,
         reason: ShutdownReason,

@@ -11,10 +11,20 @@
 //! A session opens on a plan's route ([`Resume::Fresh`]) or continues a
 //! retained export on the export's route with the plan the thread carries
 //! ([`Resume::Export`]). Either way the plan's remaining routes are named to
-//! Pebble as its fallback routes, and Pebble moves the conversation when a
-//! model error qualifies; the sink mirrors each move as the events
-//! [`crate::fallback`] defines. A prompt's model error stays typed
-//! ([`AgentError::Model`]) so the stage reports its class.
+//! Pebble as its fallback routes; Pebble moves the conversation when a model
+//! error qualifies and reports the move on its own event stream, and the
+//! session reads the route reached back for the thread a later node
+//! continues. A prompt's model error stays typed ([`AgentError::Model`]) so
+//! the stage reports its class.
+//!
+//! Pebble's `CodingAgentEvent` stream, recorded here as the `pebble`
+//! envelope (the public `agent_activity`), is the contract for everything
+//! Pebble knows: routes, MCP servers and their calls, tools, usage. The sink
+//! restates none of it as a Petri event; it emits a `StepEvent::Custom` only
+//! for a fact Pebble cannot know (a server never named to it,
+//! [`mcp::UNAVAILABLE_EVENT`]; the skill directories' conventions), and puts
+//! two of Pebble's facts on the node's stderr for the terminal: a fallback
+//! move and a server that did not start.
 //!
 //! Text a host delivers to the node (`Control::Deliver`) that is not an
 //! answer to the agent's question is a follow-up: it runs as its own user
@@ -36,12 +46,13 @@ use std::time::Duration;
 use environment::{PebbleEnvironment, PortRoutes, elapsed_ms};
 use execution::hooks::HookServiceHandle;
 use executor::Masker;
-use ir::{Attempt, Control, FiringId, ScopeId, StepEvent, Value};
+use ir::{Attempt, Control, FiringId, LogStream, ScopeId, StepEvent, Value};
 use lithos_llm::Client;
 use lithos_llm::catalog::Metadata;
-use lithos_llm::types::{ReasoningEffort, Request, Speed};
+use lithos_llm::types::{ErrorKind, ReasoningEffort, Request, Speed};
 use pebble_coding_agent::events::{
-    AgentProfileKind, CodingAgentEvent, EventSink, EventSinkError, PermissionLevel, TokenUsage,
+    AgentProfileKind, CodingAgentEvent, CodingEvent, EventSink, EventSinkError, PermissionLevel,
+    TokenUsage,
 };
 use pebble_coding_agent::extensions::Redactor;
 use pebble_coding_agent::steering::SteeringBus;
@@ -52,7 +63,7 @@ use pebble_coding_agent::{
 use questions::AgentQuestions;
 use serde_json::json;
 use smol_str::SmolStr;
-use steps::{ProgressSender, Steer, StepCtx};
+use steps::{ProgressError, ProgressSender, Steer, StepCtx};
 use tokio::sync::mpsc;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
@@ -85,21 +96,13 @@ pub(crate) enum Resume {
     },
 }
 
-/// One prompt turn's accounting, attributed to the route it ran on.
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct TurnUsage {
-    pub usage:           Value,
-    pub cost_usd_micros: Option<u64>,
-    pub inference_ms:    u64,
-    pub tool_ms:         u64,
-}
-
 pub(crate) struct NativeSession {
     agent:           CodingAgent,
-    /// The node's sink, kept so the MCP mirror can say `stopped` once the
-    /// agent has closed its servers, and so the fallback mirror can settle
-    /// each prompt on the route it ended on.
+    /// The node's sink, kept for the node's name the bus keys on.
     events:          Arc<PetriEvents>,
+    /// The node's fallback plan as the session was opened; the route
+    /// reached is read off the agent's remaining routes.
+    plan:            Plan,
     questions:       Arc<AgentQuestions>,
     /// The node run's steering bus, with this session attached under the
     /// node's name: every delivered follow-up goes through it.
@@ -231,16 +234,17 @@ impl NativeSession {
         // Pebble discovers and reports, the sink attributes.
         let (skill_discovery, skill_labels) = skills::for_node(config, ctx);
         let events = Arc::new(PetriEvents {
-            sender:   ctx.logs.clone(),
-            masker:   ctx.secrets.masker(),
-            firing:   ctx.firing,
-            attempt:  ctx.attempt,
-            scope:    ctx.scope,
-            node:     ctx.node.clone(),
-            skills:   skill_labels,
-            mcp:      mcp::Mirror::new(ctx, &config.mcps),
-            fallback: fallback::Mirror::new(ctx, plan.clone()),
+            sender:  ctx.logs.clone(),
+            masker:  ctx.secrets.masker(),
+            firing:  ctx.firing,
+            attempt: ctx.attempt,
+            scope:   ctx.scope,
+            node:    ctx.node.clone(),
+            skills:  skill_labels,
         });
+        // The plan's remaining routes, for Pebble to fail over to in order,
+        // each with its own controls; an export starts with none of its own.
+        let fallback_routes = plan.pebble_routes(config.max_tokens);
         let ledger = Arc::new(Ledger::default());
         let sink = subagents::observe(events.clone(), ledger.clone());
         let redactor = Arc::new(PetriRedactor(ctx.secrets.masker()));
@@ -278,16 +282,14 @@ impl NativeSession {
             let environment = Arc::new(environment);
             // The node's MCP servers: Fabro's entries as Pebble's, their
             // secrets resolved here and nowhere else. Pebble starts them while
-            // it builds the agent and reports each one on the sink; a server
-            // whose secret the run cannot supply is reported here instead.
+            // it builds the agent and reports each one on its stream; a
+            // server whose secret the run cannot supply is never named to
+            // Pebble, so it is reported here. A send that fails here means
+            // the driver stopped taking this attempt's progress; the build's
+            // own outcome reports that.
             let servers = mcp::pebble_servers(&mcps, env.as_ref(), secrets.as_ref());
-            // A send that fails here means the driver stopped taking this
-            // attempt's progress; the build's own outcome reports that.
-            for server in &mcps {
-                let _ = session_events.mcp.starting(&server.name).await;
-            }
             for (server, error) in &servers.unavailable {
-                let _ = session_events.mcp.failed(server, error, None).await;
+                let _ = session_events.unavailable(server, error).await;
             }
             // Fabro's project documents for the model's profile, from the
             // Git root down to the working directory: Pebble names the
@@ -300,10 +302,7 @@ impl NativeSession {
                 .with_skill_discovery(skill_discovery);
             let options = compaction::options(options, &config.compaction);
             // A resumed export keeps its route and its conversation; the
-            // builder binds this node's services either way, and names the
-            // plan's remaining routes for Pebble to fail over to, in order,
-            // each with its own controls (an export starts with none of its
-            // own).
+            // builder binds this node's services either way.
             let mut builder: CodingAgentBuilder = match resume {
                 Resume::Export { export, .. } => {
                     CodingAgent::resume_from_export(client.0.clone(), environment, *export)
@@ -314,7 +313,7 @@ impl NativeSession {
             };
             builder = builder
                 .options(options)
-                .fallback_routes(plan.pebble_routes(config.max_tokens))
+                .fallback_routes(fallback_routes)
                 .permission_level(PermissionLevel::Full)
                 .event_sink(sink)
                 .redactor(redactor)
@@ -366,6 +365,7 @@ impl NativeSession {
             attribution,
             agent,
             events,
+            plan,
             questions,
             steering,
             cancel: cancel.clone(),
@@ -406,8 +406,7 @@ impl NativeSession {
 
     /// One prompt turn. A model error comes back typed as
     /// [`AgentError::Model`]. Pebble runs the plan's remaining routes inside
-    /// the turn; the sink mirrors each move, and the route the prompt ended
-    /// on is settled here.
+    /// the turn and reports each move on its stream.
     pub(crate) async fn prompt(
         &mut self,
         prompt: &str,
@@ -443,10 +442,6 @@ impl NativeSession {
         self.compaction
             .settle(&session, &report, &self.attribution)
             .await;
-        // The route the prompt ended on gets the report less what the
-        // failed routes spent; an interrupted turn is accounted like any
-        // other, with no stop decision after it.
-        self.events.fallback.settle(&report).await;
         if cancel.is_cancelled() {
             return Err(AgentError::Cancelled);
         }
@@ -454,10 +449,7 @@ impl NativeSession {
             Ok(output) => Ok(output.text.unwrap_or_default()),
             Err(error) => Err(match fallback::classify(&error) {
                 Disposition::Cancelled => AgentError::Cancelled,
-                Disposition::Model(failure) => {
-                    self.events.fallback.stop(&failure).await;
-                    AgentError::Model(failure)
-                }
+                Disposition::Model(failure) => AgentError::Model(failure),
                 // A skill reference that does not expand keeps the skills
                 // module's class and reason; any other agent error is what
                 // the classifier said.
@@ -481,10 +473,18 @@ impl NativeSession {
         self.tool = self.tool.saturating_add(report.timing.tool);
     }
 
-    /// The fallback plan at the route reached, after any failover Pebble
-    /// ran.
+    /// The fallback plan at the route reached: the routes Pebble has taken
+    /// are the ones no longer among its remaining fallback routes.
     pub(crate) fn plan(&self) -> Plan {
-        self.events.fallback.plan()
+        let mut plan = self.plan.clone();
+        let taken = plan
+            .remaining_routes()
+            .len()
+            .saturating_sub(self.agent.remaining_fallback_routes().len());
+        for _ in 0..taken {
+            plan.advance();
+        }
+        plan
     }
 
     pub(crate) fn session_id(&self) -> String {
@@ -517,27 +517,14 @@ impl NativeSession {
         // the shutdown waits there and is dropped with the bus, as the
         // agent could not run it.
         self.steering.detach(&self.events.node, &self.session_id());
-        // The MCP servers Pebble started; it closes them with the agent, after
-        // its last tool call and before this returns, so before the node
-        // returns and the scope's environment is released.
-        let started: Vec<String> = self
-            .agent
-            .snapshot()
-            .mcp_servers()
-            .iter()
-            .filter(|status| status.error.is_none())
-            .map(|status| status.server.clone())
-            .collect();
-        let result = self
-            .agent
+        // Pebble closes the MCP servers it started with the agent, after its
+        // last tool call and before this returns, so before the node returns
+        // and the scope's environment is released.
+        self.agent
             .shutdown(reason)
             .await
             .map(|_| ())
-            .map_err(|e| AgentError::failed("pebble_shutdown", e.to_string()));
-        for server in started {
-            let _ = self.events.mcp.stopped(&server).await;
-        }
-        result
+            .map_err(|e| AgentError::failed("pebble_shutdown", e.to_string()))
     }
 }
 
@@ -599,24 +586,71 @@ impl Redactor for PetriRedactor {
 /// and emits its events again, so a record may appear twice; Pebble's
 /// `(stream_id, seq)` in the nested envelope is the idempotency key.
 ///
-/// Beside the envelope, the sink derives Petri's own events from what Pebble
-/// reports: the skill directories it searched, the MCP servers' lifecycle
-/// and calls ([`mcp::Mirror`]), and the fallback routes the prompt moved
-/// through ([`fallback::Mirror`]).
+/// Beside the envelope, the sink emits Petri's own events only for what
+/// Pebble cannot know: the conventions behind the skill directories Pebble
+/// reports having searched, and a server never named to Pebble because its
+/// secret is unavailable ([`PetriEvents::unavailable`]). Two of Pebble's
+/// facts also go to the node's stderr, for the terminal: a fallback move and
+/// a server that did not start ([`stderr_line`]).
 struct PetriEvents {
-    sender:   ProgressSender,
-    masker:   Masker,
-    firing:   FiringId,
-    attempt:  Attempt,
-    scope:    ScopeId,
-    node:     SmolStr,
+    sender:  ProgressSender,
+    masker:  Masker,
+    firing:  FiringId,
+    attempt: Attempt,
+    scope:   ScopeId,
+    node:    SmolStr,
     /// What names the skill directories Pebble reports having searched.
-    skills:   skills::Labels,
-    /// The MCP server and tool events, from Pebble's.
-    mcp:      mcp::Mirror,
-    /// The fallback events, from Pebble's, and the route the plan reached.
-    fallback: fallback::Mirror,
+    skills:  skills::Labels,
 }
+
+impl PetriEvents {
+    /// A server Petri never named to Pebble because a secret its entry
+    /// needs is unavailable: the line on the node's stderr, then
+    /// [`mcp::UNAVAILABLE_EVENT`], both acknowledged.
+    async fn unavailable(&self, server: &str, error: &str) -> Result<(), ProgressError> {
+        self.sender
+            .send_acked(StepEvent::Log {
+                stream: LogStream::Stderr,
+                line:   self
+                    .masker
+                    .mask(&format!("mcp server `{server}` failed to start: {error}")),
+            })
+            .await?;
+        self.sender
+            .send_acked(StepEvent::Custom(self.masker.mask_value(&json!({
+                "kind": mcp::UNAVAILABLE_EVENT,
+                "node": self.node,
+                "firing": self.firing,
+                "attempt": self.attempt,
+                "server": server,
+                "error": error,
+            }))))
+            .await
+    }
+}
+
+/// What a person watching the node's stderr should read of `event`: a
+/// fallback move, or a server that did not start. Both facts stay Pebble's
+/// on the event stream; the line is for the terminal.
+fn stderr_line(event: &CodingEvent) -> Option<String> {
+    match event {
+        CodingEvent::RouteFailover {
+            from,
+            to,
+            attempt,
+            error,
+            ..
+        } => Some(format!(
+            "model fallback: {from} failed ({}); continuing on {to} (attempt {attempt} of the plan)",
+            error.llm_kind.as_ref().map_or("error", ErrorKind::as_str)
+        )),
+        CodingEvent::McpServerFailed { server, error, .. } => {
+            Some(format!("mcp server `{server}` failed to start: {error}"))
+        }
+        _ => None,
+    }
+}
+
 #[async_trait::async_trait]
 impl EventSink for PetriEvents {
     async fn record(&self, event: &CodingAgentEvent) -> Result<(), EventSinkError> {
@@ -628,16 +662,15 @@ impl EventSink for PetriEvents {
             ))
             .await
             .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))?;
-        // Acknowledged like the envelope: Pebble's confirmation covers the
-        // events Petri derived from its event too.
-        self.mcp
-            .observe(&event.event)
-            .await
-            .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))?;
-        self.fallback
-            .observe(event)
-            .await
-            .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))?;
+        if let Some(line) = stderr_line(&event.event) {
+            self.sender
+                .send_acked(StepEvent::Log {
+                    stream: LogStream::Stderr,
+                    line:   self.masker.mask(&line),
+                })
+                .await
+                .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))?;
+        }
         // The directories Pebble searched are Petri's record, with the
         // convention behind each; a skipped file or directory is Pebble's
         // report and the diagnostic is Petri's.
