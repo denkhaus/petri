@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use execution::host::{self, HostRun};
-use fabro_steps::fallback::{PLAN_EVENT, ROUTE_EVENT, USAGE_EVENT};
+use fabro_steps::fallback::PLAN_EVENT;
 use fabro_steps::pebble::PebbleClient;
 use fabro_steps::prompt::{COMPLETED_EVENT, PROMPT_EVENT};
 use fabro_steps::register;
@@ -149,14 +149,10 @@ async fn a_prompt_node_makes_one_tool_free_call_and_writes_the_response() {
     assert_eq!(kv.get("response.p"), Some(&json!("A tidy summary.")));
     assert_eq!(kv.get("last_response"), Some(&json!("A tidy summary.")));
     assert_eq!(kv.get("last_stage"), Some(&json!("p")));
+    // The plan is the one fallback fact a prompt node reports; a prompt
+    // node runs no Pebble session, so nothing else describes its route.
     let kinds: Vec<&str> = events.iter().filter_map(|e| e["kind"].as_str()).collect();
-    assert_eq!(kinds, [
-        PLAN_EVENT,
-        ROUTE_EVENT,
-        PROMPT_EVENT,
-        USAGE_EVENT,
-        COMPLETED_EVENT
-    ]);
+    assert_eq!(kinds, [PLAN_EVENT, PROMPT_EVENT, COMPLETED_EVENT]);
     let events: Vec<serde_json::Value> = events
         .into_iter()
         .filter(|e| {

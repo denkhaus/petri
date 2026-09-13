@@ -648,6 +648,16 @@ fn project(events: &[RunEvent]) -> Projected {
         let synthetic =
             subject.is_some_and(|s| s.node.meta.get("synthetic") == Some(&Value::Bool(true)));
         let node = subject.map(|s| s.node.name.to_string()).unwrap_or_default();
+        // Pebble's events count under `pebble:<Variant>` beside Petri's own
+        // kinds; the delegate arm below reads the same events for the
+        // sub-agent lifecycle.
+        if let EventBody::AgentActivity(activity) = &event.body
+            && activity.backend == "pebble"
+        {
+            for kind in pebble_kinds(&activity.envelope) {
+                *out.kinds.entry((node.clone(), kind)).or_default() += 1;
+            }
+        }
         match &event.body {
             EventBody::RunFinished { status } => out.run_status = Some(*status),
             EventBody::VisitCompleted { outcome, .. } if !synthetic => {
@@ -708,6 +718,34 @@ fn kind_total(projected: &Projected, kind: &str) -> usize {
         .filter(|((_, k), _)| k == kind)
         .map(|(_, n)| n)
         .sum()
+}
+
+/// The kinds a Pebble envelope counts under: `pebble:<Variant>`, and
+/// `pebble:McpToolCallCompleted` for a completed call to an MCP tool that
+/// reached its server (a call a hook denied, or whose arguments Pebble
+/// refused, completes without one).
+fn pebble_kinds(envelope: &Value) -> Vec<String> {
+    let (variant, payload) = match &envelope["event"] {
+        Value::String(name) => (name.clone(), Value::Null),
+        Value::Object(map) => match map.iter().next() {
+            Some((name, payload)) => (name.clone(), payload.clone()),
+            None => return Vec::new(),
+        },
+        _ => return Vec::new(),
+    };
+    let mut kinds = vec![format!("pebble:{variant}")];
+    if variant == "ToolCallCompleted"
+        && payload["tool_name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("mcp__"))
+        && !matches!(
+            payload["error_kind"].as_str(),
+            Some("denied" | "invalid_arguments")
+        )
+    {
+        kinds.push("pebble:McpToolCallCompleted".to_owned());
+    }
+    kinds
 }
 
 fn count(projected: &Projected, node: &str, kind: &str) -> usize {
@@ -979,19 +1017,21 @@ async fn the_combined_workflow_runs_through_the_embedding_boundary() {
         count(&projected, "plan", "fabro.skills") >= 1,
         "{projected:#?}"
     );
+    // C2 on Pebble's own events: the write's server was ready and one
+    // proxied call completed.
     assert!(
-        count(&projected, "write", "fabro.mcp.server") >= 3,
+        count(&projected, "write", "pebble:McpServerReady") >= 1,
         "{projected:#?}"
     );
     assert_eq!(
-        count(&projected, "write", "fabro.mcp.tool"),
+        count(&projected, "write", "pebble:McpToolCallCompleted"),
         1,
         "{projected:#?}"
     );
     // The MCP tool is still on the session after the compaction: the review
     // called it on the compacted thread (one pre and one post hook report).
     assert_eq!(
-        count(&projected, "review", "fabro.mcp.tool"),
+        count(&projected, "review", "pebble:McpToolCallCompleted"),
         1,
         "{projected:#?}"
     );
@@ -1005,13 +1045,12 @@ async fn the_combined_workflow_runs_through_the_embedding_boundary() {
         1,
         "{projected:#?}"
     );
+    // C1: the docs thread's plan (Petri's) and its failover (Pebble's); the
+    // second docs node reuses the thread with no plan of its own.
     assert_eq!(count(&projected, "draft_docs", "fabro.fallback.plan"), 1);
-    assert_eq!(
-        count(&projected, "draft_docs", "fabro.fallback.failover"),
-        1
-    );
-    assert_eq!(count(&projected, "draft_docs", "fabro.fallback.route"), 2);
-    assert_eq!(count(&projected, "finish_docs", "fabro.fallback.route"), 1);
+    assert_eq!(count(&projected, "draft_docs", "pebble:RouteFailover"), 1);
+    assert_eq!(count(&projected, "finish_docs", "fabro.fallback.plan"), 0);
+    assert_eq!(count(&projected, "finish_docs", "fabro.thread"), 1);
     assert_eq!(count(&projected, "plan", "fabro.hook"), 3, "{projected:#?}");
     assert_eq!(
         count(&projected, "write", "fabro.hook"),

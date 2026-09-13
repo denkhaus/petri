@@ -1,9 +1,8 @@
 //! Pebble tools act through the firing's execution scope, never host paths.
 //! The same scope is the route to a sandbox-hosted MCP server's port
-//! ([`PortRoutes`]).
+//! ([`ScopePortRoutes`]).
 
 use std::fmt::Write as _;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,8 +19,8 @@ use pebble_coding_agent::environment::{
     ExecOutputStream, ExecRequest, ExecResult, GrepOptions,
 };
 use pebble_coding_agent::events::CommandTermination;
+use pebble_coding_agent::mcp::{PortRoute, PortRouteError, PortRoutes};
 use pebble_coding_agent::tools::OutputCaptureStats;
-use sandbox_driver::{Capability, PreviewUrl, PreviewUrls};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
@@ -444,46 +443,51 @@ fn error(kind: EnvironmentErrorKind, message: impl Into<String>) -> EnvironmentE
 fn io_error(cause: executor::EnvError) -> EnvironmentError {
     EnvironmentError::with_source(EnvironmentErrorKind::Io, cause.to_string(), cause)
 }
-pub(super) fn elapsed_ms(duration: Duration) -> u64 {
+pub(crate) fn elapsed_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// The route from Petri to a port inside the scope, as Pebble reaches a
-/// sandbox-hosted MCP server: sandbox-driver's [`PreviewUrls`] facet over
+/// sandbox-hosted MCP server: Pebble's own [`PortRoutes`] contract over
 /// [`ExecEnv::preview_url`]. The provider answers (the host's own loopback,
 /// the forward the Docker plugin opens into the container, Daytona's preview
 /// link with its token header); an environment with no route to its ports
-/// reports the capability as unsupported, which Pebble makes the server's
-/// failure reason.
-pub struct PortRoutes(Arc<dyn ExecEnv>);
+/// reports [`PortRouteError::Unsupported`], which Pebble makes the server's
+/// failure reason. The trait is Pebble's, so Petri shares no sandbox crate
+/// with Pebble to implement it.
+pub struct ScopePortRoutes(Arc<dyn ExecEnv>);
 
-impl PortRoutes {
+impl ScopePortRoutes {
     pub fn new(env: Arc<dyn ExecEnv>) -> Self {
         Self(env)
     }
 }
 
 #[async_trait]
-impl PreviewUrls for PortRoutes {
-    async fn preview_url(&self, port: u16) -> sandbox_driver::Result<PreviewUrl> {
+impl PortRoutes for ScopePortRoutes {
+    async fn route(&self, port: u16) -> Result<PortRoute, PortRouteError> {
         match self.0.preview_url(port).await {
-            Ok(Some(route)) => {
-                let mut preview = PreviewUrl::new(route.url);
-                preview.headers = route.headers;
-                Ok(preview)
-            }
-            Ok(None) => Err(sandbox_driver::Error::unsupported(Capability::PreviewUrls)),
-            Err(error) => Err(route_error(error)),
+            Ok(Some(route)) => Ok(PortRoute {
+                url:     route.url,
+                headers: route.headers,
+            }),
+            Ok(None) => Err(PortRouteError::Unsupported),
+            Err(error) => Err(route_error("opening the route", error)),
         }
     }
 
-    async fn release_preview_url(&self, port: u16) -> sandbox_driver::Result<()> {
-        self.0.release_preview_url(port).await.map_err(route_error)
+    async fn release(&self, port: u16) -> Result<(), PortRouteError> {
+        self.0
+            .release_preview_url(port)
+            .await
+            .map_err(|error| route_error("releasing the route", error))
     }
 }
 
-/// The environment's refusal as the driver's error, its message kept: Pebble
-/// reports it as the reason the server has no route.
-fn route_error(error: EnvError) -> sandbox_driver::Error {
-    sandbox_driver::Error::io(error.to_string(), io::Error::other(error))
+/// The environment's refusal as Pebble's route failure: `step` names what
+/// was being done and the refusal is the source, so the chain Pebble
+/// reports as the reason the server has no route reads `<step>: <refusal>`,
+/// the refusal's own text once.
+fn route_error(step: &'static str, error: EnvError) -> PortRouteError {
+    PortRouteError::failed_with_source(step, error)
 }

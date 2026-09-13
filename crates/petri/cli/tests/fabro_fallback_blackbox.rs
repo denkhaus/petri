@@ -3,7 +3,9 @@
 //! injecting the failures. Every case runs the real `petri` binary with an
 //! isolated environment, one twin per provider on loopback, and reads what
 //! the run reported: its status, the workspace, the twins' request logs, and
-//! the `fabro.fallback.*` records in the event log the run names.
+//! the event log the run names, where the plan is Petri's `fabro.fallback.plan`
+//! and every route fact is Pebble's own event (`SessionStarted`,
+//! `RouteFailover`, `RouteFailoverStopped`, `AssistantMessage`).
 //!
 //! The expected request sequences are derived from the pinned Fabro's
 //! source (`handler/llm/api.rs` at `b6482910`: `fallback_plan`,
@@ -37,35 +39,25 @@ fn no_client_retries() -> Launch {
     }
 }
 
-/// The bodies of one Pebble event variant in the run's event log, in log
-/// order. Pebble's events reach the log inside the `pebble` envelope.
-fn pebble_events(run_dir: &Path, variant: &str) -> Vec<Value> {
-    fn collect(value: &Value, variant: &str, out: &mut Vec<Value>) {
-        match value {
-            Value::Object(map) => {
-                if map.get("kind").and_then(Value::as_str) == Some("pebble") {
-                    if let Some(body) = map["event"]["event"].get(variant) {
-                        out.push(body.clone());
-                    }
-                    return;
-                }
-                for child in map.values() {
-                    collect(child, variant, out);
-                }
-            }
-            Value::Array(items) => {
-                for item in items {
-                    collect(item, variant, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let text = fs::read_to_string(run_dir.join("events.json")).unwrap_or_default();
-    let log: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-    let mut out = Vec::new();
-    collect(&log, variant, &mut out);
-    out
+/// Pebble's `RouteFailover` events of `node`, in order: each move the
+/// prompt made, with the failed route's usage and the typed error.
+fn failovers(run_dir: &Path, node: &str) -> Vec<Value> {
+    failures::pebble_events(run_dir, node, "RouteFailover")
+}
+
+/// Pebble's `RouteFailoverStopped` events of `node`: a model error that
+/// ended the prompt although routes were named, with the reason.
+fn stops(run_dir: &Path, node: &str) -> Vec<Value> {
+    failures::pebble_events(run_dir, node, "RouteFailoverStopped")
+}
+
+/// The `provider/model` each of `node`'s sessions started on, in order: the
+/// primary, then each route a failover moved to.
+fn sessions(run_dir: &Path, node: &str) -> Vec<String> {
+    failures::pebble_events(run_dir, node, "SessionStarted")
+        .iter()
+        .map(failures::route)
+        .collect()
 }
 
 /// An agent workflow on `primary` with `workflow.toml` chains.
@@ -96,7 +88,11 @@ fn requests(twin: &Twin, case: &Case) -> Vec<Value> {
 }
 
 fn plan_routes(records: &[Value]) -> Vec<String> {
-    let plan = failures::of_node(records, "agent", "fabro.fallback.plan");
+    plan_routes_of(records, "agent")
+}
+
+fn plan_routes_of(records: &[Value], node: &str) -> Vec<String> {
+    let plan = failures::of_node(records, node, "fabro.fallback.plan");
     assert_eq!(plan.len(), 1, "one plan per stage: {records:?}");
     plan[0]["routes"]
         .as_array()
@@ -145,17 +141,13 @@ async fn a_successful_primary_request_never_leaves_its_route() {
         "openai/gpt-5.6-sol",
         "anthropic/claude-sonnet-5"
     ]);
-    assert_eq!(failures::kinds(&records, "agent"), [
-        "plan", "route", "usage"
-    ]);
-    let route = &failures::of_node(&records, "agent", "fabro.fallback.route")[0];
-    assert_eq!(route["position"], json!(0));
-    assert_eq!(route["reused"], json!(false));
-    assert!(route["session"].is_string(), "{route}");
-    let usage = &failures::of_node(&records, "agent", "fabro.fallback.usage")[0];
-    assert_eq!(usage["outcome"], json!("ok"));
-    assert_eq!(usage["position"], json!(0));
-    assert_eq!(failures::route(usage), "openai/gpt-5.6-sol");
+    // Nothing moved: Pebble reports no failover and no stop, and the one
+    // session ran on the primary.
+    assert!(failovers(&finished.run_dir, "agent").is_empty());
+    assert!(stops(&finished.run_dir, "agent").is_empty());
+    assert_eq!(sessions(&finished.run_dir, "agent"), ["openai/gpt-5.6-sol"]);
+    let thread = &failures::of_node(&records, "agent", "fabro.thread")[0];
+    assert_eq!(thread["reused"], json!(false));
     assert!(
         !finished.stderr.contains("model fallback:"),
         "{}",
@@ -221,41 +213,40 @@ async fn a_qualifying_failure_moves_the_prompt_to_the_next_provider() {
         json!("Hello from the fallback.")
     );
     let records = failures::records(&finished.run_dir);
-    assert_eq!(failures::kinds(&records, "agent"), [
-        "plan", "route", "usage", "failover", "route", "usage"
+    assert_eq!(plan_routes(&records), [
+        "openai/gpt-5.6-sol",
+        "anthropic/claude-sonnet-5"
     ]);
-    let failover = &failures::of_node(&records, "agent", "fabro.fallback.failover")[0];
-    assert_eq!(failover["position"], json!(1));
-    assert_eq!(
-        failover["from"],
-        json!({ "provider": "openai", "model": "gpt-5.6-sol" })
-    );
-    assert_eq!(failover["to"]["provider"], json!("anthropic"));
-    assert_eq!(failover["to"]["model"], json!("claude-sonnet-5"));
-    assert_eq!(
-        failover["original"],
-        json!({ "provider": "openai", "model": "gpt-5.6-sol" })
-    );
-    assert_eq!(failover["error"]["kind"], json!("server"));
+    // Pebble's own account of the move: one failover with the failed
+    // route's typed error and its spend, no stop, a session on each route
+    // in order, and the answer on the fallback's session.
+    let moved = failovers(&finished.run_dir, "agent");
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    let failover = &moved[0];
+    assert_eq!(failover["attempt"], json!(1));
+    assert_eq!(failover["from"], json!("openai/gpt-5.6-sol"));
+    assert_eq!(failover["to"], json!("anthropic/claude-sonnet-5"));
+    assert_eq!(failover["error"]["llm_kind"], json!("server"));
     assert_eq!(failover["error"]["status"], json!(500));
-    assert_eq!(failover["error"]["eligible"], json!(true));
     assert_eq!(failover["continuation"], json!("replay_prompt"));
-    let usages = failures::of_node(&records, "agent", "fabro.fallback.usage");
     assert_eq!(
-        (
-            usages[0]["position"].as_u64(),
-            usages[0]["outcome"].as_str()
-        ),
-        (Some(0), Some("error"))
+        failover["usage"]["input"],
+        json!(0),
+        "the failed route accepted nothing: {failover}"
     );
-    assert_eq!(
-        (
-            usages[1]["position"].as_u64(),
-            usages[1]["outcome"].as_str()
-        ),
-        (Some(1), Some("ok"))
+    assert!(stops(&finished.run_dir, "agent").is_empty());
+    assert_eq!(sessions(&finished.run_dir, "agent"), [
+        "openai/gpt-5.6-sol",
+        "anthropic/claude-sonnet-5"
+    ]);
+    let answers = failures::pebble_events(&finished.run_dir, "agent", "AssistantMessage");
+    assert_eq!(answers.len(), 1, "{answers:?}");
+    assert_eq!(answers[0]["model"], json!("claude-sonnet-5"));
+    assert!(
+        answers[0]["usage"]["input"].as_u64().is_some_and(|n| n > 0),
+        "{}",
+        answers[0]
     );
-    assert_eq!(failures::route(usages[1]), "anthropic/claude-sonnet-5");
     assert!(
         finished
             .stderr
@@ -307,15 +298,13 @@ async fn a_non_qualifying_failure_fails_the_stage_without_fallback() {
         json!("llm:invalid_request"),
         "{context:?}"
     );
-    let records = failures::records(&finished.run_dir);
-    assert_eq!(failures::kinds(&records, "agent"), [
-        "plan", "route", "usage", "stop"
-    ]);
-    let stop = &failures::of_node(&records, "agent", "fabro.fallback.stop")[0];
-    assert_eq!(stop["reason"], json!("ineligible"));
-    assert_eq!(stop["position"], json!(0));
-    assert_eq!(stop["error"]["kind"], json!("invalid_request"));
-    assert_eq!(stop["error"]["eligible"], json!(false));
+    assert!(failovers(&finished.run_dir, "agent").is_empty());
+    let stopped = stops(&finished.run_dir, "agent");
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert_eq!(stopped[0]["reason"], json!("ineligible"));
+    assert_eq!(stopped[0]["attempt"], json!(0));
+    assert_eq!(stopped[0]["route"], json!("openai/gpt-5.6-sol"));
+    assert_eq!(stopped[0]["error"]["llm_kind"], json!("invalid_request"));
     finished.assert_no_leaked_processes().await;
     openai.stop();
     anthropic.stop();
@@ -387,17 +376,15 @@ async fn a_later_provider_succeeds_after_two_failures() {
         "openrouter/kimi-k3",
         "anthropic/claude-sonnet-5"
     ]);
-    let failovers = failures::of_node(&records, "agent", "fabro.fallback.failover");
-    assert_eq!(failovers.len(), 2);
-    assert_eq!(failovers[0]["error"]["kind"], json!("authentication"));
-    assert_eq!(failovers[0]["to"]["provider"], json!("openrouter"));
-    assert_eq!(
-        failovers[1]["from"],
-        json!({ "provider": "openrouter", "model": "kimi-k3" })
-    );
-    assert_eq!(failovers[1]["error"]["kind"], json!("server"));
-    assert_eq!(failovers[1]["to"]["provider"], json!("anthropic"));
-    assert_eq!(failovers[1]["position"], json!(2));
+    // The failovers chain: one event's `to` is the next event's `from`.
+    let moved = failovers(&finished.run_dir, "agent");
+    assert_eq!(moved.len(), 2, "{moved:?}");
+    assert_eq!(moved[0]["error"]["llm_kind"], json!("authentication"));
+    assert_eq!(moved[0]["to"], json!("openrouter/kimi-k3"));
+    assert_eq!(moved[1]["from"], json!("openrouter/kimi-k3"));
+    assert_eq!(moved[1]["error"]["llm_kind"], json!("server"));
+    assert_eq!(moved[1]["to"], json!("anthropic/claude-sonnet-5"));
+    assert_eq!(moved[1]["attempt"], json!(2));
     finished.assert_no_leaked_processes().await;
     openai.stop();
     openrouter.stop();
@@ -453,16 +440,13 @@ async fn chain_exhaustion_fails_the_stage_with_the_last_error() {
         json!("llm:quota_exceeded"),
         "{context:?}"
     );
-    let records = failures::records(&finished.run_dir);
-    assert_eq!(failures::kinds(&records, "agent"), [
-        "plan", "route", "usage", "failover", "route", "usage", "stop"
-    ]);
-    let stop = &failures::of_node(&records, "agent", "fabro.fallback.stop")[0];
-    assert_eq!(stop["reason"], json!("exhausted"));
-    assert_eq!(stop["position"], json!(1));
-    assert_eq!(failures::route(stop), "anthropic/claude-sonnet-5");
-    assert_eq!(stop["error"]["kind"], json!("quota_exceeded"));
-    assert_eq!(stop["error"]["eligible"], json!(true));
+    assert_eq!(failovers(&finished.run_dir, "agent").len(), 1);
+    let stopped = stops(&finished.run_dir, "agent");
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert_eq!(stopped[0]["reason"], json!("exhausted"));
+    assert_eq!(stopped[0]["attempt"], json!(1));
+    assert_eq!(stopped[0]["route"], json!("anthropic/claude-sonnet-5"));
+    assert_eq!(stopped[0]["error"]["llm_kind"], json!("quota_exceeded"));
     finished.assert_no_leaked_processes().await;
     openai.stop();
     anthropic.stop();
@@ -545,10 +529,15 @@ async fn a_tool_effect_is_not_repeated_across_a_failover() {
         !sent.contains("do not run those tools again"),
         "no continuation text: the next model continues from the tool result itself: {sent}"
     );
-    let records = failures::records(&finished.run_dir);
-    let failover = &failures::of_node(&records, "agent", "fabro.fallback.failover")[0];
-    assert_eq!(failover["continuation"], json!("continue_turn"));
-    assert_eq!(failover["error"]["kind"], json!("server"));
+    let moved = failovers(&finished.run_dir, "agent");
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert_eq!(moved[0]["continuation"], json!("continue_turn"));
+    assert_eq!(moved[0]["error"]["llm_kind"], json!("server"));
+    assert!(
+        moved[0]["usage"]["input"].as_u64().is_some_and(|n| n > 0),
+        "the tool-call answer the primary gave before it failed is the failed route's spend: {}",
+        moved[0]
+    );
     assert_eq!(
         finished.final_context()["response.agent"],
         json!("Appended once, as asked.")
@@ -609,20 +598,17 @@ async fn cancellation_during_fallback_cancels_the_run() {
         1,
         "no request after the interrupt"
     );
-    let records = failures::records(&finished.run_dir);
-    assert_eq!(
-        failures::kinds(&records, "agent"),
-        ["plan", "route", "usage", "failover", "route", "usage"],
-        "the interrupted turn is accounted, no stop decision follows: {records:?}"
+    assert_eq!(failovers(&finished.run_dir, "agent").len(), 1);
+    assert!(
+        stops(&finished.run_dir, "agent").is_empty(),
+        "a cancelled prompt reports no stop decision"
     );
-    let interrupted = failures::of_node(&records, "agent", "fabro.fallback.usage")[1];
-    assert_eq!(interrupted["position"], json!(1));
-    assert_eq!(interrupted["outcome"], json!("error"));
-    assert_eq!(
-        interrupted["usage"]["input"],
-        json!(10),
-        "the tool-call response the fallback accepted before the interrupt is counted"
-    );
+    // The tool-call response the fallback accepted before the interrupt is
+    // on the stream, on the fallback's session.
+    let answers = failures::pebble_events(&finished.run_dir, "agent", "AssistantMessage");
+    assert_eq!(answers.len(), 1, "{answers:?}");
+    assert_eq!(answers[0]["model"], json!("claude-sonnet-5"));
+    assert_eq!(answers[0]["usage"]["input"], json!(10), "{}", answers[0]);
     finished.assert_no_leaked_processes().await;
     openai.stop();
     anthropic.stop();
@@ -666,11 +652,10 @@ async fn a_refusal_is_eligible_but_another_content_filter_is_not() {
     finished.assert_code(0);
     assert_eq!(anthropic.consumed(), ["refuses"]);
     assert_eq!(openai.consumed(), ["answers"]);
-    let records = failures::records(&finished.run_dir);
-    let failover = &failures::of_node(&records, "agent", "fabro.fallback.failover")[0];
-    assert_eq!(failover["error"]["kind"], json!("content_filter"));
-    assert_eq!(failover["error"]["provider_code"], json!("refusal"));
-    assert_eq!(failover["error"]["eligible"], json!(true));
+    let moved = failovers(&finished.run_dir, "agent");
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert_eq!(moved[0]["error"]["llm_kind"], json!("content_filter"));
+    assert_eq!(moved[0]["error"]["provider_code"], json!("refusal"));
     finished.assert_no_leaked_processes().await;
     anthropic.stop();
     openai.stop();
@@ -702,10 +687,13 @@ async fn a_refusal_is_eligible_but_another_content_filter_is_not() {
         finished.final_context()["failure_class"],
         json!("llm:content_filter")
     );
-    let records = failures::records(&finished.run_dir);
-    let stop = &failures::of_node(&records, "agent", "fabro.fallback.stop")[0];
-    assert_eq!(stop["reason"], json!("ineligible"));
-    assert_eq!(stop["error"]["provider_code"], json!("content_filter"));
+    let stopped = stops(&finished.run_dir, "agent");
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert_eq!(stopped[0]["reason"], json!("ineligible"));
+    assert_eq!(
+        stopped[0]["error"]["provider_code"],
+        json!("content_filter")
+    );
     finished.assert_no_leaked_processes().await;
     openai.stop();
     anthropic.stop();
@@ -750,10 +738,14 @@ async fn a_request_timeout_is_eligible() {
     finished.assert_code(0);
     assert_eq!(openai.consumed(), ["hangs"]);
     assert_eq!(anthropic.consumed(), ["answers"]);
-    let records = failures::records(&finished.run_dir);
-    let failover = &failures::of_node(&records, "agent", "fabro.fallback.failover")[0];
-    assert_eq!(failover["error"]["kind"], json!("timeout"), "{failover}");
-    assert_eq!(failover["error"]["eligible"], json!(true));
+    let moved = failovers(&finished.run_dir, "agent");
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert_eq!(
+        moved[0]["error"]["llm_kind"],
+        json!("timeout"),
+        "{}",
+        moved[0]
+    );
     finished.assert_no_leaked_processes().await;
     openai.stop();
     anthropic.stop();
@@ -803,15 +795,15 @@ async fn client_retries_are_spent_before_the_chain_advances() {
     );
     assert_eq!(requests(&openai, &case).len(), 2);
     assert_eq!(anthropic.consumed(), ["answers"]);
-    let records = failures::records(&finished.run_dir);
+    let moved = failovers(&finished.run_dir, "agent");
     assert_eq!(
-        failures::of_node(&records, "agent", "fabro.fallback.failover").len(),
+        moved.len(),
         1,
-        "one fallback decision, whatever the client retried: {records:?}"
+        "one fallback decision, whatever the client retried: {moved:?}"
     );
     // The client's own retry is on the agent's event stream: Petri installs
     // Pebble's `RetryEventObserver` on the middleware it builds.
-    let retries = pebble_events(&finished.run_dir, "LlmRetry");
+    let retries = failures::pebble_events(&finished.run_dir, "agent", "LlmRetry");
     assert_eq!(retries.len(), 1, "one client retry reported: {retries:?}");
     assert_eq!(retries[0]["provider"], OPENAI.id());
     assert_eq!(retries[0]["model"], model(OPENAI));
@@ -881,14 +873,13 @@ async fn a_workflow_retry_is_not_a_failover() {
     let plans = failures::of_node(&records, "agent", "fabro.fallback.plan");
     assert_eq!(plans.len(), 2, "one plan per firing: {records:?}");
     assert_ne!(plans[0]["firing"], plans[1]["firing"]);
-    assert!(failures::of_node(&records, "agent", "fabro.fallback.failover").is_empty());
-    assert!(failures::of_node(&records, "agent", "fabro.fallback.stop").is_empty());
-    let routes = failures::of_node(&records, "agent", "fabro.fallback.route");
-    assert_eq!(routes.len(), 2);
-    assert!(
-        routes.iter().all(|r| r["position"] == json!(0)),
-        "{routes:?}"
-    );
+    assert!(failovers(&finished.run_dir, "agent").is_empty());
+    assert!(stops(&finished.run_dir, "agent").is_empty());
+    // Two sessions, both on the primary: one per firing.
+    assert_eq!(sessions(&finished.run_dir, "agent"), [
+        "openai/gpt-5.6-sol",
+        "openai/gpt-5.6-sol"
+    ]);
     finished.assert_no_leaked_processes().await;
     openai.stop();
     anthropic.stop();
@@ -964,9 +955,11 @@ async fn reasoning_effort_maps_per_target_and_unfit_targets_are_skipped() {
         "{}",
         finished.stderr
     );
-    let failover = &failures::of_node(&records, "agent", "fabro.fallback.failover")[0];
-    assert_eq!(failover["requested_reasoning_effort"], json!("high"));
-    assert_eq!(failover["to"]["reasoning_effort"], json!("high"));
+    // The move went to the one usable target; its effort is the plan's
+    // (asserted above) and the request's (asserted above).
+    let moved = failovers(&finished.run_dir, "agent");
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert_eq!(moved[0]["to"], json!("anthropic/claude-sonnet-5"));
     finished.assert_no_leaked_processes().await;
     openai.stop();
     openrouter.stop();
@@ -1019,9 +1012,11 @@ async fn reasoning_effort_maps_per_target_and_unfit_targets_are_skipped() {
         "{}",
         finished.stderr
     );
-    let stop = &failures::of_node(&records, "agent", "fabro.fallback.stop")[0];
-    assert_eq!(stop["reason"], json!("exhausted"));
-    assert_eq!(stop["position"], json!(0));
+    // With no usable target the plan names no fallback route to Pebble, so
+    // Pebble has nothing to say about routes: no failover, no stop; the
+    // stage fails with the primary's error (asserted above).
+    assert!(failovers(&finished.run_dir, "agent").is_empty());
+    assert!(stops(&finished.run_dir, "agent").is_empty());
     finished.assert_no_leaked_processes().await;
     openai.stop();
     openrouter.stop();
@@ -1095,8 +1090,9 @@ async fn repair_turns_stay_on_the_plan_and_a_target_chain_is_inert() {
         ["openai/gpt-5.6-sol", "anthropic/claude-sonnet-5"],
         "the plan is the original model's, not extended by the target's chain"
     );
-    let failover = &failures::of_node(&records, "agent", "fabro.fallback.failover")[0];
-    assert_eq!(failover["continuation"], json!("replay_prompt"));
+    let moved = failovers(&finished.run_dir, "agent");
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert_eq!(moved[0]["continuation"], json!("replay_prompt"));
     finished.assert_no_leaked_processes().await;
     openai.stop();
     anthropic.stop();
@@ -1146,10 +1142,10 @@ async fn repair_turns_stay_on_the_plan_and_a_target_chain_is_inert() {
         requests(&openrouter, &case).is_empty(),
         "the target's own chain never activates"
     );
-    let records = failures::records(&finished.run_dir);
-    let stop = &failures::of_node(&records, "agent", "fabro.fallback.stop")[0];
-    assert_eq!(stop["reason"], json!("exhausted"));
-    assert_eq!(failures::route(stop), "anthropic/claude-sonnet-5");
+    let stopped = stops(&finished.run_dir, "agent");
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert_eq!(stopped[0]["reason"], json!("exhausted"));
+    assert_eq!(stopped[0]["route"], json!("anthropic/claude-sonnet-5"));
     finished.assert_no_leaked_processes().await;
     openai.stop();
     anthropic.stop();
@@ -1235,24 +1231,30 @@ async fn a_retained_thread_continues_on_the_fallback_route() {
         "the thread's conversation continues on the fallback route: {second}"
     );
     let records = failures::records(&finished.run_dir);
-    assert_eq!(failures::kinds(&records, "plan"), [
-        "plan", "route", "usage", "failover", "route", "usage"
-    ]);
     assert_eq!(
-        failures::kinds(&records, "implement"),
-        ["route", "usage"],
+        failures::of_node(&records, "plan", "fabro.fallback.plan").len(),
+        1
+    );
+    assert_eq!(failovers(&finished.run_dir, "plan").len(), 1);
+    assert!(
+        failures::of_node(&records, "implement", "fabro.fallback.plan").is_empty(),
         "a reused thread has no plan of its own: {records:?}"
     );
-    let reused = &failures::of_node(&records, "implement", "fabro.fallback.route")[0];
+    let reused = &failures::of_node(&records, "implement", "fabro.thread")[0];
     assert_eq!(reused["reused"], json!(true));
-    assert_eq!(reused["position"], json!(1));
-    assert_eq!(failures::route(reused), "anthropic/claude-sonnet-5");
-    assert_eq!(failures::kinds(&records, "review"), [
-        "plan", "route", "usage"
+    // The reused thread resumes on the route it reached and moves no further.
+    assert_eq!(sessions(&finished.run_dir, "implement"), [
+        "anthropic/claude-sonnet-5"
     ]);
-    let fresh = &failures::of_node(&records, "review", "fabro.fallback.route")[0];
-    assert_eq!(fresh["position"], json!(0));
-    assert_eq!(failures::route(fresh), "openai/gpt-5.6-sol");
+    assert!(failovers(&finished.run_dir, "implement").is_empty());
+    // A node off the thread starts a new plan on the primary.
+    assert_eq!(
+        failures::of_node(&records, "review", "fabro.fallback.plan").len(),
+        1
+    );
+    assert_eq!(sessions(&finished.run_dir, "review"), [
+        "openai/gpt-5.6-sol"
+    ]);
     finished.assert_no_leaked_processes().await;
     openai.stop();
     anthropic.stop();
@@ -1324,17 +1326,25 @@ async fn a_prompt_node_fails_over_and_repairs_on_its_plan() {
     assert_eq!(anthropic.consumed(), ["malformed", "repaired"]);
     assert_eq!(finished.final_context()["summary"], json!("short"));
     let records = failures::records(&finished.run_dir);
-    assert_eq!(failures::kinds(&records, "summary"), [
-        "plan", "route", "usage", "failover", "route", "usage", "usage"
+    assert_eq!(plan_routes_of(&records, "summary"), [
+        "openai/gpt-5.6-sol",
+        "anthropic/claude-sonnet-5"
     ]);
-    let failover = &failures::of_node(&records, "summary", "fabro.fallback.failover")[0];
-    assert_eq!(failover["error"]["kind"], json!("quota_exceeded"));
-    assert_eq!(failover["continuation"], json!("replay_prompt"));
-    let usages = failures::of_node(&records, "summary", "fabro.fallback.usage");
+    // A prompt node runs no session, so no Pebble event describes its
+    // move: it is reported on the node's stderr, and the calls that
+    // answered are counted on `fabro.prompt.completed`.
     assert!(
-        usages[1..].iter().all(|u| u["position"] == json!(1)),
-        "{usages:?}"
+        finished.stderr.contains(
+            "model fallback: openai/gpt-5.6-sol failed (quota_exceeded); continuing on \
+             anthropic/claude-sonnet-5 (attempt 1 of the plan)"
+        ),
+        "{}",
+        finished.stderr
     );
+    let completed = &failures::of_node(&records, "summary", "fabro.prompt.completed")[0];
+    assert_eq!(completed["outcome"], json!("succeeded"));
+    assert_eq!(completed["calls"], json!(2), "{completed}");
+    assert_eq!(completed["repairs"], json!(1), "{completed}");
     finished.assert_no_leaked_processes().await;
     openai.stop();
     anthropic.stop();

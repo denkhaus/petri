@@ -1,8 +1,13 @@
 //! Model fallback through the public event contract: a host that consumes
 //! `RunEvent`s alone can rebuild a stage's fallback plan, the routes it ran
 //! on, the failover decision with its typed error, the accounting per route,
-//! and the terminal outcome. The stage is a real native agent on a scripted
-//! model client; the chain comes from `workflow.toml`.
+//! and the terminal outcome. The plan is Petri's own event
+//! (`fabro.fallback.plan`); every other fact is Pebble's, on the
+//! `agent_activity` stream: `SessionStarted` names each route, `RouteFailover`
+//! the move with the failed route's usage and the typed error,
+//! `RouteFailoverStopped` the stop and its reason, `AssistantMessage` each
+//! answer's usage. The stage is a real native agent on a scripted model
+//! client; the chain comes from `workflow.toml`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -17,14 +22,13 @@ use petri::execution::ExecutionObserver;
 use petri::execution::events::{CollectingSink, EventBody, EventProjector, RunEvent};
 use petri::execution::host::{self, HostRun};
 use petri::executor::Retention;
-use petri::fabro::fallback::{FAILOVER_EVENT, PLAN_EVENT, ROUTE_EVENT, STOP_EVENT, USAGE_EVENT};
+use petri::fabro::fallback::PLAN_EVENT;
 use petri::fabro::pebble::PebbleClient;
 use petri::fabro::register;
 use petri::frontend::CompileInputs;
 use petri::frontend::fabro::Fabro;
 use petri::ir::{RunStatus, Value};
 use petri::{RunOptions, Runtime};
-use serde_json::json;
 use testkit::RunDir;
 
 const WORKFLOW: &str = r#"digraph Fallback {
@@ -44,14 +48,26 @@ const WORKFLOW_TOML: &str = "[run.model.fallbacks]\n\"model\" = [\"test:small\"]
 struct Reconstructed {
     plan_routes:  Vec<String>,
     notices:      usize,
-    routes:       Vec<(u64, String)>,
-    failovers:    Vec<(String, String, String, bool)>,
-    stops:        Vec<String>,
-    usage:        BTreeMap<u64, (u64, u64)>,
-    final_route:  Option<String>,
+    /// Every route a session started on, in order: the primary, then each
+    /// route a failover moved to.
+    routes:       Vec<String>,
+    /// `(from, to, error kind, continuation)` per failover.
+    failovers:    Vec<(String, String, String, String)>,
+    /// What the failed route spent, per failover, as Pebble reported it.
+    failed_usage: Vec<(u64, u64)>,
+    stops:        Vec<(String, String)>,
+    /// Answer usage summed per route, from `AssistantMessage`.
+    usage:        BTreeMap<String, (u64, u64)>,
     attempt:      Option<String>,
     run_status:   Option<RunStatus>,
     node_attempt: Option<u64>,
+}
+
+impl Reconstructed {
+    /// The route the stage ended on: the last one a session started on.
+    fn final_route(&self) -> Option<&str> {
+        self.routes.last().map(String::as_str)
+    }
 }
 
 fn route_of(value: &Value) -> String {
@@ -62,51 +78,75 @@ fn route_of(value: &Value) -> String {
     )
 }
 
+/// Pebble's event as `(variant, payload)`; a bare variant has a null payload.
+fn pebble_event(envelope: &Value) -> Option<(String, Value)> {
+    match &envelope["event"] {
+        Value::String(name) => Some((name.clone(), Value::Null)),
+        Value::Object(map) => map
+            .iter()
+            .next()
+            .map(|(name, payload)| (name.clone(), payload.clone())),
+        _ => None,
+    }
+}
+
 fn reconstruct(events: &[RunEvent]) -> Reconstructed {
     let mut out = Reconstructed::default();
+    let mut current_route: Option<String> = None;
     for event in events {
         match &event.body {
             EventBody::RunFinished { status } => out.run_status = Some(*status),
-            EventBody::StepCustom { value } => {
-                let kind = value["kind"].as_str().unwrap_or("");
-                if kind == PLAN_EVENT {
-                    out.plan_routes = value["routes"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .map(route_of)
-                        .collect();
-                    out.notices = value["notices"].as_array().map_or(0, Vec::len);
-                    out.node_attempt = value["attempt"].as_u64();
-                } else if kind == ROUTE_EVENT {
-                    out.routes
-                        .push((value["position"].as_u64().unwrap_or(99), route_of(value)));
-                } else if kind == FAILOVER_EVENT {
-                    out.failovers.push((
-                        route_of(&value["from"]),
-                        route_of(&value["to"]),
-                        value["error"]["kind"].as_str().unwrap_or("").to_owned(),
-                        value["error"]["eligible"].as_bool().unwrap_or(false),
-                    ));
-                } else if kind == STOP_EVENT {
-                    out.stops
-                        .push(value["reason"].as_str().unwrap_or("").to_owned());
-                } else if kind == USAGE_EVENT {
-                    let position = value["position"].as_u64().unwrap_or(99);
-                    let entry = out.usage.entry(position).or_default();
-                    entry.0 += value["usage"]["input"].as_u64().unwrap_or(0);
-                    entry.1 += value["usage"]["output"].as_u64().unwrap_or(0);
+            EventBody::StepCustom { value } if value["kind"] == PLAN_EVENT => {
+                out.plan_routes = value["routes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(route_of)
+                    .collect();
+                out.notices = value["notices"].as_array().map_or(0, Vec::len);
+                out.node_attempt = value["attempt"].as_u64();
+            }
+            EventBody::AgentActivity(activity) if activity.backend == "pebble" => {
+                let Some((variant, payload)) = pebble_event(&activity.envelope) else {
+                    continue;
+                };
+                match variant.as_str() {
+                    // A child session starts too; only the root's route
+                    // is a route of the stage.
+                    "SessionStarted" if activity.parent_session.is_none() => {
+                        let route = route_of(&payload);
+                        current_route = Some(route.clone());
+                        out.routes.push(route);
+                    }
+                    "RouteFailover" => {
+                        out.failovers.push((
+                            payload["from"].as_str().unwrap_or("").to_owned(),
+                            payload["to"].as_str().unwrap_or("").to_owned(),
+                            payload["error"]["llm_kind"]
+                                .as_str()
+                                .unwrap_or("")
+                                .to_owned(),
+                            payload["continuation"].as_str().unwrap_or("").to_owned(),
+                        ));
+                        out.failed_usage.push((
+                            payload["usage"]["input"].as_u64().unwrap_or(0),
+                            payload["usage"]["output"].as_u64().unwrap_or(0),
+                        ));
+                    }
+                    "RouteFailoverStopped" => out.stops.push((
+                        payload["route"].as_str().unwrap_or("").to_owned(),
+                        payload["reason"].as_str().unwrap_or("").to_owned(),
+                    )),
+                    "AssistantMessage" if activity.parent_session.is_none() => {
+                        let route = current_route.clone().unwrap_or_default();
+                        let entry = out.usage.entry(route).or_default();
+                        entry.0 += payload["usage"]["input"].as_u64().unwrap_or(0);
+                        entry.1 += payload["usage"]["output"].as_u64().unwrap_or(0);
+                    }
+                    _ => {}
                 }
             }
             EventBody::AttemptFinished { outcome, .. } => {
-                if let Some(route) = outcome
-                    .metrics
-                    .custom
-                    .get("fallback.route")
-                    .and_then(Value::as_str)
-                {
-                    out.final_route = Some(route.to_owned());
-                }
                 out.attempt = Some(outcome.status.tag().to_owned());
             }
             _ => {}
@@ -172,26 +212,31 @@ async fn a_failover_is_reconstructed_from_public_events() {
     assert_eq!(requested, ["test/model", "test/small"], "{facts:?}");
     assert_eq!(facts.plan_routes, ["test/model", "test/small"]);
     assert_eq!(facts.notices, 0);
-    assert_eq!(facts.routes, [
-        (0, "test/model".to_owned()),
-        (1, "test/small".to_owned())
-    ]);
-    assert_eq!(facts.failovers, [(
-        "test/model".to_owned(),
-        "test/small".to_owned(),
-        "server".to_owned(),
-        true
-    )]);
+    assert_eq!(facts.routes, ["test/model", "test/small"], "{facts:?}");
+    assert_eq!(
+        facts.failovers,
+        [(
+            "test/model".to_owned(),
+            "test/small".to_owned(),
+            "server".to_owned(),
+            "replay_prompt".to_owned()
+        )],
+        "{facts:?}"
+    );
     assert!(facts.stops.is_empty());
-    // The failed route accepted nothing; the fallback's turn is counted on
-    // its own position.
-    assert_eq!(facts.usage.get(&0), Some(&(0, 0)));
+    // The failed route accepted nothing; the fallback's answer is counted
+    // on its own route.
+    assert_eq!(facts.failed_usage, [(0, 0)]);
+    assert!(!facts.usage.contains_key("test/model"), "{:?}", facts.usage);
     assert!(
-        facts.usage.get(&1).is_some_and(|(input, _)| *input > 0),
+        facts
+            .usage
+            .get("test/small")
+            .is_some_and(|(input, _)| *input > 0),
         "{:?}",
         facts.usage
     );
-    assert_eq!(facts.final_route.as_deref(), Some("test/small"));
+    assert_eq!(facts.final_route(), Some("test/small"));
     assert_eq!(facts.attempt.as_deref(), Some("success"));
     assert_eq!(facts.run_status, Some(RunStatus::Success));
     assert_eq!(facts.node_attempt, Some(1));
@@ -213,10 +258,14 @@ async fn exhaustion_is_reconstructed_from_public_events() {
     ])
     .await;
     assert_eq!(requested, ["test/model", "test/small"]);
-    assert_eq!(facts.failovers.len(), 1);
+    assert_eq!(facts.failovers.len(), 1, "{facts:?}");
     assert_eq!(facts.failovers[0].2, "authentication");
-    assert_eq!(facts.stops, ["exhausted"]);
-    assert_eq!(facts.final_route.as_deref(), Some("test/small"));
+    assert_eq!(
+        facts.stops,
+        [("test/small".to_owned(), "exhausted".to_owned())],
+        "{facts:?}"
+    );
+    assert_eq!(facts.final_route(), Some("test/small"));
     assert_eq!(facts.attempt.as_deref(), Some("failure"));
     assert_eq!(facts.run_status, Some(RunStatus::Failed));
 }
@@ -231,9 +280,12 @@ async fn an_ineligible_error_is_reconstructed_as_a_stop_at_the_primary() {
     .await;
     assert_eq!(requested, ["test/model"]);
     assert!(facts.failovers.is_empty());
-    assert_eq!(facts.routes, [(0, "test/model".to_owned())]);
-    assert_eq!(facts.stops, ["ineligible"]);
-    assert_eq!(facts.final_route.as_deref(), Some("test/model"));
+    assert_eq!(facts.routes, ["test/model"], "{facts:?}");
+    assert_eq!(
+        facts.stops,
+        [("test/model".to_owned(), "ineligible".to_owned())],
+        "{facts:?}"
+    );
+    assert_eq!(facts.final_route(), Some("test/model"));
     assert_eq!(facts.attempt.as_deref(), Some("failure"));
-    let _ = json!(null);
 }

@@ -4,12 +4,17 @@
 //! Three retry mechanisms exist and each has one owner. `lithos-llm` retries
 //! a request on the same route through the retry middleware the application
 //! puts on the client (`petri::llm_client`). Pebble replays a model turn whose
-//! response stream broke ([`configure_options`] sets its policy). Petri owns
-//! the rest: the engine's node attempts, the output-repair turns, and this
-//! module's fallback chain, which moves a stage to another provider or model
-//! after a provider-local failure. The three never share state: a fallback
-//! decision is taken only once the client and Pebble have given up on the
-//! current route.
+//! response stream broke, on its default policy. The fallback chain, which
+//! moves a stage to another provider or model after a provider-local
+//! failure, is planned here and run by Pebble: a native session names the
+//! plan's remaining routes to the builder (`fallback_routes`, one
+//! `FallbackRoute` per target after the route the plan reached, in order),
+//! and Pebble moves the conversation when a model error qualifies and a
+//! route remains. The three never share state: Pebble takes a fallback
+//! decision only once the client and its own replay have given up on the
+//! current route. Petri keeps the engine's node attempts and the
+//! output-repair turns. The prompt step (`crate::prompt`) builds no session
+//! and runs the same plan on its one-shot requests itself.
 //!
 //! The chain for a stage is Fabro's: keyed by the canonical id of the
 //! requested model ([`resolve`]), filtered against the configured providers,
@@ -22,87 +27,64 @@
 //! retry (a new attempt) builds a new plan at position 0; it is not a
 //! failover.
 //!
-//! Which errors move the plan is the mapping in [`eligible`], taken from the
-//! reference's `failover_eligible`: what it retries, provider authentication,
-//! access, not-found and quota failures, request timeouts, and a content
-//! filter whose provider code is `refusal`. Cancellation, a wall-clock
-//! expiry, and any non-LLM agent error end the stage instead.
+//! Which errors move the plan is `lithos-llm`'s `failover_eligible`, the rule
+//! Pebble applies: a failure the client classifies as retryable, provider
+//! authentication, access, not-found, quota, rate-limit, server, network,
+//! timeout and stream-decode failures, and a content filter whose provider
+//! code is `refusal`. Cancellation, a wall-clock expiry, and any non-LLM
+//! agent error end the stage instead. [`ModelFailure::eligible`] carries the
+//! same answer on every typed error Petri reports.
 //!
-//! A native session keeps its conversation across a model change: the failed
-//! session's record resumes on the next route with Pebble's
-//! `ResumeMode::UseModel` ([`crate::pebble::Resume::Failover`]). A tool the
-//! failed turn already ran is not run again: the record carries its result,
-//! and the next model continues the unfinished turn from it, with no new
-//! input (Pebble's `continue_prompt`).
+//! A native session keeps its conversation across a model change: Pebble
+//! resumes the failed session's record on the next route with
+//! `ResumeMode::UseModel`, the same session id continuing, and continues the
+//! prompt on the history as it stands. A tool the failed turn already ran is
+//! not run again: the record carries its result, and the next model answers
+//! it with no new input (Pebble's `continue_turn`); a prompt nothing has
+//! answered yet is asked again (`replay_prompt`).
 //!
-//! Every decision is a `StepEvent::Custom` payload with a stable `kind`
-//! ([`PLAN_EVENT`], [`ROUTE_EVENT`], [`USAGE_EVENT`], [`FAILOVER_EVENT`],
-//! [`STOP_EVENT`]), attributed to the node, firing and attempt, so a host
-//! can rebuild the outcome and the per-route accounting from public events.
+//! One fact here is Petri's alone: the plan, with the configuration notices
+//! that shaped it. It is the one `StepEvent::Custom` payload this module
+//! emits ([`PLAN_EVENT`]), attributed to the node, firing and attempt.
+//! Everything Pebble knows about the routes a prompt ran on is on Pebble's
+//! own event stream, which the session records as `agent_activity`:
+//! `RouteFailover` carries the failed route, the route the prompt continues
+//! on, what the prompt spent on the failed route, the typed error and the
+//! continuation; `RouteFailoverStopped` carries the route a model error ended
+//! the prompt on and why (`ineligible` or `exhausted`); `SessionStarted`
+//! names each route's provider and model, `AssistantMessage` each answer's
+//! usage, and the prompt report names the route the prompt ended on. Petri
+//! restates none of it. The prompt step, which runs no session, reports its
+//! own failover on the node's stderr.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error as StdError;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
-use std::{env, fmt, iter};
+use std::{fmt, iter};
 
 use frontend_fabro::fallbacks::ModelRef;
 use ir::{Attempt, FiringId, LogStream, StepEvent, Value};
 use lithos_llm::Client;
 use lithos_llm::catalog::{CatalogModel, CatalogProvider};
-use lithos_llm::middleware::RetryPolicy;
-use lithos_llm::types::{
-    Error as LlmError, ErrorKind, ReasoningEffort, Request, RetryClassification, Speed,
-};
-use pebble_coding_agent::state::{SessionRecord, StoredMessage};
-use pebble_coding_agent::{CodingAgentOptions, Error as PebbleError, InterruptReason};
+use lithos_llm::types::{Error as LlmError, ReasoningEffort, Request, RetryClassification, Speed};
+use pebble_coding_agent::{Error as PebbleError, FallbackRoute, InterruptReason};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use smol_str::SmolStr;
 use steps::{ProgressSender, StepCtx};
 
 use crate::agent::AgentConfig;
-use crate::agent::backend::{AgentError, Session};
-use crate::pebble::{Resume, TurnUsage, speed_of};
+use crate::agent::backend::AgentError;
+use crate::pebble::speed_of;
 
 /// The `kind` of the payload emitted once per stage when its plan is built:
 /// `{ kind, node, firing, attempt, requested: {provider, model}, routes:
 /// [{position, provider, model, reasoning_effort, speed}], notices: [{code,
-/// level, message}] }`. `routes[0]` is the original route.
+/// level, message}] }`. `routes[0]` is the original route. The only
+/// `StepEvent::Custom` kind of this module: the routes a prompt then ran on
+/// are Pebble's `RouteFailover` and `RouteFailoverStopped` events.
 pub const PLAN_EVENT: &str = "fabro.fallback.plan";
-
-/// The `kind` of the payload emitted each time a route becomes the stage's
-/// active route (the original at open, then every target reached): `{ kind,
-/// node, firing, attempt, position, provider, model, reasoning_effort, speed,
-/// reused, session }`.
-pub const ROUTE_EVENT: &str = "fabro.fallback.route";
-
-/// The `kind` of the payload emitted after every model turn, attributing
-/// its accounting to the active route: `{ kind, node, firing, attempt,
-/// position, provider, model, outcome: "ok" | "error", usage,
-/// cost_usd_micros, inference_ms, tool_ms }`.
-pub const USAGE_EVENT: &str = "fabro.fallback.usage";
-
-/// The `kind` of the payload emitted when the plan advances: `{ kind, node,
-/// firing, attempt, position, from: {provider, model}, to: {provider, model,
-/// reasoning_effort, speed}, original: {provider, model},
-/// requested_reasoning_effort, error: {kind, message, provider, status,
-/// provider_code, retry, eligible}, continuation: "replay_prompt" |
-/// "continue_turn" }`. Consecutive events chain: one event's `to` is the next
-/// event's `from`.
-pub const FAILOVER_EVENT: &str = "fabro.fallback.failover";
-
-/// The `kind` of the payload emitted when a model error ends the stage: `{
-/// kind, node, firing, attempt, position, provider, model, reason:
-/// "ineligible" | "exhausted", error }`. A cancellation emits nothing: the
-/// outcome is the cancelled attempt.
-pub const STOP_EVENT: &str = "fabro.fallback.stop";
-
-/// The environment variable naming Pebble's turn replay budget: how many
-/// times Pebble re-sends a model request whose response stream broke, before
-/// the error reaches Petri. Unset keeps Pebble's default policy.
-pub const TURN_REPLAY_ENV: &str = "PETRI_AGENT_TURN_REPLAY_ATTEMPTS";
 
 /// One route a stage runs on: a provider and a catalog model id, with the
 /// controls the request carries.
@@ -195,6 +177,27 @@ impl Plan {
     pub fn routes(&self) -> Vec<&Route> {
         iter::once(&self.original)
             .chain(self.remaining.iter())
+            .collect()
+    }
+
+    /// The routes after the one reached, in order: what a native session
+    /// names to Pebble as its fallback routes.
+    #[must_use]
+    pub fn remaining_routes(&self) -> &[Route] {
+        &self.remaining[self.position.min(self.remaining.len())..]
+    }
+
+    /// The remaining routes as Pebble's, each with its own reasoning effort
+    /// and speed and the stage's `max_tokens`.
+    pub(crate) fn pebble_routes(&self, max_tokens: Option<i64>) -> Vec<FallbackRoute> {
+        self.remaining_routes()
+            .iter()
+            .map(|route| {
+                FallbackRoute::new(route.selector())
+                    .with_reasoning_effort(route.reasoning_effort)
+                    .with_speed(route.speed)
+                    .with_max_tokens(max_tokens)
+            })
             .collect()
     }
 
@@ -852,33 +855,8 @@ fn closest_supported(requested: ReasoningEffort, model: &CatalogModel) -> Effort
         .map_or(Effort::None, Effort::Level)
 }
 
-/// Whether a model error may move the plan: the mapping from `lithos-llm`'s
-/// error kinds onto the reference's `failover_eligible` (see the module
-/// documentation and `task12-fallback.md`).
-#[must_use]
-pub fn eligible(error: &LlmError) -> bool {
-    match error.kind() {
-        ErrorKind::RateLimit
-        | ErrorKind::Server
-        | ErrorKind::Network
-        | ErrorKind::StreamDecode
-        | ErrorKind::Provider
-        | ErrorKind::ResponseDecode
-        | ErrorKind::Authentication
-        | ErrorKind::AccessDenied
-        | ErrorKind::NotFound
-        | ErrorKind::QuotaExceeded
-        | ErrorKind::Timeout => true,
-        ErrorKind::ContentFilter => error.provider_code() == Some("refusal"),
-        // `InvalidRequest`, `ContextLength`, `Configuration`,
-        // `ModelSelection`, `ResourceLimit`, `Middleware`, `Cancelled`,
-        // `Unknown`, and any category this build does not know: never.
-        _ => false,
-    }
-}
-
-/// A typed model failure, preserved across the adapter so the fallback
-/// policy can read it and events can carry it.
+/// A typed model failure, preserved across the adapter so events can carry
+/// it and the prompt step's own plan can read it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelFailure {
     pub kind:          String,
@@ -891,26 +869,31 @@ pub struct ModelFailure {
     pub provider_code: Option<String>,
     /// The client's own retry classification: `never`, `safe`, or `after`.
     pub retry:         String,
+    /// Whether the failure may move a plan: `lithos-llm`'s
+    /// `failover_eligible`, the rule Pebble applies.
     pub eligible:      bool,
+}
+
+fn retry_name(retry: RetryClassification) -> &'static str {
+    match retry {
+        RetryClassification::Never => "never",
+        RetryClassification::Safe => "safe",
+        RetryClassification::After { .. } => "after",
+        _ => "unknown",
+    }
 }
 
 impl ModelFailure {
     #[must_use]
     pub fn from_error(error: &LlmError) -> Self {
-        let retry = match error.retry_classification() {
-            RetryClassification::Never => "never",
-            RetryClassification::Safe => "safe",
-            RetryClassification::After { .. } => "after",
-            _ => "unknown",
-        };
         Self {
             kind:          error.kind().as_str().to_owned(),
             message:       error.message().to_owned(),
             provider:      error.provider().map(ToString::to_string),
             status:        error.status(),
             provider_code: error.provider_code().map(str::to_owned),
-            retry:         retry.to_owned(),
-            eligible:      eligible(error),
+            retry:         retry_name(error.retry_classification()).to_owned(),
+            eligible:      error.failover_eligible(),
         }
     }
 
@@ -986,21 +969,6 @@ fn error_chain(error: &dyn StdError) -> String {
     text
 }
 
-/// Pebble's turn replay policy from [`TURN_REPLAY_ENV`], on the options a
-/// native session is built with. This is the one line `pebble.rs` calls.
-#[must_use]
-pub fn configure_options(options: CodingAgentOptions) -> CodingAgentOptions {
-    match env::var(TURN_REPLAY_ENV)
-        .ok()
-        .and_then(|text| text.trim().parse::<u32>().ok())
-    {
-        Some(attempts) => {
-            options.with_turn_replay(RetryPolicy::exponential().max_attempts(attempts.max(1)))
-        }
-        None => options,
-    }
-}
-
 /// The run's resolved chains and the notices already reported, so a
 /// configuration warning is said once per run, as Fabro says it. Registered
 /// as a run service by [`crate::register`].
@@ -1039,7 +1007,7 @@ impl FallbackService {
     }
 }
 
-/// The stage identity events carry.
+/// The stage identity the plan event carries.
 pub(crate) struct Stage {
     logs:    ProgressSender,
     node:    SmolStr,
@@ -1057,106 +1025,20 @@ impl Stage {
         }
     }
 
-    async fn emit(&self, kind: &str, mut payload: serde_json::Map<String, Value>) {
-        payload.insert("kind".into(), json!(kind));
-        payload.insert("node".into(), json!(self.node));
-        payload.insert("firing".into(), json!(self.firing));
-        payload.insert("attempt".into(), json!(self.attempt));
+    /// The stage's plan and the notices that shaped it, as [`PLAN_EVENT`].
+    pub(crate) async fn plan(&self, plan: &Plan, notices: &[Notice]) {
         let _ = self
             .logs
-            .send(StepEvent::Custom(Value::Object(payload)))
-            .await;
-    }
-
-    fn object(value: Value) -> serde_json::Map<String, Value> {
-        match value {
-            Value::Object(map) => map,
-            _ => serde_json::Map::new(),
-        }
-    }
-
-    pub(crate) async fn plan(&self, plan: &Plan, notices: &[Notice]) {
-        self.emit(
-            PLAN_EVENT,
-            Self::object(json!({
+            .send(StepEvent::Custom(json!({
+                "kind": PLAN_EVENT,
+                "node": self.node,
+                "firing": self.firing,
+                "attempt": self.attempt,
                 "requested": plan.original.target(),
                 "routes": plan.routes_json(),
                 "notices": notices.iter().map(Notice::to_json).collect::<Vec<_>>(),
-            })),
-        )
-        .await;
-    }
-
-    pub(crate) async fn route(&self, plan: &Plan, reused: bool, session: Option<&str>) {
-        let route = plan.current();
-        self.emit(
-            ROUTE_EVENT,
-            Self::object(json!({
-                "position": plan.position,
-                "provider": route.provider,
-                "model": route.model,
-                "reasoning_effort": route.reasoning_effort,
-                "speed": route.speed,
-                "reused": reused,
-                "session": session,
-            })),
-        )
-        .await;
-    }
-
-    pub(crate) async fn usage(&self, plan: &Plan, turn: &TurnUsage, ok: bool) {
-        let route = plan.current();
-        self.emit(
-            USAGE_EVENT,
-            Self::object(json!({
-                "position": plan.position,
-                "provider": route.provider,
-                "model": route.model,
-                "outcome": if ok { "ok" } else { "error" },
-                "usage": turn.usage,
-                "cost_usd_micros": turn.cost_usd_micros,
-                "inference_ms": turn.inference_ms,
-                "tool_ms": turn.tool_ms,
-            })),
-        )
-        .await;
-    }
-
-    pub(crate) async fn failover(&self, plan: &Plan, failure: &ModelFailure, continuation: &str) {
-        let to = plan.current();
-        self.emit(
-            FAILOVER_EVENT,
-            Self::object(json!({
-                "position": plan.position,
-                "from": plan.previous().target(),
-                "to": {
-                    "provider": to.provider,
-                    "model": to.model,
-                    "reasoning_effort": to.reasoning_effort,
-                    "speed": to.speed,
-                },
-                "original": plan.original.target(),
-                "requested_reasoning_effort": plan.original.reasoning_effort,
-                "error": failure,
-                "continuation": continuation,
-            })),
-        )
-        .await;
-    }
-
-    pub(crate) async fn stop(&self, plan: &Plan, reason: &str, failure: &ModelFailure) {
-        let route = plan.current();
-        self.emit(
-            STOP_EVENT,
-            Self::object(json!({
-                "position": plan.position,
-                "provider": route.provider,
-                "model": route.model,
-                "reason": reason,
-                "error": failure,
-            })),
-        )
-        .await;
+            })))
+            .await;
     }
 }
 
@@ -1245,135 +1127,10 @@ pub(crate) async fn plan_for(
     })
 }
 
-/// One prompt turn on a native session with the fallback plan applied: a
-/// model error the plan can absorb moves the conversation to the next route
-/// and continues; anything else ends the turn with the error.
-///
-/// `session` is replaced on each failover. The caller's plan keeps its
-/// position, so a later turn of the same stage (an output-repair turn) and
-/// a later node reusing the thread continue from the route reached.
-pub(crate) async fn prompt(
-    session: &mut Session,
-    plan: &mut Plan,
-    config: &AgentConfig,
-    ctx: &mut StepCtx,
-    text: &str,
-) -> Result<String, AgentError> {
-    let stage = Stage::of(ctx);
-    let mut input = Input::Prompt(text.to_owned());
-    loop {
-        let result = match &input {
-            Input::Prompt(text) => {
-                session
-                    .prompt(
-                        text,
-                        &mut ctx.control,
-                        ctx.env.grace(),
-                        config.timeout_ms.map(Duration::from_millis),
-                    )
-                    .await
-            }
-            Input::Continuation => session.continue_prompt(&mut ctx.control).await,
-        };
-        if let Some(turn) = session.last_turn() {
-            stage.usage(plan, &turn, result.is_ok()).await;
-        }
-        let failure = match result {
-            Ok(text) => return Ok(text),
-            Err(AgentError::Model(failure)) => failure,
-            Err(other) => return Err(other),
-        };
-        if !failure.eligible || !plan.has_next() {
-            let reason = if failure.eligible {
-                "exhausted"
-            } else {
-                "ineligible"
-            };
-            stage.stop(plan, reason, &failure).await;
-            return Err(AgentError::Model(failure));
-        }
-        // Failover: keep the conversation, change the route.
-        let Some(mut record) = session.record() else {
-            stage.stop(plan, "ineligible", &failure).await;
-            return Err(AgentError::Model(failure));
-        };
-        let _ = session
-            .shutdown(pebble_coding_agent::ShutdownReason::Error, ctx.env.grace())
-            .await;
-        plan.advance();
-        input = match record.messages.last() {
-            // The failed request was the one that carried the prompt: the
-            // next model gets the prompt itself, not a copy of it.
-            Some(StoredMessage::User { .. }) => {
-                record.messages.pop();
-                Input::Prompt(text.to_owned())
-            }
-            // Work happened (tool effects are in the record): continue it.
-            _ => Input::Continuation,
-        };
-        stage.failover(plan, &failure, input.name()).await;
-        ctx.log(
-            LogStream::Stderr,
-            format!(
-                "model fallback: {} failed ({}); continuing on {} (attempt {} of the plan)",
-                plan.previous().selector(),
-                failure.kind,
-                plan.current().selector(),
-                plan.position
-            ),
-        )
-        .await;
-        let route = plan.current().clone();
-        *session = Box::pin(Session::open(config, ctx, Resume::Failover {
-            record,
-            route,
-        }))
-        .await?;
-        stage
-            .route(plan, false, session.session_id().as_deref())
-            .await;
-    }
-}
-
-enum Input {
-    Prompt(String),
-    Continuation,
-}
-
-impl Input {
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Prompt(_) => "replay_prompt",
-            Self::Continuation => "continue_turn",
-        }
-    }
-}
-
-/// The stage metrics a plan contributes.
-pub(crate) fn metrics(plan: &Plan) -> BTreeMap<SmolStr, Value> {
-    BTreeMap::from([
-        ("fallback.position".into(), json!(plan.position)),
-        ("fallback.route".into(), json!(plan.current().selector())),
-        (
-            "fallback.original".into(),
-            json!(plan.original().selector()),
-        ),
-    ])
-}
-
-/// The record a failed session leaves, for tests of the continuation rule.
-#[doc(hidden)]
-#[must_use]
-pub fn continuation_for(record: &SessionRecord) -> &'static str {
-    match record.messages.last() {
-        Some(StoredMessage::User { .. }) => "replay_prompt",
-        _ => "continue_turn",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use lithos_llm::catalog::Catalog;
+    use lithos_llm::types::ErrorKind;
 
     use super::*;
 
@@ -1702,16 +1459,18 @@ mod tests {
         assert_eq!(back, plan);
     }
 
+    /// The typed failure carries `lithos-llm`'s `failover_eligible`, the
+    /// rule Pebble moves a plan on: the provider-local kinds, a refusal, and
+    /// anything the client would retry.
     #[test]
-    fn eligibility_follows_the_reference_mapping() {
+    fn eligibility_is_the_clients_failover_rule() {
         let error = |kind: ErrorKind| LlmError::new(kind, "test");
+        let eligible = |error: &LlmError| ModelFailure::from_error(error).eligible;
         for kind in [
             ErrorKind::RateLimit,
             ErrorKind::Server,
             ErrorKind::Network,
             ErrorKind::StreamDecode,
-            ErrorKind::Provider,
-            ErrorKind::ResponseDecode,
             ErrorKind::Authentication,
             ErrorKind::AccessDenied,
             ErrorKind::NotFound,
@@ -1729,10 +1488,16 @@ mod tests {
             ErrorKind::Middleware,
             ErrorKind::Cancelled,
             ErrorKind::ContentFilter,
+            ErrorKind::Provider,
+            ErrorKind::ResponseDecode,
             ErrorKind::Unknown("newer".into()),
         ] {
             assert!(!eligible(&error(kind.clone())), "{kind:?} is not eligible");
         }
+        // A failure the client would retry qualifies whatever its kind.
+        assert!(eligible(
+            &error(ErrorKind::Provider).with_retry(RetryClassification::Safe)
+        ));
         let refusal = error(ErrorKind::ContentFilter).with_provider_code("refusal");
         assert!(eligible(&refusal));
         let filtered = error(ErrorKind::ContentFilter).with_provider_code("content_filter");

@@ -54,7 +54,7 @@ use crate::fidelity::{self, Fidelity, Incoming, Preamble, StageInfo, ThreadConfi
 use crate::outcome::{ExplicitRoutes, Stage};
 use crate::parallel::{BRANCH_COUNT_KEY, RESULTS_KEY, parallel_complete, strip_placeholders};
 use crate::pebble::environment::PebbleEnvironment;
-use crate::pebble::{PebbleClient, TurnUsage, profile_of, speed_of};
+use crate::pebble::{PebbleClient, profile_of, speed_of};
 use crate::preamble;
 use crate::stage::{self, RunInfo};
 
@@ -358,9 +358,9 @@ impl Step for PromptStep {
                 }
             };
         let mut plan = planned.plan;
-        let stage = fallback::Stage::of(&ctx);
-        stage.plan(&plan, &planned.notices).await;
-        stage.route(&plan, false, None).await;
+        fallback::Stage::of(&ctx)
+            .plan(&plan, &planned.notices)
+            .await;
         // Fabro's prompt handler: with `project_memory` on, the working
         // directory's instruction files for the model's profile become the
         // system prompt. Petri selects the paths; Pebble's loader, the one a
@@ -466,12 +466,12 @@ impl Step for PromptStep {
                 Ok(None) => return Outcome::cancelled(),
                 Err(error) => {
                     let failure = ModelFailure::from_error(&error);
-                    stage.usage(&plan, &turn_usage(None, None), false).await;
                     if failure.eligible && plan.has_next() {
                         // The same messages, on the next route; the repair
-                        // history so far travels with them.
+                        // history so far travels with them. A prompt node
+                        // runs no session, so the move is reported here, on
+                        // the node's stderr.
                         plan.advance();
-                        stage.failover(&plan, &failure, "replay_prompt").await;
                         ctx.log(
                             LogStream::Stderr,
                             format!(
@@ -484,22 +484,14 @@ impl Step for PromptStep {
                             ),
                         )
                         .await;
-                        stage.route(&plan, false, None).await;
                         continue;
                     }
-                    let reason = if failure.eligible {
-                        "exhausted"
-                    } else {
-                        "ineligible"
-                    };
-                    stage.stop(&plan, reason, &failure).await;
                     let _ = ctx
                         .logs
                         .send(completed("failed", None, turns, repairs, &usage, cost))
                         .await;
                     let mut outcome = fail(failure.to_string(), &failure.class());
                     outcome.metrics = metrics(started, turns, &usage, cost);
-                    outcome.metrics.custom.extend(fallback::metrics(&plan));
                     return outcome;
                 }
             };
@@ -508,16 +500,6 @@ impl Step for PromptStep {
             if let Some(response_cost) = &response.cost {
                 cost = Some(cost.unwrap_or(0).saturating_add(response_cost.usd_micros));
             }
-            stage
-                .usage(
-                    &plan,
-                    &turn_usage(
-                        Some(&response.usage),
-                        response.cost.as_ref().map(|c| c.usd_micros),
-                    ),
-                    true,
-                )
-                .await;
             let text = response.text();
             ctx.log(LogStream::Stdout, text.clone()).await;
             match validate(&contract, &text) {
@@ -625,7 +607,6 @@ impl Step for PromptStep {
             .await;
         let mut outcome = stage.into_outcome(&config.node);
         outcome.metrics = metrics(started, turns, &usage, cost);
-        outcome.metrics.custom.extend(fallback::metrics(&plan));
         outcome
     }
 }
@@ -666,16 +647,6 @@ async fn complete(
                 Some(_) => {}
             },
         }
-    }
-}
-
-/// One model call's accounting for the per-route usage event.
-fn turn_usage(usage: Option<&TokenCounts>, cost: Option<u64>) -> TurnUsage {
-    TurnUsage {
-        usage:           json!(usage),
-        cost_usd_micros: cost,
-        inference_ms:    0,
-        tool_ms:         0,
     }
 }
 

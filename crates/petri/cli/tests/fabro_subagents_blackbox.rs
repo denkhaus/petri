@@ -12,7 +12,6 @@ use std::process::Stdio;
 use std::time::Duration;
 use std::{env, fs};
 
-use petri::execution::events::{EventBody, RunEvent};
 use serde_json::json;
 use support::fabro::launch::{Case, Launch};
 use support::fabro::subagents::{
@@ -952,23 +951,17 @@ async fn a_child_calls_an_inherited_mcp_tool() {
         "the call is the child's"
     );
     assert_eq!(child_call.node, "agent");
-    let mcp_tool_events: Vec<&RunEvent> = events
+    // The proxied call's completion is Pebble's own event, attributed to the
+    // parent node like every event of the child's session.
+    let completed: Vec<&Activity> = agent
         .iter()
-        .filter(|e| match &e.body {
-            EventBody::StepCustom { value, .. } => value["kind"] == "fabro.mcp.tool",
-            _ => false,
+        .filter(|a| {
+            a.variant() == "ToolCallCompleted"
+                && a.payload()["tool_name"] == "mcp__notes__write_file"
         })
         .collect();
-    assert_eq!(mcp_tool_events.len(), 1, "one proxied call");
-    assert_eq!(
-        mcp_tool_events[0]
-            .subject
-            .as_ref()
-            .map(|s| s.node.name.to_string())
-            .as_deref(),
-        Some("agent"),
-        "attributed to the parent node"
-    );
+    assert_eq!(completed.len(), 1, "one proxied call");
+    assert_eq!(completed[0].node, "agent", "attributed to the parent node");
     finished.assert_no_leaked_processes().await;
     twin.stop();
 }
