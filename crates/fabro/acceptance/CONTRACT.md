@@ -682,7 +682,7 @@ fails when any of them disagree. The row names are the keys of a record's
 |---|---|---|---|
 | `pebble` | `69969420c9017ca15ac6c175c820a0cb8090866a` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
 | `lithos_llm` | `a1e3fd37b7153870411701327ac117606753fe90` | `lithoscomputer/lithos-llm` (public) | provider transport and request retries |
-| `sandbox_driver` | `a92c0db6b6a122ca9b6df75de6615544f53c0d47` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
+| `sandbox_driver` | `ddb32e19e763299319ecf6aebc8961298db80c0c` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `fedab8e6b9b8e2577bee7d93812a318d6adb4aa4` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
 | `fabro_reference` | `b6482910e517d00dfc3c4a2f2d3e417c9348f7f6` | `fabro-sh/fabro` (public, `refs/pull/844/head`) | the reference Fabro the corpus, oracle, bundles, and differential matrix use |
 | `runner_image` | `506a3433f7af` | `lithoscomputer/sandbox-images` (public) | the default runner images (`ghcr.io/lithoscomputer/ubuntu-*`) Docker and Daytona scopes start from (`RUNNER_PIN` in `crates/core/executor-sandbox/src/backend.rs`; PyYAML present since `df708f910111`) |
@@ -694,7 +694,12 @@ the readiness work asked for is inside the pinned revisions (Pebble `4c00633`,
 sandbox-driver `a92c0db6`); the twins are pinned in both test crates that
 serve them. Since Pebble `6996942` the sandbox-driver pin is Petri's alone:
 Pebble's `mcp` feature no longer names the crate, so the two move
-independently.
+independently. sandbox-driver `ddb32e19` (lithoscomputer/sandbox-driver#21)
+gives the protocol crate's `PluginSupervisor` numbered generations, a health
+probe before a generation serves, and a refusal of a replacement that reports
+another resource namespace; Petri's own supervisor is gone, and
+`executor-sandbox`'s `PluginSource` configures the protocol crate's with
+`PluginSettings`.
 
 ## Readiness gate checklist
 
