@@ -423,8 +423,8 @@ the coordinator registers `fabro_steps::workflow::ChildInvoker`.
   (`node`, `firing`, `attempt`, `model`, `prompt`, `sources`) before the first
   call, and `kind = "fabro.prompt.completed"` (`node`, `firing`, `attempt`,
   `model`, `outcome`, `response`, `calls`, `repairs`, `usage`,
-  `cost_usd_micros`, `duration_ms`) after the last. Metrics: `prompt.calls`,
-  `prompt.usage`, `prompt.cost_usd_micros`.
+  `duration_ms`) after the last. Metrics: `prompt.calls`, `prompt.usage`.
+  `usage` is the calls' sum as a lithos-llm `Usage` ("Usage" below).
 - **`fabro/agent`** assembles the prompt from the goal, the preamble of
   earlier stages at the node's resolved fidelity, and the node's prompt
   ("Fidelity and threads" below). Both backends share routing, `output_schema`
@@ -751,10 +751,10 @@ the tree's one `stream_id` and `seq`. Every event of the tree is attributed
 to the node, firing and attempt that owns the root session. Pebble's prompt
 report excludes descendants, so the node's `pebble.usage` is the parent's
 own and the `pebble.subagents` metric is the tree's: `{ spawned,
-turns_started, completed, failed, closed, usage, cost_usd_micros, sessions }`,
-where `usage` and `cost_usd_micros` sum every descendant session's committed
+turns_started, completed, failed, closed, usage, sessions }`, where `usage`
+(a `Usage`, "Usage" below) sums every descendant session's committed
 assistant messages and `sessions` maps each child session to `{ parent,
-provider, model, usage, cost_usd_micros, messages, compactions }`. `provider`
+provider, model, usage, messages, compactions }`. `provider`
 and `model` are the route the child runs on, as its `SessionStarted` reported
 it (or the model of its first answer), so a host prices the child's tokens at
 the child's own model; both are null when the stream named neither. A child
@@ -794,15 +794,42 @@ text) go back to Pebble as that question's answers; a cancelled answer or a
 cancelled prompt goes back as `cancelled`. The interview receipt records
 these questions beside the workflow's own gates.
 
-Attempt metrics include `pebble.prompts`, `pebble.usage` (five disjoint token
-buckets), `pebble.cost_usd_micros`, `pebble.inference_ms`, and `pebble.tool_ms`.
-They sum all settled prompt reports, including repair turns, failed prompts,
-and cancellation. Cost is a known subtotal: null means no response reported a
-cost. These metrics exclude the model calls a tool makes. They include the
-compaction summary call, which Pebble bills to the prompt that compacted;
-`pebble.compactions`, `pebble.compaction_usage` and
-`pebble.compaction_cost_usd_micros` break that share out (below,
-"Compaction"). ACP continues to report `acp.turns`.
+Attempt metrics include `pebble.prompts`, `pebble.usage`, `pebble.inference_ms`,
+and `pebble.tool_ms`. They sum all settled prompt reports, including repair
+turns, failed prompts, and cancellation. These metrics exclude the model
+calls a tool makes. They include the compaction summary call, which Pebble
+bills to the prompt that compacted; `pebble.compactions` and
+`pebble.compaction_usage` break that share out (below, "Compaction"). ACP
+continues to report `acp.turns`.
+
+### Usage
+
+Every `usage` Petri records, on its own payloads and metrics and on Pebble's
+events alike, is lithos-llm's `Usage`: token counts with an optional cost.
+
+```json
+{ "tokens": { "input": 28640, "output": 8750, "reasoning": 1200,
+              "cache_read": 4800, "cache_write": 1500 },
+  "cost": { "usd_micros": 720000, "source": "catalog" } }
+```
+
+`tokens` holds five disjoint buckets; a total is their sum, which no field
+carries. `cost` is absent when the value is not priced: an answer the
+provider and catalog gave no price for, or a sum with any unpriced part that
+used tokens. A present `cost` is therefore the whole value's cost, never a
+subtotal. `source` is `catalog` (priced from the client's catalog),
+`provider` (reported by the provider) or `application` (supplied by the
+caller, or a sum whose parts differ in source). Sums are
+`Usage::saturating_add`. The places that carry one: `pebble.usage`,
+`pebble.compaction_usage`, `pebble.subagents.usage` and each of its
+`sessions[*].usage`, `prompt.usage`, `fabro.prompt.completed.usage`,
+`fabro.compaction.usage`, a hook report's `hooks[].usage.usage`, and
+Pebble's own `AssistantMessage`, `CompactionCompleted`, `CompactionFailed`
+and `RouteFailover`. Before 2026-09-14 the five buckets were the top level
+of `usage` and the cost a separate `cost_usd_micros` number (null when
+unknown) beside it, with `pebble.cost_usd_micros`,
+`pebble.compaction_cost_usd_micros` and `prompt.cost_usd_micros` as their
+own metrics; those fields are gone.
 
 ### Model fallback
 
@@ -902,14 +929,14 @@ the node:
 `SessionStarted` (`provider`, `model`) for the route each session starts on,
 the primary and then each route a failover moved to; `RouteFailover` (`from`
 and `to` as `provider/model`, `attempt`, the failed route's `usage`,
-`cost_usd_micros`, `inference_ms` and `tool_ms`, `error` with `llm_kind`,
+`inference_ms` and `tool_ms`, `error` with `llm_kind`,
 `message`, `provider`, `status`, `provider_code` and `retry`, and
 `continuation` `replay_prompt` or `continue_turn`); `RouteFailoverStopped`
 (`route`, `attempt`, `reason` `ineligible` or `exhausted`, `error`) when a
 model error ends the prompt although the plan named a fallback route (a plan
 with no usable target names none, so Pebble publishes no stop and the stage
 fails with the primary's error; a cancelled prompt publishes none either);
-and `AssistantMessage` (`model`, `usage`, `cost_usd_micros`) for each answer.
+and `AssistantMessage` (`model`, `usage`) for each answer.
 The prompt report Pebble hands the session names the route the prompt ended
 on and its totals; the stage metrics carry Pebble's totals under
 `pebble.*` and nothing per route. A prompt node (`tab`) emits the plan alone
@@ -1122,21 +1149,21 @@ resumed) starts again at `summary:high`, as after any lost session.
 Pebble emits `CompactionStarted`, `CompactionCompleted`, `CompactionFailed`
 and `CompactionCancelled` through the `pebble` envelope, and a
 `context_window` warning at the threshold. `CompactionCompleted` carries the
-summary call's usage and cost, so the node's sink folds the session's own
-compactions as they arrive and emits, right after each `CompactionCompleted`
-it records, a `StepEvent::Custom` with `kind = "fabro.compaction"`:
-`{ kind, node, firing, attempt, session, reason, original_turn_count,
-preserved_turn_count, estimated_tokens_before, summary_token_estimate,
-tracked_file_count, usage, cost_usd_micros }`. `estimated_tokens_before` is
-the estimate the compaction's `CompactionStarted` reported (null when none
-preceded the completion); the rest is the completion's. The payload no longer
-carries `summary_truncated`: Pebble puts that on the history's `Compaction`
-turn and on no event. A failed or cancelled compaction is not reported, and a
-child's is reported under the child's session by Pebble alone. The attempt
-metrics `pebble.compactions`, `pebble.compaction_usage` and
-`pebble.compaction_cost_usd_micros` sum the completions. Pebble also bills the
-summary call to the prompt that compacted, so these three are a breakdown of
-`pebble.usage` and `pebble.cost_usd_micros`, not an addition to them.
+summary call's `usage` (tokens and cost, "Usage" above), so the node's sink
+folds the session's own compactions as they arrive and emits, right after
+each `CompactionCompleted` it records, a `StepEvent::Custom` with
+`kind = "fabro.compaction"`: `{ kind, node, firing, attempt, session, reason,
+original_turn_count, preserved_turn_count, estimated_tokens_before,
+summary_token_estimate, tracked_file_count, usage }`.
+`estimated_tokens_before` is the estimate the compaction's
+`CompactionStarted` reported (null when none preceded the completion); the
+rest is the completion's. The payload no longer carries `summary_truncated`:
+Pebble puts that on the history's `Compaction` turn and on no event. A failed
+or cancelled compaction is not reported, and a child's is reported under the
+child's session by Pebble alone. The attempt metrics `pebble.compactions` and
+`pebble.compaction_usage` sum the completions. Pebble also bills the summary
+call to the prompt that compacted, so these two are a breakdown of
+`pebble.usage`, not an addition to it.
 
 ## Refused
 
