@@ -43,6 +43,7 @@ impl Default for EngineStart {
 
 /// How an execution receives its first synthetic seed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EntryPoint {
     #[default]
     GraphEntries,
@@ -51,6 +52,7 @@ pub enum EntryPoint {
 
 /// How one reset-free engine instance ended.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EngineExit {
     Terminal {
         status: RunStatus,
@@ -87,6 +89,7 @@ impl fmt::Display for MiddlewareKey {
 /// variant is the decision's kind; there is no separate "point" to keep in
 /// agreement with it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DecisionId {
     ExecutionStart,
     AttemptStart { firing: FiringId, attempt: Attempt },
@@ -105,6 +108,7 @@ impl DecisionId {
 
 /// A recorded admission decision.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Admission {
     Admit,
     Skip { outcome: Outcome },
@@ -141,6 +145,7 @@ pub struct WeightedDraw {
 
 /// One middleware change in configured chain order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Intervention {
     Override {
         middleware: MiddlewareKey,
@@ -158,6 +163,7 @@ pub enum Intervention {
 
 /// The final routing decision the core validates and applies.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RouteDecision {
     Emit(EdgeId),
     Jump(NodeId),
@@ -176,6 +182,7 @@ pub struct GroupDecision {
 
 /// The core record that states which resolved route was applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RouteApplied {
     Edge {
         firing: FiringId,
@@ -212,69 +219,94 @@ impl RouteApplied {
     }
 }
 
+/// Where a polite cancel is aimed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancelTarget {
+    /// A cancel scope. The run's root scope cancels everything.
+    Scope(CancelScopeId),
+    /// One declared node group, including spliced descendants. An unknown
+    /// node or a node without a group is a logged no-op. This never marks
+    /// the root cancelled.
+    Group(NodeId),
+}
+
 /// Something that happened. Every event is appended to the log before `apply`.
+///
+/// On the wire an event is an object tagged by `event`, named
+/// `<subject>.<verb>` after the variant, with the variant's fields beside the
+/// tag: `{"event": "step.finished", "firing": 3, "attempt": 1, "outcome": …}`.
+/// The public event stream carries the same object, unchanged.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "event")]
 pub enum Event {
-    ExecutionStarted(EngineStart),
+    #[serde(rename = "execution.started")]
+    ExecutionStarted {
+        #[serde(flatten)]
+        start: EngineStart,
+    },
     /// A token was placed on an edge. The core emits these for its own routing
     /// and seeding; a host may also inject one.
-    TokenEmitted(Token),
-    StepStarted {
-        firing:  FiringId,
-        attempt: Attempt,
+    #[serde(rename = "token.emitted")]
+    TokenEmitted {
+        #[serde(flatten)]
+        token: Token,
     },
+    #[serde(rename = "step.started")]
+    StepStarted { firing: FiringId, attempt: Attempt },
     /// Logs, artifacts and step-defined progress. Carries no coordination
     /// meaning.
-    StepProgress {
-        firing: FiringId,
-        ev:     StepEvent,
-    },
+    #[serde(rename = "step.progress.recorded")]
+    StepProgressRecorded { firing: FiringId, ev: StepEvent },
+    #[serde(rename = "step.finished")]
     StepFinished {
         firing:  FiringId,
         attempt: Attempt,
         outcome: Outcome,
     },
-    Admitted {
+    /// The host's admission pipeline decided on an execution start or an
+    /// attempt; `decision_id` says which.
+    #[serde(rename = "admission.decided")]
+    AdmissionDecided {
         decision_id: DecisionId,
         decision:    Admission,
         trace:       Vec<MiddlewareKey>,
     },
+    #[serde(rename = "routing.resolved")]
     RoutingResolved {
         decision_id: DecisionId,
         groups:      Vec<GroupDecision>,
     },
-    RouteApplied(RouteApplied),
+    #[serde(rename = "route.applied")]
+    RouteApplied {
+        #[serde(flatten)]
+        applied: RouteApplied,
+    },
     /// The driver waited out a retry's backoff. It applies jitter and does the
     /// sleeping; the core never sees a clock or an RNG.
+    #[serde(rename = "retry.elapsed")]
     RetryElapsed {
         firing:       FiringId,
         next_attempt: Attempt,
     },
     /// The result of a `for_each` expansion: clones spliced into the live
     /// graph.
+    #[serde(rename = "node.expanded")]
     NodeExpanded {
         node:   NodeId,
         splice: SubgraphSplice,
     },
-    /// External cancellation, the polite tier. The run's root scope cancels
-    /// everything. Live firings get `Control::Cancel`, cancelled outcomes
-    /// route, and `run_on_cancel` cleanup is admitted (§5).
-    CancelRequested {
-        scope: CancelScopeId,
-    },
-    /// Cancel one declared node group, including spliced descendants. An
-    /// unknown node or a node without a group is a logged no-op. This never
-    /// marks the root cancelled.
-    CancelGroupRequested {
-        node: NodeId,
-    },
+    /// External cancellation, the polite tier, aimed at a scope or at a node
+    /// group. Live firings get `Control::Cancel`, cancelled outcomes route,
+    /// and `run_on_cancel` cleanup is admitted (§5).
+    #[serde(rename = "cancel.requested")]
+    CancelRequested { target: CancelTarget },
     /// External kill, the forced tier. Tokens drop, nothing routes, nothing is
     /// admitted — `run_on_cancel` included — and every live firing in the
     /// closure gets `Control::Kill`, already-cancelling ones included. In
     /// the log so the mode of stopping is recorded, never inferred (§5).
-    KillRequested {
-        scope: CancelScopeId,
-    },
+    #[serde(rename = "kill.requested")]
+    KillRequested { scope: CancelScopeId },
     /// The host asks the core to deliver a control to one live firing — a human
     /// gate's answer, a supervisor's steering. Question and answer are both in
     /// the log, so replay and resume reproduce a pending interaction.
@@ -285,10 +317,24 @@ pub enum Event {
     /// scope-routed events whose closure bookkeeping a raw per-firing path
     /// would bypass) — is a logged no-op, never a `RunError`: a late answer
     /// must not fail the run (§6).
-    ControlRequested {
-        firing: FiringId,
-        ctl:    Control,
-    },
+    #[serde(rename = "control.requested")]
+    ControlRequested { firing: FiringId, ctl: Control },
+}
+
+impl Event {
+    /// A polite cancel of one scope.
+    pub const fn cancel_scope(scope: CancelScopeId) -> Self {
+        Self::CancelRequested {
+            target: CancelTarget::Scope(scope),
+        }
+    }
+
+    /// A polite cancel of one node group.
+    pub const fn cancel_group(node: NodeId) -> Self {
+        Self::CancelRequested {
+            target: CancelTarget::Group(node),
+        }
+    }
 }
 
 /// Everything an executor needs to run one step, with every expression already

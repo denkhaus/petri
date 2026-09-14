@@ -267,9 +267,9 @@ fn a_cancel_does_not_start_deferred_unmarked_clones() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(engine::Event::ExecutionStarted(
-        engine::EngineStart::default(),
-    ));
+    h.feed(engine::Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let starts = h.take_starts();
     h.finish(starts[0].0, Outcome::success(json!(["a", "b", "c"])));
     let running = h.take_starts();

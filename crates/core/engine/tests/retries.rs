@@ -306,7 +306,9 @@ fn a_cancelled_firing_is_not_retried() {
     let graph = b.build();
 
     let mut h = Harness::new(graph);
-    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
+    h.feed(Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let starts = h.take_starts();
     h.cancel(ir::CancelScopeId::ROOT);
     h.finish(starts[0].0, Outcome::failure("interrupted"));
@@ -331,7 +333,9 @@ fn a_backoff_holds_the_run_open() {
     let graph = b.build();
 
     let mut h = Harness::new(graph);
-    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
+    h.feed(Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let starts = h.take_starts();
     h.feed(Event::StepStarted {
         firing:  starts[0].0,

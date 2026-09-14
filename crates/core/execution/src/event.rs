@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use engine::{EngineExit, EngineStart, MiddlewareKey};
+use engine::{EngineExit, EngineStart, EventOrigin, MiddlewareKey};
 use ir::{FailureInfo, RunStatus, ScopeId, Value};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
@@ -11,11 +11,16 @@ use crate::{ExecutionId, GraphDigest, InvocationId, ParentCallKey, SandboxLeaseI
 /// execution provenance in the resource ledger. Version 3 stamps every record
 /// with `recorded_at`, the wall-clock time the store appended it, so replay
 /// recovers the original run, invocation and execution times; a version 2 run
-/// has none and is refused, never migrated.
-pub const COORDINATOR_FORMAT_VERSION: u32 = 3;
+/// has none and is refused, never migrated. Version 4 spells every record as
+/// `{"seq", "origin", "recorded_at", "body"}`, with `body` tagged by `event`
+/// under a `<subject>.<verb>` name (`execution.declared`), `RunNote` renamed
+/// `RunNoteRecorded`, and snake-case tags on every enum inside a record; a
+/// version 3 run is refused, never migrated.
+pub const COORDINATOR_FORMAT_VERSION: u32 = 4;
 
 /// Name-only child secret bindings. Plaintext is not representable here.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SecretBindings {
     #[default]
     None,
@@ -24,6 +29,7 @@ pub enum SecretBindings {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SecretBinding {
     Parent(SmolStr),
     Empty,
@@ -31,6 +37,7 @@ pub enum SecretBinding {
 
 /// What a caller requests before declaration resolves the binding.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SandboxMode {
     /// Share the caller's sandbox. The caller names its own scope — the step
     /// knows where it runs — so the coordinator resolves the binding without
@@ -42,6 +49,7 @@ pub enum SandboxMode {
 
 /// The durable sandbox binding on an invocation declaration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SandboxBinding {
     Inherited {
         lease: SandboxLeaseId,
@@ -114,6 +122,7 @@ pub struct InvocationResult {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InvocationStatus {
     Declared,
     Running { execution: ExecutionId },
@@ -121,16 +130,23 @@ pub enum InvocationStatus {
 }
 
 /// Relationships and lifecycle facts that span engine logs.
+///
+/// On the wire an event is an object tagged by `event`, named
+/// `<subject>.<verb>` after the variant, with the variant's fields beside the
+/// tag, as the engine's records are. The public event stream carries the
+/// same object, unchanged.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "event")]
 pub enum CoordinatorEvent {
+    #[serde(rename = "run.started")]
     RunStarted {
         format_version:   u32,
         root:             InvocationId,
         middleware_chain: Vec<MiddlewareKey>,
     },
-    GraphRegistered {
-        digest: GraphDigest,
-    },
+    #[serde(rename = "graph.registered")]
+    GraphRegistered { digest: GraphDigest },
+    #[serde(rename = "invocation.declared")]
     InvocationDeclared {
         invocation:      InvocationId,
         call:            Option<ParentCallKey>,
@@ -142,6 +158,7 @@ pub enum CoordinatorEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         admission:       Option<AttemptAdmission>,
     },
+    #[serde(rename = "execution.declared")]
     ExecutionDeclared {
         execution:        ExecutionId,
         invocation:       InvocationId,
@@ -149,14 +166,17 @@ pub enum CoordinatorEvent {
         start:            EngineStart,
         middleware_state: BTreeMap<MiddlewareKey, (u32, Value)>,
     },
+    #[serde(rename = "execution.finished")]
     ExecutionFinished {
         execution: ExecutionId,
         exit:      EngineExit,
     },
+    #[serde(rename = "invocation.finished")]
     InvocationFinished {
         invocation: InvocationId,
         result:     InvocationResult,
     },
+    #[serde(rename = "invocation.cancel.requested")]
     InvocationCancelRequested {
         invocation: InvocationId,
         /// Why, when the requester said. Absent for a plain cancel.
@@ -166,16 +186,19 @@ pub enum CoordinatorEvent {
     /// A run control held every attempt not yet admitted. Additive since
     /// format version 2: a log without it replays as before, and a resume
     /// starts paused when this is the last control recorded.
+    #[serde(rename = "run.paused")]
     RunPaused,
     /// A run control released held and future attempts. Additive since
     /// format version 2.
+    #[serde(rename = "run.unpaused")]
     RunUnpaused,
     /// A note from a run-level hook point (`run_finished`, `scope_released`):
     /// no firing owns it, so it lives beside the run, appended from the
     /// execution's report before `RunFinished`. Additive since format
     /// version 2: a log without it replays as before, and `payload` reads
     /// as `null` when absent.
-    RunNote {
+    #[serde(rename = "run.note.recorded")]
+    RunNoteRecorded {
         /// The execution whose driver ran the point, when known.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         execution: Option<ExecutionId>,
@@ -183,17 +206,33 @@ pub enum CoordinatorEvent {
         #[serde(default)]
         payload:   Value,
     },
-    RunFinished {
-        status: RunStatus,
-    },
+    #[serde(rename = "run.finished")]
+    RunFinished { status: RunStatus },
 }
 
+/// One `coordinator.jsonl` line, `{"seq", "origin", "recorded_at", "body"}`:
+/// the same shape as an engine log's line. A coordinator record is always
+/// external: the host appends every one. The public event stream carries
+/// this same line, unchanged, as a record's `record`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CoordinatorRecord {
     pub seq:         u64,
-    pub event:       CoordinatorEvent,
+    pub origin:      EventOrigin,
     /// Milliseconds since the Unix epoch when the store appended the record:
     /// the recording time, read at the append and persisted with it, so a
     /// replay recovers the time the event happened, not the time it was read.
     pub recorded_at: u64,
+    pub body:        CoordinatorEvent,
+}
+
+impl CoordinatorRecord {
+    /// A record the host appended now.
+    pub fn external(seq: u64, recorded_at: u64, body: CoordinatorEvent) -> Self {
+        Self {
+            seq,
+            origin: EventOrigin::External,
+            recorded_at,
+            body,
+        }
+    }
 }

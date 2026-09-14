@@ -26,8 +26,9 @@ use std::process::{Command as GitCommand, Stdio};
 use std::time::Duration;
 use std::{env, fs, slice};
 
-use petri::execution::CancelReason;
-use petri::execution::events::{EventBody, RunEvent};
+use petri::engine::Event;
+use petri::execution::events::{Parsed, RunEvent, ViewEvent};
+use petri::execution::{CancelReason, CoordinatorEvent};
 use serde_json::{Value, json};
 use support::fabro::failures::{self, error};
 use support::fabro::interview;
@@ -37,6 +38,7 @@ use support::fabro::subagents::{
     Activity, activities, of_kind, one_call, public_events, spawn_and_wait,
 };
 use support::fabro::twins::{Provider, Twin, model, scenario, shell_tool, text, tool_call};
+use testkit::backend_event;
 use tokio::process::Command;
 use tokio::time::sleep;
 
@@ -777,33 +779,47 @@ fn project(events: &[RunEvent]) -> Projected {
             .as_ref()
             .map(|s| s.node.name.to_string())
             .unwrap_or_default();
-        match &event.body {
-            EventBody::StepCustom { value } => {
-                if let Some(kind) = value["kind"].as_str() {
-                    *out.kinds
-                        .entry((node.clone(), kind.to_owned()))
-                        .or_default() += 1;
+        if let Some(value) = event.custom() {
+            match backend_event(value) {
+                Some(activity) if activity.backend == "pebble" => {
+                    for kind in pebble_kinds(&activity.envelope) {
+                        *out.kinds.entry((node.clone(), kind)).or_default() += 1;
+                    }
+                }
+                _ => {
+                    if let Some(kind) = value["kind"].as_str() {
+                        *out.kinds
+                            .entry((node.clone(), kind.to_owned()))
+                            .or_default() += 1;
+                    }
                 }
             }
-            EventBody::AgentActivity(activity) if activity.backend == "pebble" => {
-                for kind in pebble_kinds(&activity.envelope) {
-                    *out.kinds.entry((node.clone(), kind)).or_default() += 1;
-                }
-            }
-            EventBody::HostNote { kind, .. } if kind == "hook" => {
+        }
+        match event.parsed() {
+            Some(Parsed::Note { note, .. }) if note.kind == "hook" => {
                 *out.hook_notes.entry(node.clone()).or_default() += 1;
             }
-            EventBody::QuestionAsked { .. } => out.questions.push(node.clone()),
-            EventBody::ForkStarted { .. } => out.forks += 1,
-            EventBody::ForkCompleted { .. } => out.joins += 1,
-            EventBody::NodeExpanded { .. } => out.expansions += 1,
-            EventBody::InvocationDeclared { .. } if event.parent.is_some() => {
+            Some(Parsed::Question { .. }) => out.questions.push(node.clone()),
+            _ => {}
+        }
+        match event.view() {
+            Some(ViewEvent::ForkStarted { .. }) => out.forks += 1,
+            Some(ViewEvent::ForkCompleted { .. }) => out.joins += 1,
+            _ => {}
+        }
+        if let Some(Event::NodeExpanded { .. }) = event.engine() {
+            out.expansions += 1;
+        }
+        match event.coordinator() {
+            Some(CoordinatorEvent::InvocationDeclared { .. }) if event.context.parent.is_some() => {
                 out.branch_children += 1;
             }
-            EventBody::InvocationCancelRequested { reason, .. } => {
+            Some(CoordinatorEvent::InvocationCancelRequested { reason, .. }) => {
                 out.cancel_reason.clone_from(reason);
             }
-            EventBody::RunFinished { status } => out.run_status = Some(format!("{status:?}")),
+            Some(CoordinatorEvent::RunFinished { status }) => {
+                out.run_status = Some(format!("{status:?}"));
+            }
             _ => {}
         }
     }
@@ -915,10 +931,8 @@ fn assert_public_projection(events: &[RunEvent]) {
     );
     let compaction = events
         .iter()
-        .find_map(|e| match &e.body {
-            EventBody::StepCustom { value } if value["kind"] == "fabro.compaction" => {
-                Some(value.clone())
-            }
+        .find_map(|e| match e.custom() {
+            Some(value) if value["kind"] == "fabro.compaction" => Some(value.clone()),
             _ => None,
         })
         .expect("the compaction event");
@@ -969,11 +983,10 @@ fn assert_public_projection(events: &[RunEvent]) {
     );
     let blocks = events
         .iter()
-        .filter(|e| match &e.body {
-            EventBody::StepCustom { value } => {
+        .filter(|e| {
+            e.custom().is_some_and(|value| {
                 value["kind"] == "fabro.hook" && value["report"]["decision"]["decision"] == "block"
-            }
-            _ => false,
+            })
         })
         .count();
     assert_eq!(blocks, 2, "the two blocked tool calls: {projected:#?}");

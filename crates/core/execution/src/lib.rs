@@ -49,7 +49,7 @@ pub use middleware::{
 };
 pub use observe::{
     AddressedObserver, DecodedEngineLog, EngineLogDecodeError, EngineLogError, ExecutionObserver,
-    JsonlEngineLog, decode_engine_log, encode_engine_log, read_engine_log,
+    JsonlEngineLog, StoredEngineRecord, decode_engine_log, encode_engine_log, read_engine_log,
 };
 pub use resource::{
     HOST_PROVIDER, LeaseState, PendingIntent, ResourceError, ResourceLedger, ResourceStore,

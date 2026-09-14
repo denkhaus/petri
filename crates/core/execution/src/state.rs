@@ -134,7 +134,7 @@ impl CoordinatorState {
                     found: record.seq,
                 });
             }
-            state.apply(&record.event)?;
+            state.apply(&record.body)?;
         }
         if state.root.is_none() {
             return Err(StateError::MissingRunStart);
@@ -322,7 +322,7 @@ impl CoordinatorState {
             // carries one still replays. A run-level note constrains nothing.
             CoordinatorEvent::RunPaused
             | CoordinatorEvent::RunUnpaused
-            | CoordinatorEvent::RunNote { .. } => {}
+            | CoordinatorEvent::RunNoteRecorded { .. } => {}
             CoordinatorEvent::RunFinished { status } => {
                 if self.run_status.is_some() {
                     return Err(StateError::DuplicateRunFinish);
@@ -439,7 +439,7 @@ impl CoordinatorState {
             }
             CoordinatorEvent::RunPaused => self.paused = true,
             CoordinatorEvent::RunUnpaused => self.paused = false,
-            CoordinatorEvent::RunNote {
+            CoordinatorEvent::RunNoteRecorded {
                 execution,
                 kind,
                 payload,

@@ -326,9 +326,9 @@ fn a_matching_retry_leaves_graph_and_context_unchanged() {
     let before = graph.nodes.len();
 
     let mut h = Harness::new(graph.clone());
-    h.feed(engine::Event::ExecutionStarted(
-        engine::EngineStart::default(),
-    ));
+    h.feed(engine::Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let starts = h.take_starts();
     let (firing, _) = starts.first().expect("up started");
     let bad = Outcome::success(Value::Null)
@@ -473,9 +473,9 @@ fn two_uploader_graph(up2_policy: SplicePolicy) -> Graph {
 fn parked_batch_then_replace(up2_policy: SplicePolicy, scope: ReplaceScope) -> Harness {
     let graph = two_uploader_graph(up2_policy);
     let mut h = Harness::new(graph);
-    h.feed(engine::Event::ExecutionStarted(
-        engine::EngineStart::default(),
-    ));
+    h.feed(engine::Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let starts = h.take_starts();
     let by_name = |starts: &[(ir::FiringId, String)], name: &str| {
         starts
@@ -591,9 +591,9 @@ fn own_batches_retracts_the_same_uploaders_earlier_batch_across_generations() {
     let graph = b.build();
 
     let mut h = Harness::new(graph);
-    h.feed(engine::Event::ExecutionStarted(
-        engine::EngineStart::default(),
-    ));
+    h.feed(engine::Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let up_gen0 = h.take_starts()[0].0;
     h.finish(
         up_gen0,
@@ -667,9 +667,9 @@ fn a_retracted_admission_readmits_in_a_future_generation() {
     let graph = b.build();
 
     let mut h = Harness::new(graph);
-    h.feed(engine::Event::ExecutionStarted(
-        engine::EngineStart::default(),
-    ));
+    h.feed(engine::Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let starts = h.take_starts();
     let head_gen0 = starts.iter().find(|(_, n)| n == "head").unwrap().0;
     let up_firing = starts.iter().find(|(_, n)| n == "up").unwrap().0;
@@ -725,9 +725,9 @@ fn a_reference_to_a_key_retracted_by_the_same_transaction_rejects() {
     let before = graph.nodes.len();
 
     let mut h = Harness::new(graph);
-    h.feed(engine::Event::ExecutionStarted(
-        engine::EngineStart::default(),
-    ));
+    h.feed(engine::Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let starts = h.take_starts();
     let early_f = starts.iter().find(|(_, n)| n == "early").unwrap().0;
     let up_f = starts.iter().find(|(_, n)| n == "up").unwrap().0;
@@ -774,9 +774,9 @@ fn a_request_from_a_cancelled_scope_is_a_logged_no_op() {
     graph.body.nodes[0].run_on_cancel = true;
     let before = graph.nodes.len();
     let mut h = Harness::new(graph.clone());
-    h.feed(engine::Event::ExecutionStarted(
-        engine::EngineStart::default(),
-    ));
+    h.feed(engine::Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let starts = h.take_starts();
     let (firing, _) = starts.first().expect("up started");
     h.cancel(ir::CancelScopeId::ROOT);
@@ -814,9 +814,9 @@ fn a_run_on_cancel_uploader_can_append_only_run_on_cancel_cleanup() {
     let mut cleanup = fragment(&["cleanup"]);
     cleanup.body.nodes[0].run_on_cancel = true;
     let mut h = Harness::new(graph);
-    h.feed(engine::Event::ExecutionStarted(
-        engine::EngineStart::default(),
-    ));
+    h.feed(engine::Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let (firing, _) = h.take_starts().first().cloned().expect("up started");
     h.cancel(ir::CancelScopeId::ROOT);
     h.finish(firing, splice_outcome(vec![SpliceRequest::append(cleanup)]));

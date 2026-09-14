@@ -3,7 +3,9 @@
 `petri inspect --run-dir <directory> --json` reconstructs a run from the
 durable files in its run directory and prints one JSON document. The library
 form is `execution::inspect::inspect_run`. This file is the field contract for
-`inspect_format_version` 1.
+`inspect_format_version` 2. Version 2 spells every enum the document
+carries from a record (`Admission`, `RouteDecision`, `EngineExit`,
+`EntryPoint`, `Status`, `RunStatus`) with snake-case tags, as the logs do.
 
 ## Sources
 
@@ -76,14 +78,14 @@ tags. Run statuses are `success`, `failed`, `cancelled`. Node statuses are
 
 | Field | Meaning |
 |---|---|
-| `inspect_format_version` | This document's version. `1`. |
+| `inspect_format_version` | This document's version. `2`. |
 | `coordinator_format_version` | The run directory's own format, from `run.json`. |
 | `run_dir` | The directory as named on the command line. |
 | `complete` | `true` only when `incomplete` is empty. |
 | `status` | The recorded run status, or `null` until the run finished. |
 | `incomplete` | Every reason `complete` is `false`, in the order found. |
 | `paused` | Whether the last recorded run control was a pause (`RunPaused` with no later `RunUnpaused`). A `petri resume` of such a run holds admission until an unpause. Additive in format version 1. |
-| `notes` | Every run-level note, in record order, from the coordinator log's `RunNote` records: `execution` (whose driver ran the point), `kind`, `payload`. A `hook` note is a run-level hook report (`payload.point` is `run_finished` or `scope_released`), the same shape as a firing's `host_note{hook}`. The summary prints their count. Additive in format version 1. |
+| `notes` | Every run-level note, in record order, from the coordinator log's `run.note.recorded` records: `execution` (whose driver ran the point), `kind`, `payload`. A `hook` note is a run-level hook report (`payload.point` is `run_finished` or `scope_released`), the same shape as a firing's `hook` note. The summary prints their count. Additive in format version 1. |
 | `root` | `invocation`, `final_execution` (the execution the root's result names, or `null`), `latest_execution` (the root's newest execution). |
 | `middleware_chain` | The configured decision middleware, by key. |
 | `graphs` | Every registered graph digest, sorted. |

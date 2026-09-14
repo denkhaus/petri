@@ -27,7 +27,7 @@ use ir::Graph;
 use runtime::Runtime;
 
 use crate::breaker::CircuitBreaker;
-use crate::events::{LosslessError, verify_lossless};
+use crate::events::{ExportError, verify_export};
 use crate::{
     Coordinator, CoordinatorError, CoordinatorHandle, CoordinatorOptions, CoordinatorState,
     ExecutionObserver, GraphDigest, InvocationId, Middleware, decode_coordinator_log,
@@ -60,10 +60,10 @@ pub enum HostError {
     SecretInGraph,
     #[error(transparent)]
     Replay(#[from] engine::ReplayMismatch),
-    /// The run dir's public stream did not round-trip to its logs: the
+    /// The run dir's public stream does not export its logs: the
     /// determinism canary's second half, checked with `verify_replay`.
     #[error(transparent)]
-    Lossless(#[from] LosslessError),
+    Export(#[from] ExportError),
     #[error(transparent)]
     Coordinator(#[from] CoordinatorError),
     #[error("the coordinator finished the root invocation without a final execution report")]
@@ -340,10 +340,10 @@ async fn finish_root(
     }
     coordinator.finish().await;
     if rt.run_options().verify_replay {
-        // The other half of the canary: the public stream the logs project
-        // to inverts back to the logs, and the inverted records replay to
-        // the same stream. Read after `finish`, once every log is closed.
-        verify_lossless(&rt.run_options().run_dir)?;
+        // The other half of the canary: the records the public stream
+        // carries are the stored logs, and they replay. Read after
+        // `finish`, once every log is closed.
+        verify_export(&rt.run_options().run_dir)?;
     }
     Ok(report)
 }

@@ -1,7 +1,7 @@
 //! Replay: rebuild a run from its event log. Resume: rebuild it and say what
 //! is still owed.
 //!
-//! Only [`EventSource::External`] records are fed back. Everything the core
+//! Only [`EventOrigin::External`] records are fed back. Everything the core
 //! produced — routed tokens, splices, cascading cancellations — it produces
 //! again. That is what makes a byte-identical replayed log a real determinism
 //! check rather than a copy: if any core decision depended on a clock, on

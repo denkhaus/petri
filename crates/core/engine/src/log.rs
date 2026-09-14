@@ -42,7 +42,16 @@ use crate::event::Event;
 /// the core still reads no clock, so replay stays byte-identical. A v8 log has
 /// no times to recover and the standing policy holds: no migrator, a v8 log is
 /// rejected cleanly.
-pub const LOG_VERSION: u32 = 9;
+///
+/// v9 → v10: one vocabulary for records and events. A record is an object
+/// tagged by `event` with a `<subject>.<verb>` name (`step.finished`) and
+/// its fields beside the tag; `Admitted` became `AdmissionDecided`,
+/// `StepProgress` became `StepProgressRecorded`, the two cancel records
+/// merged into `CancelRequested { target }`, every enum inside a record
+/// takes snake-case tags, and the persisted line is
+/// `{"seq", "origin", "recorded_at", "body"}` (`source` became `origin`).
+/// Standing policy, no migrator: a v9 log is rejected cleanly.
+pub const LOG_VERSION: u32 = 10;
 
 /// Where an event came from.
 ///
@@ -74,7 +83,8 @@ pub const LOG_VERSION: u32 = 9;
 /// something the core asked for, such as `RetryElapsed` answering a
 /// `ScheduleRetry`: the decision to send it, and when, came from outside.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EventSource {
+#[serde(rename_all = "snake_case")]
+pub enum EventOrigin {
     /// Fed in by the host: run start, step results, retry timers, cancellation.
     External,
     /// Emitted by the core while draining: routed tokens, splices, cascades.
@@ -105,7 +115,7 @@ pub const CANCEL_ESCALATION_KEY: &str = "cancel_escalation";
 pub struct EventRecord {
     /// Position in the log, starting at 0.
     pub seq:    u64,
-    pub source: EventSource,
+    pub origin: EventOrigin,
     pub event:  Event,
 }
 
@@ -182,9 +192,9 @@ impl EventLog {
         Ok(Self { version, records })
     }
 
-    pub(crate) fn append(&mut self, source: EventSource, event: Event) -> u64 {
+    pub(crate) fn append(&mut self, origin: EventOrigin, event: Event) -> u64 {
         let seq = self.records.len() as u64;
-        self.records.push(EventRecord { seq, source, event });
+        self.records.push(EventRecord { seq, origin, event });
         seq
     }
 
@@ -200,7 +210,7 @@ impl EventLog {
     pub fn external_events(&self) -> impl Iterator<Item = &Event> {
         self.records
             .iter()
-            .filter(|r| r.source == EventSource::External)
+            .filter(|r| r.origin == EventOrigin::External)
             .map(|r| &r.event)
     }
 

@@ -35,8 +35,8 @@
 //! # Recording
 //!
 //! Each callback may return [`Note`]s. The driver appends every note as an
-//! `Event::StepProgress` carrying `{"$note": {...}}` before the record the
-//! callback preceded, so a note is durable, replayed, and visible to every
+//! `Event::StepProgressRecorded` carrying `{"$note": {...}}` before the record
+//! the callback preceded, so a note is durable, replayed, and visible to every
 //! observer in order. Notes are masked before the append.
 //!
 //! # Recovery

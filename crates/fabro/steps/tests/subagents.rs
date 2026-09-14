@@ -108,7 +108,7 @@ fn pebble_events(report: &ExecutionReport) -> Vec<Value> {
         .log
         .events()
         .filter_map(|event| match event {
-            Event::StepProgress {
+            Event::StepProgressRecorded {
                 ev: StepEvent::Custom(value),
                 ..
             } if value["kind"] == "pebble" => Some(value.clone()),

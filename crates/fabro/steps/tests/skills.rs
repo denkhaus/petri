@@ -36,7 +36,7 @@ struct Customs(Mutex<Vec<(String, Value)>>);
 
 impl EventObserver for Customs {
     fn on_record(&self, record: &EventRecord, _recorded_at: u64, state: &EngineState) {
-        if let Event::StepProgress {
+        if let Event::StepProgressRecorded {
             firing,
             ev: StepEvent::Custom(value),
         } = &record.event

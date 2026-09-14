@@ -27,12 +27,14 @@ use petri::driver::lifecycle::{
     AdmitAttempt, AttemptDecision, ExecutionHooks, Note, PrepareError, PrepareResult, Prepared,
     Recorded, RunFinished, ScopeReleased, Transition, TransitionError, TransitionReport,
 };
+use petri::engine::Event;
 use petri::execution::events::{
-    CollectingSink, DeliveredControl, EventBody, EventProjector, RunEvent, replay_run,
+    CollectingSink, Derived, EventProjector, Parsed, RunEvent, ViewEvent, replay_run,
 };
 use petri::execution::host::{self, HostRun};
 use petri::execution::{
-    ExecutionObserver, InterviewDispatcher, InterviewReply, InterviewRequest, Interviewer,
+    CoordinatorEvent, ExecutionObserver, InterviewDispatcher, InterviewReply, InterviewRequest,
+    Interviewer,
 };
 use petri::executor::Retention;
 use petri::fabro::pebble::PebbleClient;
@@ -44,7 +46,7 @@ use petri::ir::RunStatus;
 use petri::steps::Answer;
 use petri::{LlmClientConfig, RunOptions, Runtime, build_llm_client};
 use serde_json::{Map, Value, json};
-use testkit::RunDir;
+use testkit::{RunDir, backend_event};
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -641,7 +643,7 @@ fn project(events: &[RunEvent]) -> Projected {
     let mut out = Projected::default();
     let mut delegate_session: Option<String> = None;
     for event in events {
-        if let Some(invocation) = event.invocation {
+        if let Some(invocation) = event.context.invocation {
             out.invocations.insert(invocation.raw());
         }
         let subject = event.subject.as_ref();
@@ -651,44 +653,63 @@ fn project(events: &[RunEvent]) -> Projected {
         // Pebble's events count under `pebble:<Variant>` beside Petri's own
         // kinds; the delegate arm below reads the same events for the
         // sub-agent lifecycle.
-        if let EventBody::AgentActivity(activity) = &event.body
+        let activity = event.custom().and_then(backend_event);
+        if let Some(activity) = &activity
             && activity.backend == "pebble"
         {
             for kind in pebble_kinds(&activity.envelope) {
                 *out.kinds.entry((node.clone(), kind)).or_default() += 1;
             }
         }
-        match &event.body {
-            EventBody::RunFinished { status } => out.run_status = Some(*status),
-            EventBody::VisitCompleted { outcome, .. } if !synthetic => {
+        match event.coordinator() {
+            Some(CoordinatorEvent::RunFinished { status }) => out.run_status = Some(*status),
+            Some(CoordinatorEvent::InvocationDeclared { .. }) if event.context.parent.is_some() => {
+                out.branch_children += 1;
+            }
+            _ => {}
+        }
+        match event.view() {
+            Some(ViewEvent::VisitCompleted { outcome, .. }) if !synthetic => {
                 out.finals
                     .insert(node.clone(), outcome.status.tag().to_owned());
             }
-            EventBody::StepCustom { value } => {
-                if let Some(kind) = value["kind"].as_str() {
-                    *out.kinds
-                        .entry((node.clone(), kind.to_owned()))
-                        .or_default() += 1;
-                }
-            }
-            EventBody::HostNote { kind, .. } => {
-                if let Some(phase) = kind.strip_prefix("embedding_host:") {
+            _ => {}
+        }
+        match event.parsed() {
+            Some(Parsed::Note { note, .. }) => {
+                if let Some(phase) = note.kind.strip_prefix("embedding_host:") {
                     out.markers
                         .entry(node.clone())
                         .or_default()
                         .push(phase.to_owned());
                 }
             }
-            EventBody::QuestionAsked { .. } => out.questions.push(node.clone()),
-            EventBody::ControlDelivered {
-                control: DeliveredControl::Answer { answer, .. },
-                deliverable: true,
-            } => out.answers.push(answer.choice.clone().unwrap_or_default()),
-            EventBody::NodeExpanded { .. } => out.expansions += 1,
-            EventBody::InvocationDeclared { .. } if event.parent.is_some() => {
-                out.branch_children += 1;
+            Some(Parsed::Question { .. }) => out.questions.push(node.clone()),
+            _ => {}
+        }
+        match (event.engine(), &event.derived) {
+            (
+                Some(Event::ControlRequested { .. }),
+                Some(Derived::ControlRequested {
+                    deliverable: true,
+                    answer: Some(answer),
+                }),
+            ) => out.answers.push(answer.choice.clone().unwrap_or_default()),
+            (Some(Event::NodeExpanded { .. }), _) => out.expansions += 1,
+            _ => {}
+        }
+        match event.custom() {
+            Some(value) if activity.is_none() => {
+                if let Some(kind) = value["kind"].as_str() {
+                    *out.kinds
+                        .entry((node.clone(), kind.to_owned()))
+                        .or_default() += 1;
+                }
             }
-            EventBody::AgentActivity(activity) if node == "delegate" => {
+            _ => {}
+        }
+        match activity {
+            Some(activity) if node == "delegate" => {
                 let variant = activity
                     .envelope
                     .get("event")

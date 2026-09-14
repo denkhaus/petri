@@ -22,11 +22,11 @@ use smol_str::SmolStr;
 
 use crate::context::{clone_bindings, firing_statics, primary_token, resolve_config, with_outcome};
 use crate::event::{
-    Admission, Command, DecisionId, EngineExit, EngineStart, EntryPoint, Event, GroupDecision,
-    Intervention, ResolvedFiring, RouteApplied, RouteDecision, RoutingCandidate, RoutingProposal,
-    SpliceClone, SubgraphSplice, WeightedDraw,
+    Admission, CancelTarget, Command, DecisionId, EngineExit, EngineStart, EntryPoint, Event,
+    GroupDecision, Intervention, ResolvedFiring, RouteApplied, RouteDecision, RoutingCandidate,
+    RoutingProposal, SpliceClone, SubgraphSplice, WeightedDraw,
 };
-use crate::log::EventSource;
+use crate::log::EventOrigin;
 use crate::splice::{
     PreparedSeed, PreparedSplice, apply_prepared_splice, commit_splice_plan,
     prepare_outcome_splices, reject_splices, remap_selection_policy,
@@ -48,12 +48,12 @@ pub fn apply(mut state: EngineState, ev: Event) -> (EngineState, Vec<Command>) {
     let mut queue: VecDeque<Event> = VecDeque::from([ev]);
     // The first event came from outside; everything the drain adds is the core's
     // own.
-    let mut source = EventSource::External;
+    let mut origin = EventOrigin::External;
 
     loop {
         while let Some(event) = queue.pop_front() {
-            state.log.append(source, event.clone());
-            source = EventSource::Core;
+            state.log.append(origin, event.clone());
+            origin = EventOrigin::Core;
             step(&mut state, event, &mut commands, &mut queue);
         }
         // Deferred joins are re-checked only once the queue is fully drained, so an
@@ -83,14 +83,14 @@ fn step(
         state.push_error(RunError::AlreadyFinished);
         return;
     }
-    if !state.is_started() && !matches!(event, Event::ExecutionStarted(_)) {
+    if !state.is_started() && !matches!(event, Event::ExecutionStarted { .. }) {
         state.push_error(RunError::NotStarted);
         return;
     }
 
     match event {
-        Event::ExecutionStarted(start) => on_execution_started(state, start, cmds),
-        Event::TokenEmitted(token) => on_token(state, token, cmds, queue),
+        Event::ExecutionStarted { start } => on_execution_started(state, start, cmds),
+        Event::TokenEmitted { token } => on_token(state, token, cmds, queue),
         Event::StepStarted { firing, attempt } => match state.firing_mut(firing) {
             Some(f) if f.attempt == attempt => f.started = true,
             Some(f) => {
@@ -105,13 +105,13 @@ fn step(
         },
         // Progress is observation only: logs and artifacts carry no coordination
         // meaning, so the core records them and changes nothing.
-        Event::StepProgress { .. } => {}
+        Event::StepProgressRecorded { .. } => {}
         Event::StepFinished {
             firing,
             attempt,
             outcome,
         } => on_step_finished(state, firing, attempt, outcome, cmds, queue),
-        Event::Admitted {
+        Event::AdmissionDecided {
             decision_id,
             decision,
             trace: _,
@@ -120,14 +120,18 @@ fn step(
             decision_id,
             groups,
         } => on_routing_resolved(state, decision_id, &groups, queue),
-        Event::RouteApplied(applied) => on_route_applied(state, applied, cmds, queue),
+        Event::RouteApplied { applied } => on_route_applied(state, applied, cmds, queue),
         Event::RetryElapsed {
             firing,
             next_attempt,
         } => on_retry_elapsed(state, firing, next_attempt, cmds),
         Event::NodeExpanded { node, splice } => on_node_expanded(state, node, splice, queue),
-        Event::CancelRequested { scope } => on_cancel(state, scope, cmds),
-        Event::CancelGroupRequested { node } => {
+        Event::CancelRequested {
+            target: CancelTarget::Scope(scope),
+        } => on_cancel(state, scope, cmds),
+        Event::CancelRequested {
+            target: CancelTarget::Group(node),
+        } => {
             if state
                 .graph
                 .node(node)
@@ -178,11 +182,9 @@ fn seed_execution(state: &mut EngineState, queue: &mut VecDeque<Event>) {
         }
         let edge = state.next_edge_id();
         state.register_seed_edge(edge, entry);
-        queue.push_back(Event::TokenEmitted(Token::seeded(
-            edge,
-            Generation::ZERO,
-            Value::Null,
-        )));
+        queue.push_back(Event::TokenEmitted {
+            token: Token::seeded(edge, Generation::ZERO, Value::Null),
+        });
     }
 }
 
@@ -717,7 +719,7 @@ fn on_step_finished(
         && !state.is_scope_cancelled(splice.cancel_scope)
     {
         let scope = splice.cancel_scope;
-        queue.push_back(Event::CancelRequested { scope });
+        queue.push_back(Event::cancel_scope(scope));
     }
 
     // A killed firing's outcome is recorded but never routed. A merely cancelled
@@ -1116,10 +1118,12 @@ fn on_routing_resolved(
     // the sole element. The applied records carry ids alone; the payloads stay
     // in the stored routes, uncloned.
     if let Some(PreparedRoute::Jump { target, .. }) = prepared.front() {
-        queue.push_back(Event::RouteApplied(RouteApplied::Jump {
-            firing,
-            target: *target,
-        }));
+        queue.push_back(Event::RouteApplied {
+            applied: RouteApplied::Jump {
+                firing,
+                target: *target,
+            },
+        });
     } else {
         for route in &prepared {
             let applied = match route {
@@ -1134,7 +1138,7 @@ fn on_routing_resolved(
                 },
                 PreparedRoute::Jump { .. } => continue,
             };
-            queue.push_back(Event::RouteApplied(applied));
+            queue.push_back(Event::RouteApplied { applied });
         }
     }
     state.set_prepared_routes(firing, prepared);
@@ -1463,9 +1467,9 @@ fn on_route_applied(
             payload,
             transition: EdgeTransition::Continue,
             ..
-        } => queue.push_back(Event::TokenEmitted(Token::new(
-            edge, generation, payload, firing,
-        ))),
+        } => queue.push_back(Event::TokenEmitted {
+            token: Token::new(edge, generation, payload, firing),
+        }),
         PreparedRoute::Edge {
             edge,
             target,
@@ -1483,12 +1487,9 @@ fn on_route_applied(
             let edge = state.next_edge_id();
             state.register_seed_edge(edge, target);
             state.force_entry(target, generation);
-            queue.push_back(Event::TokenEmitted(Token::new(
-                edge,
-                generation,
-                Value::Null,
-                firing,
-            )));
+            queue.push_back(Event::TokenEmitted {
+                token: Token::new(edge, generation, Value::Null, firing),
+            });
         }
         PreparedRoute::None { .. } => {}
     }

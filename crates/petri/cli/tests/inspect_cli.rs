@@ -133,7 +133,7 @@ fn inspect_reconstructs_a_restarted_run_with_children_after_the_process_exits() 
     assert_eq!(document, again);
     assert_eq!(snapshot(&run_dir), before, "inspection changed the run dir");
 
-    assert_eq!(document["inspect_format_version"], Value::from(1));
+    assert_eq!(document["inspect_format_version"], Value::from(2));
     assert_eq!(document["complete"], Value::Bool(true));
     assert_eq!(document["status"], Value::from("success"));
 
@@ -373,7 +373,11 @@ fn inspect_reports_torn_logs_as_incomplete_and_corrupt_logs_as_errors() {
     let coordinator = run_dir.join("coordinator.jsonl");
     let text = fs::read_to_string(&coordinator).expect("reads");
     let mut lines: Vec<&str> = text.lines().collect();
-    assert!(lines.pop().is_some_and(|last| last.contains("RunFinished")));
+    assert!(
+        lines
+            .pop()
+            .is_some_and(|last| last.contains("run.finished"))
+    );
     fs::write(&coordinator, format!("{}\n", lines.join("\n"))).expect("writes");
     let (output, document) = inspect(&run_dir);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));

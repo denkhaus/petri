@@ -1079,7 +1079,7 @@ impl Coordinator {
         report: &driver::ExecutionReport,
     ) -> Result<(), CoordinatorError> {
         for note in &report.run_notes {
-            self.append(CoordinatorEvent::RunNote {
+            self.append(CoordinatorEvent::RunNoteRecorded {
                 execution: Some(execution),
                 kind:      note.kind.clone(),
                 payload:   note.payload.clone(),
@@ -1195,7 +1195,10 @@ impl Coordinator {
             cancel_before_run &= !decoded.log.events().any(|event| {
                 matches!(
                     event,
-                    Event::CancelRequested { scope } | Event::KillRequested { scope }
+                    Event::CancelRequested {
+                        target: engine::CancelTarget::Scope(scope)
+                    }
+                    | Event::KillRequested { scope }
                         if *scope == ir::CancelScopeId::ROOT
                 )
             });

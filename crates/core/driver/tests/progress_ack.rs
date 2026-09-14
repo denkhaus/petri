@@ -158,7 +158,7 @@ fn custom(n: u64) -> StepEvent {
 /// The custom marker a `StepProgress` record carries, if it is one of ours.
 fn marker_of(event: &Event) -> Option<u64> {
     match event {
-        Event::StepProgress {
+        Event::StepProgressRecorded {
             ev: StepEvent::Custom(value),
             ..
         } if value["kind"] == "ack-test" => value["n"].as_u64(),

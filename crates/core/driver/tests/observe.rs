@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use driver::{EventObserver, ObserveError, recorded_now};
-use engine::{EngineState, EventRecord, EventSource};
+use engine::{EngineState, EventOrigin, EventRecord};
 use ir::{GraphBuilder, RunStatus, ScopeId, Value};
 use serde_json::json;
 use support::*;
@@ -121,9 +121,9 @@ async fn every_observer_sees_every_record_in_seq_order() {
             times.windows(2).all(|pair| pair[0] <= pair[1]),
             "recording times never decrease along the log: {times:?}"
         );
-        assert!(seen.iter().any(|r| r.source == EventSource::External));
+        assert!(seen.iter().any(|r| r.origin == EventOrigin::External));
         assert!(
-            seen.iter().any(|r| r.source == EventSource::Core),
+            seen.iter().any(|r| r.origin == EventOrigin::Core),
             "Core records — routed tokens — reach observers too"
         );
         for (i, record) in seen.iter().enumerate() {

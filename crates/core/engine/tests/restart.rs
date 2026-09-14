@@ -19,7 +19,9 @@ fn restarting_graph() -> (ir::Graph, ir::NodeId) {
 fn a_restart_edge_finishes_the_execution_without_emitting_a_token() {
     let (graph, target) = restarting_graph();
     let mut harness = Harness::new(graph);
-    harness.feed(Event::ExecutionStarted(engine::EngineStart::default()));
+    harness.feed(Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let starts = harness.take_starts();
     let [(firing, _)] = starts.as_slice() else {
         panic!("the entry starts");
@@ -47,11 +49,13 @@ fn a_restart_edge_finishes_the_execution_without_emitting_a_token() {
 fn a_successor_can_force_a_target_that_has_an_ordinary_incoming_edge() {
     let (graph, target) = restarting_graph();
     let mut harness = Harness::new(graph);
-    harness.feed(Event::ExecutionStarted(EngineStart {
-        entry: EntryPoint::Node(target),
-        execution_index: 1,
-        ..EngineStart::default()
-    }));
+    harness.feed(Event::ExecutionStarted {
+        start: EngineStart {
+            entry: EntryPoint::Node(target),
+            execution_index: 1,
+            ..EngineStart::default()
+        },
+    });
 
     assert_eq!(harness.take_starts()[0].1, "target");
 }
@@ -60,11 +64,13 @@ fn a_successor_can_force_a_target_that_has_an_ordinary_incoming_edge() {
 fn the_core_refuses_a_restart_at_the_execution_limit() {
     let (graph, _) = restarting_graph();
     let mut harness = Harness::new(graph);
-    harness.feed(Event::ExecutionStarted(EngineStart {
-        execution_index: 1,
-        max_executions: 2,
-        ..EngineStart::default()
-    }));
+    harness.feed(Event::ExecutionStarted {
+        start: EngineStart {
+            execution_index: 1,
+            max_executions: 2,
+            ..EngineStart::default()
+        },
+    });
     let firing = harness.take_starts()[0].0;
     harness.finish(firing, Outcome::success(Value::Null));
 

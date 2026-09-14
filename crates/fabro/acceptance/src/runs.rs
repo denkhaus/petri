@@ -217,7 +217,7 @@ impl ExecutionObserver for PathObserver {
     }
 
     fn on_lifecycle(&self, record: &CoordinatorRecord) {
-        match &record.event {
+        match &record.body {
             CoordinatorEvent::InvocationDeclared {
                 invocation, call, ..
             } => {

@@ -22,11 +22,10 @@ use petri::driver::lifecycle::{
     TransitionError, TransitionReport,
 };
 use petri::driver::{BranchRole, FiringView};
-use petri::engine::{Admission, Intervention, RouteDecision};
+use petri::engine::{Admission, DecisionId, Event, Intervention, RouteApplied, RouteDecision};
 use petri::execution::events::{
-    AppliedRoute, CollectingSink, DeliveredControl, EventBody, EventId, EventProjector,
-    EventSource, ProjectionReceipt, ProjectorOptions, RunEvent, RunEventSink, SinkError, WaitState,
-    replay_run,
+    CollectingSink, Derived, EventId, EventProjector, EventSource, Parsed, ProjectionReceipt,
+    ProjectorOptions, RunEvent, RunEventSink, SinkError, ViewEvent, WaitState, replay_run,
 };
 use petri::execution::hooks::{
     HOOK_NOTE_KIND, HookAdapter, HookDecision, HookPoint, HookReport, HookRequest, HookRun,
@@ -34,7 +33,8 @@ use petri::execution::hooks::{
 };
 use petri::execution::host::{self, HostRun};
 use petri::execution::{
-    ExecutionObserver, InterviewDispatcher, InterviewReply, InterviewRequest, Interviewer,
+    CoordinatorEvent, ExecutionObserver, InterviewDispatcher, InterviewReply, InterviewRequest,
+    Interviewer,
 };
 use petri::executor::Retention;
 use petri::fabro::{
@@ -630,9 +630,22 @@ async fn run_text_with(
 
 /// An event without its recording time, for the one comparison where a
 /// re-recorded record legitimately carries a later time than its original.
+/// The record carries the time too, so it is cleared there as well.
 fn timeless(event: &RunEvent) -> RunEvent {
+    use petri::execution::events::Record;
+    let record = event.record.clone().map(|record| match record {
+        Record::Coordinator(mut record) => {
+            record.recorded_at = 0;
+            Record::Coordinator(record)
+        }
+        Record::Engine(mut record) => {
+            record.recorded_at = 0;
+            Record::Engine(record)
+        }
+    });
     RunEvent {
-        recorded_at: None,
+        recorded_at: 0,
+        record,
         ..event.clone()
     }
 }
@@ -707,7 +720,7 @@ impl Timeline {
         let mut timeline = Self::default();
         for event in events {
             timeline.ids.push(event.id);
-            if let Some(invocation) = event.invocation {
+            if let Some(invocation) = event.context.invocation {
                 timeline.invocations.insert(invocation.raw());
             }
             // A synthetic node is a lowering artifact (a parallel branch's
@@ -743,9 +756,29 @@ impl Timeline {
                     });
                     entry
                 });
-            match (&event.body, node) {
-                (EventBody::RunFinished { status }, _) => timeline.run_status = Some(*status),
-                (EventBody::AttemptFinished { outcome, .. }, Some(entry)) => {
+            if let Some(CoordinatorEvent::RunFinished { status }) = event.coordinator() {
+                timeline.run_status = Some(*status);
+            }
+            if let Some(ViewEvent::ForkCompleted { fork, results, .. }) = event.view() {
+                timeline.joins.push((
+                    fork.name.to_string(),
+                    results
+                        .iter()
+                        .map(|r| {
+                            (
+                                r.branch.index,
+                                r.node.name.to_string(),
+                                r.status.tag().to_owned(),
+                            )
+                        })
+                        .collect(),
+                ));
+            }
+            let Some(entry) = node else {
+                continue;
+            };
+            match (event.engine(), &event.derived) {
+                (Some(Event::StepFinished { outcome, .. }), _) => {
                     let attempt = event
                         .subject
                         .as_ref()
@@ -756,56 +789,50 @@ impl Timeline {
                         .push((attempt, outcome.status.tag().to_owned()));
                     entry.duration_ms += outcome.metrics.duration_ms.unwrap_or(0);
                 }
-                (
-                    EventBody::VisitCompleted {
-                        outcome, executed, ..
-                    },
-                    Some(entry),
-                ) => {
-                    entry.final_status = Some(outcome.status.tag().to_owned());
-                    entry.executed = Some(*executed);
-                }
-                (EventBody::RouteApplied { route }, Some(entry)) => {
-                    entry.routes.push(match route {
-                        AppliedRoute::Edge { target, .. } => target.name.to_string(),
-                        AppliedRoute::Jump { target } => format!("jump:{}", target.name),
-                        AppliedRoute::None { .. } => "none".to_owned(),
+                (Some(Event::RouteApplied { applied }), derived) => {
+                    entry.routes.push(match (applied, derived) {
+                        (RouteApplied::Jump { .. }, Some(Derived::RouteApplied { target, .. })) => {
+                            format!("jump:{}", target.name)
+                        }
+                        (_, Some(Derived::RouteApplied { target, .. })) => target.name.to_string(),
+                        _ => "none".to_owned(),
                     });
                 }
-                (EventBody::WaitStateChanged { state }, Some(entry)) => entry.waits.push(*state),
-                (EventBody::QuestionAsked { question }, Some(entry)) => {
-                    entry.questions.push(question.text.clone());
-                }
                 (
-                    EventBody::ControlDelivered {
-                        control: DeliveredControl::Answer { answer, .. },
+                    Some(Event::ControlRequested { .. }),
+                    Some(Derived::ControlRequested {
                         deliverable: true,
-                    },
-                    Some(entry),
+                        answer: Some(answer),
+                    }),
                 ) => entry
                     .answers
                     .push(answer.choice.clone().unwrap_or_default()),
-                (EventBody::HostNote { kind, payload }, Some(entry)) => {
-                    let phase = payload.get("phase").and_then(Value::as_str).unwrap_or("");
-                    entry.notes.push(format!("{kind}:{phase}"));
+                _ => {}
+            }
+            match event.parsed() {
+                Some(Parsed::Question { question }) => {
+                    entry.questions.push(question.text.clone());
                 }
-                (EventBody::ForkStarted { branches, .. }, Some(entry)) => {
+                Some(Parsed::Note { note, .. }) => {
+                    let phase = note
+                        .payload
+                        .get("phase")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    entry.notes.push(format!("{}:{phase}", note.kind));
+                }
+                _ => {}
+            }
+            match event.view() {
+                Some(ViewEvent::VisitCompleted {
+                    outcome, executed, ..
+                }) => {
+                    entry.final_status = Some(outcome.status.tag().to_owned());
+                    entry.executed = Some(*executed);
+                }
+                Some(ViewEvent::WaitStateChanged { state }) => entry.waits.push(*state),
+                Some(ViewEvent::ForkStarted { branches, .. }) => {
                     timeline.forks.push((entry.kind.clone(), branches.len()));
-                }
-                (EventBody::ForkCompleted { fork, results, .. }, _) => {
-                    timeline.joins.push((
-                        fork.name.to_string(),
-                        results
-                            .iter()
-                            .map(|r| {
-                                (
-                                    r.branch.index,
-                                    r.node.name.to_string(),
-                                    r.status.tag().to_owned(),
-                                )
-                            })
-                            .collect(),
-                    ));
                 }
                 _ => {}
             }
@@ -820,12 +847,19 @@ impl Timeline {
     }
 }
 
-fn bodies_of<'a>(events: &'a [RunEvent], node: &str) -> Vec<&'a EventBody> {
+fn bodies_of<'a>(events: &'a [RunEvent], node: &str) -> Vec<&'a RunEvent> {
     events
         .iter()
         .filter(|e| e.subject.as_ref().is_some_and(|s| s.node.name == node))
-        .map(|e| &e.body)
         .collect()
+}
+
+/// The note an event of `kind` carries, when it is one.
+fn note_of<'a>(event: &'a RunEvent, kind: &str) -> Option<&'a Value> {
+    event
+        .note()
+        .filter(|note| note.kind == kind)
+        .map(|note| &note.payload)
 }
 
 fn assert_unique_ids(events: &[RunEvent]) {
@@ -880,24 +914,22 @@ async fn the_workflow_runs_without_adapters_and_the_events_reconstruct_it() {
         flaky.waits
     );
     let flaky_bodies = bodies_of(&outcome.events, "flaky");
+    assert!(flaky_bodies.iter().any(|b| matches!(
+        b.derived,
+        Some(Derived::StepFinished {
+            is_final:  false,
+            exhausted: false,
+        })
+    )));
     assert!(
         flaky_bodies
             .iter()
-            .any(|b| matches!(b, EventBody::AttemptFinished {
-                is_final: false,
-                exhausted: false,
-                ..
-            }))
+            .any(|b| matches!(b.view(), Some(ViewEvent::RetryScheduled { .. })))
     );
     assert!(
         flaky_bodies
             .iter()
-            .any(|b| matches!(b, EventBody::RetryScheduled { .. }))
-    );
-    assert!(
-        flaky_bodies
-            .iter()
-            .any(|b| matches!(b, EventBody::RetryElapsed { .. }))
+            .any(|b| matches!(b.engine(), Some(Event::RetryElapsed { .. })))
     );
 
     // The branches: keyed on source metadata, not on today's node shape.
@@ -1010,7 +1042,7 @@ async fn adapters_run_in_order_and_checkpoint_work_follows_source_metadata() {
     ]);
     // Notes precede the records they annotate.
     let prepare = bodies_of(&outcome.events, "prepare");
-    let position = |pred: &dyn Fn(&EventBody) -> bool| {
+    let position = |pred: &dyn Fn(&RunEvent) -> bool| {
         prepare
             .iter()
             .position(|b| pred(b))
@@ -1018,22 +1050,34 @@ async fn adapters_run_in_order_and_checkpoint_work_follows_source_metadata() {
     };
     let note_at = |phase: &str| {
         position(&|b| {
-            matches!(b, EventBody::HostNote { payload, .. }
-                if payload.get("phase").and_then(Value::as_str) == Some(phase))
+            b.note().is_some_and(|note| {
+                note.payload.get("phase").and_then(Value::as_str) == Some(phase)
+            })
         })
     };
+    let admitted = |b: &RunEvent| {
+        matches!(
+            b.engine(),
+            Some(Event::AdmissionDecided {
+                decision_id: DecisionId::AttemptStart { .. },
+                ..
+            })
+        )
+    };
+    assert!(note_at("before_attempt") < position(&admitted));
     assert!(
-        note_at("before_attempt") < position(&|b| matches!(b, EventBody::AttemptAdmitted { .. }))
+        note_at("prepare_result")
+            < position(&|b| matches!(b.engine(), Some(Event::StepFinished { .. })))
     );
     assert!(
-        note_at("prepare_result") < position(&|b| matches!(b, EventBody::AttemptFinished { .. }))
+        position(&|b| matches!(b.view(), Some(ViewEvent::VisitCompleted { .. })))
+            < note_at("after_record")
     );
-    assert!(position(&|b| matches!(b, EventBody::VisitCompleted { .. })) < note_at("after_record"));
-    assert!(note_at("after_record") < position(&|b| matches!(b, EventBody::RoutesResolved { .. })));
-    assert!(note_at("transition") < position(&|b| matches!(b, EventBody::RoutesResolved { .. })));
+    let resolved = |b: &RunEvent| matches!(b.engine(), Some(Event::RoutingResolved { .. }));
+    assert!(note_at("after_record") < position(&resolved));
+    assert!(note_at("transition") < position(&resolved));
     assert!(
-        position(&|b| matches!(b, EventBody::RoutesResolved { .. }))
-            < position(&|b| matches!(b, EventBody::RouteApplied { .. }))
+        position(&resolved) < position(&|b| matches!(b.engine(), Some(Event::RouteApplied { .. })))
     );
 
     // Checkpoint work: kept for the parallel parent and the fan-in, omitted
@@ -1100,13 +1144,13 @@ async fn a_paused_admission_holds_one_visit_and_resumes_on_release() {
     assert!(
         fan_while_paused
             .iter()
-            .any(|b| matches!(b, EventBody::VisitStarted { .. })),
+            .any(|b| matches!(b.view(), Some(ViewEvent::VisitStarted { .. }))),
         "the visit exists while paused"
     );
     assert!(
         !fan_while_paused
             .iter()
-            .any(|b| matches!(b, EventBody::AttemptStarted)),
+            .any(|b| matches!(b.engine(), Some(Event::StepStarted { .. }))),
         "no attempt starts while paused"
     );
     let timeline = Timeline::from_events(&sink.events());
@@ -1155,10 +1199,14 @@ async fn a_paused_visit_is_cancelled_without_starting() {
     assert_eq!(report.status, RunStatus::Cancelled);
     let events = sink.events();
     let long = bodies_of(&events, "long");
-    assert!(!long.iter().any(|b| matches!(b, EventBody::AttemptStarted)));
+    assert!(
+        !long
+            .iter()
+            .any(|b| matches!(b.engine(), Some(Event::StepStarted { .. })))
+    );
     assert!(long.iter().any(|b| matches!(
-        b,
-        EventBody::VisitCompleted { outcome, executed: false, .. }
+        b.view(),
+        Some(ViewEvent::VisitCompleted { outcome, executed: false, .. })
             if outcome.status == Status::Cancelled
     )));
     assert!(
@@ -1190,8 +1238,8 @@ async fn skip_and_block_end_a_visit_without_an_attempt() {
     assert!(ship.attempts.is_empty());
     assert_eq!(ship.routes, vec!["exit".to_owned()]);
     assert!(bodies_of(&outcome.events, "ship").iter().any(|b| matches!(
-        b,
-        EventBody::AttemptAdmitted { decision: Admission::Skip { .. }, trace }
+        b.engine(),
+        Some(Event::AdmissionDecided { decision: Admission::Skip { .. }, trace, .. })
             if trace.iter().any(|k| k.as_str() == "host.before_attempt")
     )));
     assert!(!workspace(&dir).join("shipped.txt").exists());
@@ -1211,10 +1259,13 @@ async fn skip_and_block_end_a_visit_without_an_attempt() {
     assert!(
         bodies_of(&outcome.events, "prepare")
             .iter()
-            .any(|b| matches!(b, EventBody::AttemptAdmitted {
-                decision: Admission::Block { .. },
-                ..
-            }))
+            .any(|b| matches!(
+                b.engine(),
+                Some(Event::AdmissionDecided {
+                    decision: Admission::Block { .. },
+                    ..
+                })
+            ))
     );
 }
 
@@ -1250,17 +1301,14 @@ async fn a_prepared_result_keeps_the_original_attempt_evidence() {
     assert_eq!(prepare.attempts, vec![(1, "partial_success".to_owned())]);
     let evidence = bodies_of(&outcome.events, "prepare")
         .into_iter()
-        .find_map(|b| match b {
-            EventBody::HostNote { kind, payload } if kind == RESULT_PREPARED_KIND => Some(payload),
-            _ => None,
-        })
+        .find_map(|b| note_of(b, RESULT_PREPARED_KIND))
         .expect("the original evidence is recorded");
     assert_eq!(
-        evidence["original"]["Failure"]["class"],
+        evidence["original"]["failure"]["class"],
         json!("exit_status:3")
     );
     assert_eq!(
-        evidence["effective"]["PartialSuccess"]["underlying"]["class"],
+        evidence["effective"]["partial_success"]["underlying"]["class"],
         json!("exit_status:3")
     );
     assert_eq!(evidence["reason"], json!("the host accepts this failure"));
@@ -1283,17 +1331,12 @@ async fn a_prepared_result_keeps_the_original_attempt_evidence() {
 fn result_prepared_note(events: &[RunEvent], node: &str) -> Value {
     bodies_of(events, node)
         .into_iter()
-        .find_map(|b| match b {
-            EventBody::HostNote { kind, payload } if kind == RESULT_PREPARED_KIND => {
-                Some(payload.clone())
-            }
-            _ => None,
-        })
+        .find_map(|b| note_of(b, RESULT_PREPARED_KIND).cloned())
         .expect("the original evidence is recorded")
 }
 
 /// The position of the first event of `node` that `pred` accepts.
-fn position_of(events: &[RunEvent], node: &str, pred: &dyn Fn(&EventBody) -> bool) -> usize {
+fn position_of(events: &[RunEvent], node: &str, pred: &dyn Fn(&RunEvent) -> bool) -> usize {
     bodies_of(events, node)
         .iter()
         .position(|b| pred(b))
@@ -1386,11 +1429,11 @@ async fn an_exhausted_retry_is_prepared_as_the_final_effective_result() {
     let evidence = result_prepared_note(&outcome.events, "work");
     assert_eq!(evidence["attempt"], json!(2));
     assert_eq!(
-        evidence["original"]["PartialSuccess"]["underlying"]["class"],
+        evidence["original"]["partial_success"]["underlying"]["class"],
         json!("retry_requested")
     );
     assert_eq!(
-        evidence["effective"]["Failure"]["class"],
+        evidence["effective"]["failure"]["class"],
         json!("retry_requested")
     );
     assert_eq!(
@@ -1398,15 +1441,13 @@ async fn an_exhausted_retry_is_prepared_as_the_final_effective_result() {
         json!("the host rejects this partial success")
     );
     // The preparation precedes the final attempt's record.
-    let final_note = position_of(
-        &outcome.events,
-        "work",
-        &|b| matches!(b, EventBody::HostNote { kind, .. } if kind == RESULT_PREPARED_KIND),
-    );
+    let final_note = position_of(&outcome.events, "work", &|b| {
+        note_of(b, RESULT_PREPARED_KIND).is_some()
+    });
     let records: Vec<usize> = bodies_of(&outcome.events, "work")
         .iter()
         .enumerate()
-        .filter(|(_, b)| matches!(b, EventBody::AttemptFinished { .. }))
+        .filter(|(_, b)| matches!(b.engine(), Some(Event::StepFinished { .. })))
         .map(|(i, _)| i)
         .collect();
     assert_eq!(records.len(), 2);
@@ -1503,7 +1544,7 @@ async fn a_fabro_exhaustion_decision_is_prepared_before_its_record() {
     let evidence = result_prepared_note(&outcome.events, "work");
     assert_eq!(evidence["attempt"], json!(2));
     assert_eq!(
-        evidence["original"]["Failure"]["class"],
+        evidence["original"]["failure"]["class"],
         json!("retry_requested")
     );
 }
@@ -1558,20 +1599,18 @@ async fn an_ordinary_failure_is_prepared_before_its_record_and_routes_on_the_eff
     assert_eq!(work.routes, vec!["done".to_owned()]);
     let evidence = result_prepared_note(&outcome.events, "work");
     assert_eq!(
-        evidence["original"]["Failure"]["class"],
+        evidence["original"]["failure"]["class"],
         json!("exit_status:3")
     );
     assert_eq!(
-        evidence["effective"]["PartialSuccess"]["underlying"]["class"],
+        evidence["effective"]["partial_success"]["underlying"]["class"],
         json!("exit_status:3")
     );
-    let note = position_of(
-        &outcome.events,
-        "work",
-        &|b| matches!(b, EventBody::HostNote { kind, .. } if kind == RESULT_PREPARED_KIND),
-    );
+    let note = position_of(&outcome.events, "work", &|b| {
+        note_of(b, RESULT_PREPARED_KIND).is_some()
+    });
     let record = position_of(&outcome.events, "work", &|b| {
-        matches!(b, EventBody::AttemptFinished { .. })
+        matches!(b.engine(), Some(Event::StepFinished { .. }))
     });
     assert!(note < record, "the preparation precedes the record");
 }
@@ -1602,14 +1641,17 @@ async fn transitions_override_block_or_continue() {
     assert!(timeline.nodes.contains_key("hold"));
     assert!(!timeline.nodes.contains_key("ship"));
     assert!(bodies_of(&outcome.events, "gate").iter().any(|b| matches!(
-        b,
-        EventBody::RoutesResolved { choices }
-            if choices[0].trace.iter().any(|i| matches!(i, Intervention::Override { middleware, .. } if middleware.as_str() == "host.transition"))
+        b.engine(),
+        Some(Event::RoutingResolved { groups, .. })
+            if groups[0].trace.iter().any(|i| matches!(i, Intervention::Override { middleware, .. } if middleware.as_str() == "host.transition"))
     )));
-    assert!(bodies_of(&outcome.events, "gate").iter().any(|b| matches!(
-        b,
-        EventBody::HostNote { kind, payload } if kind == TRANSITION_KIND && payload["overrides"].as_array().is_some_and(|o| o.len() == 1)
-    )));
+    assert!(bodies_of(&outcome.events, "gate").iter().any(|b| {
+        note_of(b, TRANSITION_KIND).is_some_and(|payload| {
+            payload["overrides"]
+                .as_array()
+                .is_some_and(|o| o.len() == 1)
+        })
+    }));
     assert!(workspace(&dir).join("held.txt").exists());
     assert!(!workspace(&dir).join("shipped.txt").exists());
 
@@ -1632,14 +1674,17 @@ async fn transitions_override_block_or_continue() {
         "advancement was blocked"
     );
     assert!(bodies_of(&outcome.events, "prepare").iter().any(|b| matches!(
-        b,
-        EventBody::RoutesResolved { choices }
-            if matches!(&choices[0].decision, RouteDecision::Block { reason } if reason.contains("git commit failed"))
+        b.engine(),
+        Some(Event::RoutingResolved { groups, .. })
+            if matches!(&groups[0].decision, RouteDecision::Block { reason } if reason.contains("git commit failed"))
     )));
-    assert!(bodies_of(&outcome.events, "prepare").iter().any(|b| matches!(
-        b,
-        EventBody::HostNote { kind, payload } if kind == TRANSITION_KIND && payload["blocked"].as_str().is_some_and(|r| r.contains("git commit failed"))
-    )));
+    assert!(bodies_of(&outcome.events, "prepare").iter().any(|b| {
+        note_of(b, TRANSITION_KIND).is_some_and(|payload| {
+            payload["blocked"]
+                .as_str()
+                .is_some_and(|r| r.contains("git commit failed"))
+        })
+    }));
     assert!(
         workspace(&dir).join("prepared.txt").exists(),
         "the step itself ran"
@@ -1661,10 +1706,13 @@ async fn transitions_override_block_or_continue() {
     );
     let timeline = Timeline::from_events(&outcome.events);
     assert_eq!(timeline.node("join").routes, vec!["gate".to_owned()]);
-    assert!(bodies_of(&outcome.events, "join").iter().any(|b| matches!(
-        b,
-        EventBody::HostNote { kind, payload } if kind == TRANSITION_KIND && payload["problems"][0].as_str().is_some_and(|p| p.contains("metadata write failed"))
-    )));
+    assert!(bodies_of(&outcome.events, "join").iter().any(|b| {
+        note_of(b, TRANSITION_KIND).is_some_and(|payload| {
+            payload["problems"][0]
+                .as_str()
+                .is_some_and(|p| p.contains("metadata write failed"))
+        })
+    }));
     assert!(workspace(&dir).join("shipped.txt").exists());
     // The delayed fork transition still applied both branches, once.
     assert_eq!(timeline.node("fan").routes, vec![
@@ -1765,12 +1813,12 @@ async fn a_hook_service_runs_each_hook_once_at_its_point() {
         timeline.node("ship").final_status.as_deref(),
         Some("skipped")
     );
-    assert!(bodies_of(&outcome.events, "ship").iter().any(|b| matches!(
-        b,
-        EventBody::HostNote { kind, payload }
-            if kind == HOOK_NOTE_KIND && payload["decision"]["decision"] == json!("skip")
+    assert!(bodies_of(&outcome.events, "ship").iter().any(|b| {
+        note_of(b, HOOK_NOTE_KIND).is_some_and(|payload| {
+            payload["decision"]["decision"] == json!("skip")
                 && payload["hooks"][0]["name"] == json!("stage_start")
-    )));
+        })
+    }));
     assert!(!workspace(&dir).join("shipped.txt").exists());
 }
 
@@ -1940,7 +1988,7 @@ async fn a_sink_that_falls_behind_leaves_the_overflow_to_the_durable_log() {
     // The chatty command's lines are the bulk of the overflow.
     let lines = replayed
         .iter()
-        .filter(|e| matches!(e.body, EventBody::OutputLine { .. }))
+        .filter(|e| matches!(e.engine(), Some(Event::StepProgressRecorded { .. })))
         .count();
     assert!(lines >= 2000, "{lines} output lines");
 }
@@ -1976,7 +2024,7 @@ async fn recovery_redelivers_with_stable_identities() {
     // The root execution's finish: the branch children finished before it.
     let cut = lines
         .iter()
-        .position(|line| line.contains("ExecutionFinished") && line.contains("\"execution\":0"))
+        .position(|line| line.contains("execution.finished") && line.contains("\"execution\":0"))
         .expect("the root execution finished");
     fs::write(&coordinator, format!("{}\n", lines[..cut].join("\n"))).expect("writes");
 
@@ -2155,13 +2203,10 @@ async fn the_milestone_workflow_runs_through_the_embedding_boundary() {
     assert_eq!(check.final_status.as_deref(), Some("partial_success"));
     let evidence = bodies_of(&events, "check")
         .into_iter()
-        .find_map(|b| match b {
-            EventBody::HostNote { kind, payload } if kind == RESULT_PREPARED_KIND => Some(payload),
-            _ => None,
-        })
+        .find_map(|b| note_of(b, RESULT_PREPARED_KIND))
         .expect("the original evidence is recorded");
     assert_eq!(
-        evidence["original"]["Failure"]["class"],
+        evidence["original"]["failure"]["class"],
         json!("exit_status:3")
     );
 
@@ -2190,14 +2235,13 @@ async fn the_milestone_workflow_runs_through_the_embedding_boundary() {
     // The join's best-effort metadata problem was recorded and did not stop
     // the run.
     assert!(
-        bodies_of(&events, "join").iter().any(|b| matches!(
-            b,
-            EventBody::HostNote { kind, payload }
-                if kind == TRANSITION_KIND
-                    && payload["problems"]
-                        .as_array()
-                        .is_some_and(|p| !p.is_empty())
-        )),
+        bodies_of(&events, "join").iter().any(|b| {
+            note_of(b, TRANSITION_KIND).is_some_and(|payload| {
+                payload["problems"]
+                    .as_array()
+                    .is_some_and(|p| !p.is_empty())
+            })
+        }),
         "{:#?}",
         bodies_of(&events, "join")
     );

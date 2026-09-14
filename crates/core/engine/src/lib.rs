@@ -10,7 +10,9 @@
 //! # use engine::{EngineStart, EngineState, Event, apply};
 //! # let graph = ir::Graph::new();
 //! let state = EngineState::new(graph);
-//! let (state, commands) = apply(state, Event::ExecutionStarted(EngineStart::default()));
+//! let (state, commands) = apply(state, Event::ExecutionStarted {
+//!     start: EngineStart::default(),
+//! });
 //! // Run the commands, then feed each result back as an event.
 //! # let _ = (state, commands);
 //! ```
@@ -27,13 +29,13 @@ pub use apply::{
     FIRING_ENV_CLASS, RESTART_LIMIT_REASON, apply, deterministic_pick, enforce_restart_limit,
 };
 pub use event::{
-    Admission, BoundaryViolation, Command, DEFAULT_MAX_EXECUTIONS, DecisionId, EngineExit,
-    EngineStart, EntryPoint, Event, GroupDecision, Intervention, MiddlewareKey, ResolvedFiring,
-    RouteApplied, RouteDecision, RoutingCandidate, RoutingProposal, SpliceClone, SubgraphSplice,
-    UnresolvedConfig, WeightedDraw,
+    Admission, BoundaryViolation, CancelTarget, Command, DEFAULT_MAX_EXECUTIONS, DecisionId,
+    EngineExit, EngineStart, EntryPoint, Event, GroupDecision, Intervention, MiddlewareKey,
+    ResolvedFiring, RouteApplied, RouteDecision, RoutingCandidate, RoutingProposal, SpliceClone,
+    SubgraphSplice, UnresolvedConfig, WeightedDraw,
 };
 pub use log::{
-    CANCEL_ESCALATION_KEY, EventLog, EventRecord, EventSource, InvalidRecords, LOG_VERSION,
+    CANCEL_ESCALATION_KEY, EventLog, EventOrigin, EventRecord, InvalidRecords, LOG_VERSION,
     UnsupportedLogVersion,
 };
 pub use replay::{ReplayMismatch, ResumePoint, replay, resume, verify_replay};

@@ -156,7 +156,7 @@ struct Asked(mpsc::UnboundedSender<(FiringId, String)>);
 
 impl EventObserver for Asked {
     fn on_record(&self, record: &EventRecord, _recorded_at: u64, _: &EngineState) {
-        if let Event::StepProgress { firing, ev } = &record.event
+        if let Event::StepProgressRecorded { firing, ev } = &record.event
             && let Some(question) = Question::from_event(ev)
         {
             let _ = self.0.send((*firing, question.id));
@@ -262,7 +262,7 @@ async fn the_waiting_stage_pays_only_for_active_work() {
         .records()
         .iter()
         .filter_map(|record| match &record.event {
-            Event::StepProgress { ev, .. } => Note::from_step_event(ev),
+            Event::StepProgressRecorded { ev, .. } => Note::from_step_event(ev),
             _ => None,
         })
         .filter(|note| note.kind == BUDGET_PAUSED_KIND || note.kind == BUDGET_RESUMED_KIND)
@@ -474,7 +474,7 @@ async fn a_redispatched_firing_gets_a_fresh_budget_and_waits_again() {
         .log
         .records()
         .iter()
-        .find(|r| matches!(&r.event, Event::StepProgress { ev, .. } if Question::from_event(ev).is_some()))
+        .find(|r| matches!(&r.event, Event::StepProgressRecorded { ev, .. } if Question::from_event(ev).is_some()))
         .map(|r| usize::try_from(r.seq).expect("fits"))
         .expect("the question is in the log");
     let prefix: Vec<EventRecord> = report.state.log.records()[..=question_seq].to_vec();

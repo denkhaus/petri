@@ -887,7 +887,7 @@ jobs:
         .state
         .log
         .events()
-        .filter(|e| matches!(e, engine::Event::CancelRequested { scope } if *scope != ir::CancelScopeId::ROOT))
+        .filter(|e| matches!(e, engine::Event::CancelRequested { target: engine::CancelTarget::Scope(scope) } if *scope != ir::CancelScopeId::ROOT))
         .count();
     assert!(scope_cancels >= 1, "fail-fast cancelled the splice scope");
     assert!(

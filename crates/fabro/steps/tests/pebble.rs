@@ -318,7 +318,7 @@ fn backend_selection_inherits_and_accepts_stylesheets() {
 struct NativeStarted(mpsc::Sender<ir::FiringId>);
 impl EventObserver for NativeStarted {
     fn on_record(&self, record: &EventRecord, _recorded_at: u64, _: &EngineState) {
-        if let Event::StepProgress {
+        if let Event::StepProgressRecorded {
             firing,
             ev: ir::StepEvent::Custom(value),
         } = &record.event
@@ -381,7 +381,7 @@ async fn steering_and_attributed_events_reach_the_native_session() {
         .log
         .events()
         .filter_map(|event| match event {
-            Event::StepProgress {
+            Event::StepProgressRecorded {
                 ev: ir::StepEvent::Custom(value),
                 ..
             } if value["kind"] == "pebble" => Some(value),
@@ -703,7 +703,7 @@ struct GateAnswerer {
 
 impl EventObserver for GateAnswerer {
     fn on_record(&self, record: &EventRecord, _recorded_at: u64, _state: &EngineState) {
-        let Event::StepProgress { firing, ev } = &record.event else {
+        let Event::StepProgressRecorded { firing, ev } = &record.event else {
             return;
         };
         let Some(question) = Question::from_event(ev) else {

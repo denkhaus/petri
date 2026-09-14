@@ -18,9 +18,10 @@ use lithos_llm::types::ErrorKind;
 use pebble_coding_agent::test_support::{
     ScriptedCall, ScriptedFailure, scripted_client, text_response,
 };
-use petri::execution::ExecutionObserver;
-use petri::execution::events::{CollectingSink, EventBody, EventProjector, RunEvent};
+use petri::engine::Event;
+use petri::execution::events::{CollectingSink, EventProjector, RunEvent};
 use petri::execution::host::{self, HostRun};
+use petri::execution::{CoordinatorEvent, ExecutionObserver};
 use petri::executor::Retention;
 use petri::fabro::fallback::PLAN_EVENT;
 use petri::fabro::pebble::PebbleClient;
@@ -29,7 +30,7 @@ use petri::frontend::CompileInputs;
 use petri::frontend::fabro::Fabro;
 use petri::ir::{RunStatus, Value};
 use petri::{RunOptions, Runtime};
-use testkit::RunDir;
+use testkit::{RunDir, backend_event};
 
 const WORKFLOW: &str = r#"digraph Fallback {
     graph [backend="api", goal="Answer"]
@@ -94,9 +95,18 @@ fn reconstruct(events: &[RunEvent]) -> Reconstructed {
     let mut out = Reconstructed::default();
     let mut current_route: Option<String> = None;
     for event in events {
-        match &event.body {
-            EventBody::RunFinished { status } => out.run_status = Some(*status),
-            EventBody::StepCustom { value } if value["kind"] == PLAN_EVENT => {
+        if let Some(CoordinatorEvent::RunFinished { status }) = event.coordinator() {
+            out.run_status = Some(*status);
+        }
+        if let Some(Event::StepFinished { outcome, .. }) = event.engine() {
+            out.attempt = Some(outcome.status.tag().to_owned());
+        }
+        let Some(value) = event.custom() else {
+            continue;
+        };
+        let activity = backend_event(value);
+        match activity {
+            _ if value["kind"] == PLAN_EVENT => {
                 out.plan_routes = value["routes"]
                     .as_array()
                     .into_iter()
@@ -106,7 +116,7 @@ fn reconstruct(events: &[RunEvent]) -> Reconstructed {
                 out.notices = value["notices"].as_array().map_or(0, Vec::len);
                 out.node_attempt = value["attempt"].as_u64();
             }
-            EventBody::AgentActivity(activity) if activity.backend == "pebble" => {
+            Some(activity) if activity.backend == "pebble" => {
                 let Some((variant, payload)) = pebble_event(&activity.envelope) else {
                     continue;
                 };
@@ -145,9 +155,6 @@ fn reconstruct(events: &[RunEvent]) -> Reconstructed {
                     }
                     _ => {}
                 }
-            }
-            EventBody::AttemptFinished { outcome, .. } => {
-                out.attempt = Some(outcome.status.tag().to_owned());
             }
             _ => {}
         }

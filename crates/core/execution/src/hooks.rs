@@ -516,7 +516,7 @@ impl HookAdapter {
     /// A point with no firing: the payload is the whole request. No decision
     /// is consumed. The report comes back as the same `hook` note a firing's
     /// report is; the driver hands it to the coordinator, which records it
-    /// at run level (`CoordinatorEvent::RunNote`), so `replay_run` and
+    /// at run level (`CoordinatorEvent::RunNoteRecorded`), so `replay_run` and
     /// `petri inspect` show it.
     async fn run_level(&self, point: HookPoint, payload: impl Serialize) -> HookReport {
         self.service

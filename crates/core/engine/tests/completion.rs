@@ -35,12 +35,14 @@ fn with_terminal(mut graph: Graph, exit: NodeId) -> Graph {
 /// A token on an edge no graph declares: the cheapest way to plant a `RunError`
 /// mid-run without touching any step.
 fn bad_token() -> Event {
-    Event::TokenEmitted(Token::new(
-        EdgeId::new(999),
-        Generation::ZERO,
-        Value::Null,
-        FiringId::new(0),
-    ))
+    Event::TokenEmitted {
+        token: Token::new(
+            EdgeId::new(999),
+            Generation::ZERO,
+            Value::Null,
+            FiringId::new(0),
+        ),
+    }
 }
 
 /// The same graph, both policies: a failed node that routes onward is control
@@ -123,7 +125,9 @@ fn a_run_error_fails_the_run_under_both_policies() {
             graph
         };
         let mut h = Harness::new(graph);
-        h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
+        h.feed(Event::ExecutionStarted {
+            start: engine::EngineStart::default(),
+        });
         let starts = h.take_starts();
         h.feed(bad_token());
         h.finish(starts[0].0, Outcome::success(Value::Null));
@@ -151,7 +155,9 @@ fn a_root_cancel_folds_to_cancelled_under_both_policies() {
             graph
         };
         let mut h = Harness::new(graph);
-        h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
+        h.feed(Event::ExecutionStarted {
+            start: engine::EngineStart::default(),
+        });
         let starts = h.take_starts();
         h.cancel(CancelScopeId::ROOT);
         h.finish(starts[0].0, Outcome::cancelled());
@@ -181,7 +187,9 @@ fn a_run_error_sets_run_failed_for_later_guards() {
     validate(&graph).expect("valid");
 
     let mut h = Harness::new(graph);
-    h.feed(Event::ExecutionStarted(engine::EngineStart::default()));
+    h.feed(Event::ExecutionStarted {
+        start: engine::EngineStart::default(),
+    });
     let starts = h.take_starts();
     h.feed(bad_token());
     h.finish(starts[0].0, Outcome::success(Value::Null));

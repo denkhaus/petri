@@ -1,19 +1,104 @@
 # The public event contract
 
 `execution::events` is the versioned event stream an embedding host projects a
-run from. This file is the contract for `EVENT_CONTRACT_VERSION` 2. The Rust
+run from. This file is the contract for `EVENT_CONTRACT_VERSION` 3. The Rust
 types in `crates/core/execution/src/events.rs` are authoritative for field
 detail; this file states the guarantees.
 
-Version 2 made the stream lossless for replay ("Inversion" below). It added
-fields, never changed one: `origin` on every event; `run_started.format_version`; `graph_registered`;
-`invocation_declared.secret_bindings` and `.admission`;
-`execution_declared.context`, `.prior_firings`, `.max_executions` and
-`.middleware_state`; `execution_started.prior_firings` and
-`.max_executions`; `execution_admitted.decision` and `.trace`;
-`RouteChoice.draw`; `AgentActivity.attributes`; and the `value` a delivered
-answer was decoded from. A version 1 consumer that ignores unknown fields
-reads a version 2 stream, apart from the new `graph_registered` event.
+## The rule
+
+One vocabulary for records and events: **a public event carries its record,
+unchanged, plus what Petri derived beside it.**
+
+1. **Name.** A record's own event is named after the record: the `body.event`
+   tag of the stored line, `<subject>.<verb>` in lower case (`step.finished`,
+   `routing.resolved`, `execution.declared`). Events derived from the state
+   alone (the view events) follow the same spelling and are marked `derived`.
+2. **Record.** The event carries the stored line as one value, `record`:
+   exactly what the log holds (`seq`, `origin`, `recorded_at`, and `body`,
+   the engine's or the coordinator's event with its `event` tag and fields).
+   Nothing is renamed, re-nested, dropped or lifted out of it, and the same
+   Rust types and serializers produce the log line and the event.
+3. **Derived values.** What Petri adds lives in a separate `derived` value,
+   never inside `record`: `final` and `exhausted` for `step.finished`, the
+   resolved target node per group for `routing.resolved`, the target with
+   `transition` and `back` for `route.applied`, each clone's entry node for
+   `node.expanded`, `deliverable` and the decoded `answer` for
+   `control.requested`, `parsed` for `step.progress.recorded` and
+   `run.note.recorded`. A derived value can never collide with a recorded
+   key, and a recorded structure is never modified.
+4. **Envelope.** Every event carries `id` (the log, the record's `seq`, and
+   `index`), `origin`, `recorded_at`, `observed_at`, `context` (`invocation`,
+   `execution`, `parent`) and `subject`. On a record's own event, `origin`,
+   `seq` and `recorded_at` repeat what `record` holds, so a consumer reads the
+   envelope alone or the record alone.
+5. **Origin.** Copied from the record: `external` for a record the host fed
+   the engine or a coordinator record, `core` for a record the engine produced
+   while draining. `derived` marks a view event, which has no record. The kind
+   of a record does not decide its origin: `apply` marks whatever it is fed as
+   external, so a host may feed a token or an expansion, and such a record is
+   external. Replay consumes external records, regenerates core records, and
+   recomputes view events.
+6. **Index.** A record's own event is `index` 0 and carries `record`. View
+   events attached to the same record follow at `index` 1 and up, carry no
+   `record`, and are marked `derived`.
+7. **Wire form.** A record serializes as an internally tagged object under
+   `body` inside `{"seq", "origin", "recorded_at", "body"}`, which is the line
+   the log stores. A public event is `{ id, origin, recorded_at, observed_at,
+   context, subject, record, derived }`. Export reads `record`; there is no
+   field-removal list, no reverse mapping, and no reconstruction from
+   presentation data.
+
+A complete `execution.declared` event, a coordinator record with nothing
+derived:
+
+```json
+{
+  "id": { "log": "coordinator", "seq": 3, "index": 0 },
+  "origin": "external",
+  "recorded_at": 1789323217366,
+  "context": { "invocation": 0, "execution": 1 },
+  "record": {
+    "seq": 3,
+    "origin": "external",
+    "recorded_at": 1789323217366,
+    "body": {
+      "event": "execution.declared",
+      "execution": 1,
+      "invocation": 0,
+      "predecessor": null,
+      "start": { "entry": "graph_entries", "context": {}, "prior_firings": {}, "execution_index": 1, "max_executions": 4 },
+      "middleware_state": {}
+    }
+  }
+}
+```
+
+A `route.applied` jump, a core record whose recorded `target` is a node id;
+the node reference Petri resolved sits in `derived`:
+
+```json
+{
+  "id": { "log": "execution", "execution": 1, "seq": 23, "index": 0 },
+  "origin": "core",
+  "recorded_at": 1789323217459,
+  "context": { "invocation": 0, "execution": 1 },
+  "subject": { "node": { "id": 4, "name": "review", "kind": "fabro/agent", "meta": { "kind": "agent" } }, "firing": 3, "visit": 1, "attempt": 1, "generation": 0, "branch": { "role": "none" } },
+  "record": {
+    "seq": 23,
+    "origin": "core",
+    "recorded_at": 1789323217459,
+    "body": { "event": "route.applied", "kind": "jump", "firing": 3, "target": 7 }
+  },
+  "derived": { "target": { "id": 7, "name": "finalize", "kind": "fabro/command", "meta": { "kind": "command" } } }
+}
+```
+
+`record` equals the stored line as a JSON value; whitespace and object-key
+order are not part of that equality. A view event, such as the
+`visit.started` that follows a token, has the same envelope with
+`origin: derived`, no `record`, and the view event under `derived`, tagged
+by `event`.
 
 ## Sources and identity
 
@@ -27,20 +112,21 @@ engine record, the coordinator store's for a coordinator record, never inside
 the state machine — and persisted beside the record, so a replayed event
 carries the same time the live one did.
 
-`EventId { source, seq, index }` is the stable identity: the log the record came
-from (`coordinator`, or `execution: <id>`), the record's `seq` in that log, and
-the ordinal of this event among the events one record produced. Within one
-source the order is total. Every event carries `invocation` and `execution`
-when it has them, and `parent` (the calling execution, firing, attempt and call
-slot) for a nested invocation.
+`EventId { log, seq, index }` is the stable identity: the log the record came
+from (`coordinator`, or `execution` with the execution id), the record's `seq`
+in that log, and the ordinal of this event among the events one record
+produced (`0` is the record's own event). Within one log the order is total.
+Across logs, `context` (`invocation`, `execution`, and the `parent` link, the
+firing that called a nested invocation) ties an execution's events to the
+invocation that declared it.
 
-`origin` says who appended the record: `external` for every coordinator
-record and for an engine record the driver applied (an execution's start, an
-admission, a step's start, progress and result, a routing decision, an
-elapsed retry, a host's cancel, kill or control), `core` for a record the
-engine produced while draining (a routed token, an applied route, a splice,
-a cascading cancel). Replay consumes the external records and regenerates
-the core ones.
+`origin` is the record's: `external` for a coordinator record or an engine
+record the host fed the engine (an execution's start, an admission, a step's
+start, progress and result, a routing decision, an elapsed retry, a host's
+cancel, kill or control), `core` for a record the engine produced while
+draining (a routed token, an applied route, a splice, a cascading cancel),
+`derived` for a view event. Replay consumes the external records and
+regenerates the core ones.
 
 `subject` names the node (`NodeRef`: id, instance name, step kind, the
 frontend's `meta` verbatim) and, when the event is about a firing, the firing
@@ -52,7 +138,7 @@ Visits and attempts are distinct: a retry advances `attempt` and keeps the
 firing and visit; a loop that fires the node again starts a new firing and
 advances `visit`.
 
-A fork's branch events (`fork_started`, `branch_completed`, `fork_completed`)
+A fork's branch events (`fork.started`, `branch.completed`, `fork.completed`)
 carry a `ForkOccurrence`: the parent execution, the fork node, the fork's
 firing, its visit and its generation. It is the one reference for one
 occurrence of a fork. A host keys a repeated visit of one fork, a fork inside
@@ -78,63 +164,99 @@ of their own). A synthetic `<fork>.fan_in` is a `parallel.fan_in` with
 distinguishes logical stages from lowering artifacts with these fields and
 with `BranchRole`, never with node names.
 
-## Events
+## Records
 
-Run and invocation events (coordinator log): `run_started` (the root, the
-middleware chain and the coordinator format version), `run_finished`,
-`graph_registered` (a graph's digest, before any invocation declares it),
-`invocation_declared` (with the parent link, graph digest, sandbox binding,
-initial context, the name-only secret bindings and the admission gate),
-`invocation_finished` (with the `InvocationResult`),
-`invocation_cancel_requested` (with the `reason` the requester gave, when it
-gave one: `stall_timeout`, `interrupt`, `control`), `stall_timeout` (derived
-beside the cancel request the stall watchdog made, with the budget and the
-idle time), `execution_declared` (predecessor, index, entry, and the rest of
-the engine start: context, inherited firing counts, restart limit, and the
-middleware state), `execution_finished` (the engine exit: terminal status or
-restart).
+Every stored record is one event, `index` 0, with the record under `record`.
+The identifier is the `body.event` tag, which is also the tag in the stored
+line. Rust field types are as the engine and coordinator declare them.
 
-Run controls (coordinator log): `run_paused`, `run_unpaused`, derived from
-the `RunPaused` and `RunUnpaused` records the control service appends through
-the coordinator. Replay carries them, and a resume whose last recorded control
-is a pause starts with admission held. The records are additive to coordinator
-format version 2 (version 3 added `recorded_at` to every coordinator record).
+Coordinator records, one `coordinator.jsonl` per run, origin always
+external. Log identity `{ "log": "coordinator" }`.
 
-Run-level notes (coordinator log): a `host_note` with no subject, derived from
-a `RunNote` record: the report of a hook point that belongs to no firing
-(`run_finished`, `scope_released`), with the execution whose driver ran it,
-and a `hook_activity` for each event a run-level hook's agent produced. The
-coordinator appends them from the execution's report, in the order the
-points ran, before it records `RunFinished`. Additive to coordinator format
-version 2.
+| `event` | Body type | Fields and derived values |
+| --- | --- | --- |
+| `run.started` | `CoordinatorEvent::RunStarted` | `format_version`, `root`, `middleware_chain`. Nothing derived |
+| `graph.registered` | `GraphRegistered` | `digest`, before any invocation declares the graph. Nothing derived |
+| `invocation.declared` | `InvocationDeclared` | `invocation`, `call` (absent on the root), `graph`, `context`, the name-only `secret_bindings`, the `sandbox` binding, the `admission` gate. Nothing derived; `context.parent` is the call as a `ParentLink` |
+| `execution.declared` | `ExecutionDeclared` | `execution`, `invocation`, `predecessor`, the whole engine `start` (entry, context, inherited firing counts, index, restart limit), `middleware_state`. Nothing derived |
+| `execution.finished` | `ExecutionFinished` | `execution`, `exit` (`terminal {status}` or `restart {edge, target, source}`). Nothing derived |
+| `invocation.finished` | `InvocationFinished` | `invocation`, `result` (the `InvocationResult`). Nothing derived |
+| `invocation.cancel.requested` | `InvocationCancelRequested` | `invocation`, `reason` when the requester gave one (`stall_timeout`, `interrupt`, `control`). A `run.stalled` view event follows a stall watchdog's request |
+| `run.paused`, `run.unpaused` | `RunPaused`, `RunUnpaused` | the control service held or released admission. Replay carries them, and a resume whose last recorded control is a pause starts with admission held |
+| `run.note.recorded` | `RunNoteRecorded` | `execution` (the one whose driver ran the point, when known), `kind`, `payload`: a note from a run-level hook point (`run_finished`, `scope_released`), appended from the execution's report before `run.finished`. Derived: `parsed`, the same reading a firing's note gets |
+| `run.finished` | `RunFinished` | `status`. Nothing derived |
 
-Execution events (engine log), each attributed to a subject where one exists:
+Engine records, one `events.jsonl` per execution. Log identity
+`{ "log": "execution", "execution": <id> }`. Each is attributed to a subject
+where one exists.
 
-| Event | When |
+| `event` | Usual origin | Body type | Fields and derived values |
+| --- | --- | --- | --- |
+| `execution.started` | external | `Event::ExecutionStarted` | the engine start, flattened: `entry`, `context`, `prior_firings`, `execution_index`, `max_executions`. Nothing derived |
+| `admission.decided` | external | `AdmissionDecided` | `decision_id` (`execution_start`, or `attempt_start {firing, attempt}`, which gives the event its subject), `decision` (`admit`, `skip {outcome}`, `block {reason}`), `trace` (the middleware keys). Nothing derived |
+| `step.started` | external | `StepStarted` | `firing`, `attempt`: the attempt was dispatched to its step. Nothing derived; `wait.state.changed {running}` follows |
+| `step.progress.recorded` | external | `StepProgressRecorded` | `firing`, `ev`: a log line (`log {stream, line}`), an artifact (`artifact {name, uri}`) or a step-defined payload (`custom`). Derived: `parsed`, when the payload is a protocol Petri owns (below) |
+| `step.finished` | external | `StepFinished` | `firing`, `attempt`, `outcome` (status, output, `metrics`, context updates, splices). Derived: `final` (whether the engine recorded it as the firing's outcome; a non-final attempt is followed by a retry) and `exhausted` (the retry policy allowed no further attempt while the status was retryable). `retry.scheduled` and `wait.state.changed {awaiting_retry}` follow a non-final attempt |
+| `routing.resolved` | external | `RoutingResolved` | `decision_id` (`route {firing, attempt}`), `groups`: per group the decision (`emit`, `jump`, `none`, `block {reason}`), the interventions (`override`, `jump`, `block`, outermost first) and the weighted `draw` (tier, candidates, roll, total) when one happened. Derived: `groups[].target`, the node each decision leads to |
+| `retry.elapsed` | external | `RetryElapsed` | `firing`, `next_attempt`: the driver waited out the backoff. Nothing derived |
+| `cancel.requested` | external, or core for a cascade | `CancelRequested` | `target`: `{scope}` (the run's root scope cancels everything) or `{group}` (a declared node group). Nothing derived; `wait.state.changed {cancelling}` follows for each live firing it reaches |
+| `kill.requested` | external | `KillRequested` | `scope`: the forced tier. Nothing derived; `wait.state.changed {cancelling}` follows |
+| `control.requested` | external | `ControlRequested` | `firing`, `ctl` (`cancel`, `kill`, `deliver` with the value as delivered; a host may send an answer under `$answer`, a steer under `$steer`). Derived: `deliverable` (whether the firing could receive it; a late answer is recorded but not deliverable) and `answer`, the decoding of a delivered value that reads as one. `wait.state.changed {running}` follows a deliverable answer |
+| `token.emitted` | usually core | `TokenEmitted` | the token, flattened: `edge`, `generation`, `payload`, `from`. Nothing derived; the subject is the emitting firing when it has one |
+| `route.applied` | usually core | `RouteApplied` | `kind`: `edge {firing, group, edge}`, `jump {firing, target}` or `none {firing, group}`. Derived: the `target` node, with `transition` and `back` for an edge; nothing for `none`. `fork.started` follows the first applied route of a fork node |
+| `node.expanded` | usually core | `NodeExpanded` | `node`, `splice` (cancel scope, source, region, generation, payload, the clones with their nodes, `max_parallel`, `fail_fast`). Derived: `clones[].entry`, each clone's entry node. `fork.started` follows for the node that fanned out into the template |
+
+A host may feed a `token.emitted` or a `node.expanded` itself; such a record
+is external, and replay consumes it.
+
+## Derived events
+
+The view events are the projection's incremental reading of the state. They
+have no record, are marked `origin: derived`, follow the record whose apply
+produced them at `index` 1 and up, and are never stored: a host that stores
+only records recomputes them with `Projection`. Under `derived` they are
+tagged by `event`.
+
+| `event` | When |
 | --- | --- |
-| `execution_started`, `execution_admitted` | the execution's own start (entry, index, context, inherited firing counts, restart limit) and admission (`admitted` and `reason` beside the decision itself and its trace) |
-| `visit_started` | a firing exists for a node whose join was satisfied |
-| `attempt_admitted` | the host or middleware decided on an attempt (`Admit`, `Skip`, `Block`, with the trace) |
-| `attempt_started` | the attempt was dispatched to its step |
-| `attempt_finished` | an attempt returned; `final` says whether it is the firing's outcome, `exhausted` whether retries ran out |
-| `retry_scheduled`, `retry_elapsed` | the backoff between attempts |
-| `visit_completed` | the firing's final record exists; `executed` is false for a synthesized completion (false precondition, cancelled scope, blocked or skipped admission); `attempts` is the count |
-| `routes_resolved` | one `RouteChoice` per group with the decision, resolved target, interventions (overrides, jumps, blocks), whether a weighted draw happened and the draw itself (tier, candidates, roll, total) when one did |
-| `route_applied` | one applied route: edge (with target, transition, back), jump, or none |
-| `fork_started`, `branch_completed`, `fork_completed` | a fork's branches start; a branch reaches its end; the fork's branches are all accounted for, in branch order, with the `disposition` that closed them (`joined`, `cancelled`, `killed`; see "Fork closure"). All three carry the `ForkOccurrence` of the fork visit; `branch_completed`'s subject is the branch's last firing with its visit, attempt and generation. A static fork's branches are its routing groups; a `for_each` expansion's branches are its clones, in item order, and the fork is the node that fanned out into the template (Fabro's `parallel` node), so both fan-outs carry the same identities |
-| `node_expanded` | a `for_each` expansion with its clones |
-| `question_asked`, `control_delivered` | a question on the firing's progress channel; a host control decoded as an answer when it is one (beside the delivered `value` it was decoded from), with whether the firing could receive it |
-| `question_expired` | the step reported that its question's answer deadline passed (`steps::QuestionExpired` on the progress channel): the question id, how long it waited (`waited_ms`), and the option it took on its own (`default`, by key) when it had one. The attempt's outcome follows as `attempt_finished`; a host never infers a timeout from that outcome |
-| `wait_state_changed` | `awaiting_admission`, `running`, `awaiting_answer`, `awaiting_retry`, `cancelling`; a delivered answer or the question's expiry ends `awaiting_answer` |
-| `cancel_requested`, `kill_requested` | the two stop tiers, scope or group |
-| `output_line`, `artifact_recorded` | step output and artifacts |
-| `agent_activity` | a backend's own event envelope (`kind` names the backend; for `pebble` the envelope is Pebble's `CodingAgentEvent`) with the session, parent session, tool call, stream and stream sequence read out of it, and the step's own keys beside `kind` and `event` verbatim as `attributes` (the native backend records `node`, `firing`, `attempt` and `scope`). A native agent's sub-agents are on the same stream: the lifecycle (`SubAgentSpawned`, `SubAgentTurnStarted`, `SubAgentCompleted`, `SubAgentFailed`, `SubAgentClosed`) under the parent's session, a child's own events under the child's session with `parent_session` naming its immediate parent, all attributed to the parent stage (`crates/fabro/FORMAT.md`, "Native Pebble"). A stage's own agent only: a hook's agent is `hook_activity` |
-| `hook_activity` | one event a hook's own agent produced: `hook {point, hook}` names the hook operation (with the subject's firing and attempt, one execution of one hook) and `activity` is the same `AgentActivity` an `agent_activity` carries, in its own session. Attributed to the firing whose hook ran (or, for a run-level point, to no subject), and never to the stage's own agent, so a consumer summing `agent_activity` never counts a hook's model requests as the stage's. From the `hook.activity` notes the hook service's report carries, recorded before the `hook` note |
-| `budget_paused`, `budget_resumed` | an executor-enforced attempt budget stopped counting (the attempt asked a question; `remaining_ms` is the active-work time left, `pending_questions` how many wait) and counted again (its last pending question was answered); from the driver's durable `budget_paused`/`budget_resumed` notes |
-| `host_note` | a `driver::lifecycle::Note` the host or the driver recorded: `result_prepared` (original attempt evidence beside an adjusted result), `transition` (overrides, best-effort problems, a block), `hook` (a hook service report: the point, the decision, each hook's state, duration, message and `usage`: the model requests it made, the tool calls its agent started, the backend's token counts in the `pebble.usage` shape, cost and timings). A run-level hook report is the same `hook` note from the coordinator log, with no subject |
-| `step_custom` | any other step-defined progress payload |
+| `visit.started {inputs}` | a firing exists for a node whose join was satisfied; `wait.state.changed {awaiting_admission}` follows |
+| `visit.completed {outcome, executed, attempts}` | the firing's final record exists; `executed` is false for a synthesized completion (false precondition, cancelled scope, blocked or skipped admission); `attempts` is the count |
+| `retry.scheduled {next_attempt, base_delay}` | a non-final attempt returned and the next waits out the backoff |
+| `wait.state.changed {state}` | `awaiting_admission`, `running`, `awaiting_answer`, `awaiting_retry`, `cancelling`; a delivered answer or the question's expiry ends `awaiting_answer` |
+| `fork.started {occurrence, branches}`, `branch.completed {occurrence, result}`, `fork.completed {occurrence, fork, results, disposition}` | a fork's branches start; a branch reaches its end; the fork's branches are all accounted for, in branch order, with the `disposition` that closed them (`joined`, `cancelled`, `killed`; see "Fork closure"). All three carry the `ForkOccurrence` of the fork visit; `branch.completed`'s subject is the branch's last firing with its visit, attempt and generation. A static fork's branches are its routing groups; a `for_each` expansion's branches are its clones, in item order, and the fork is the node that fanned out into the template (Fabro's `parallel` node), so both fan-outs carry the same identities |
+| `run.stalled {stall_timeout_ms, idle_ms}` | the stall watchdog cancelled the run; attached to the `invocation.cancel.requested` record that carries the reason |
 
-Usage and timing: `attempt_finished` and `visit_completed` carry the outcome's
+## `parsed`
+
+`step.progress.recorded` carries the progress payload verbatim in its
+record. `derived.parsed` is Petri's reading of the step protocols Petri
+itself owns, tagged by `kind`:
+
+| `parsed.kind` | From | Fields |
+| --- | --- | --- |
+| `question` | a `$question` payload | `question` (`steps::Question`: id, text, options, default, whether free text is accepted, sensitivity) |
+| `question_expired` | a `$question_expired` payload (`steps::QuestionExpired`) | `expired`: the question id, how long the step waited (`waited_ms`), and the option it took on its own (`default`, by key) when it had one. The attempt's outcome follows as `step.finished`; a host never infers a timeout from that outcome |
+| `note` | a `$note` payload (`driver::lifecycle::Note`) | `note {kind, payload}`. Kinds the driver writes: `result_prepared` (original attempt evidence beside an adjusted result), `transition` (overrides, best-effort problems, a block), `budget_paused`, `budget_resumed`. Kinds the hook adapter writes: `hook` (a hook service report: the point, the decision, each hook's state, duration, message and `usage`), `hook.activity`. Two kinds get a reading beside the note: `hook_activity` (`{hook {point, hook}, backend, envelope}`: one event a hook's own agent produced, the hook agent's payload forwarded as recorded, apart from the stage's own agent) and `budget` (`{state: paused | resumed, attempt, remaining_ms, pending_questions}`: an executor-enforced attempt budget stopped counting because the attempt asked a question, or counts again because its last pending question was answered) |
+
+`parsed` is absent when the payload is a log line, an artifact, or a
+payload Petri does not own. A backend's own event (a `kind` naming the
+backend and an `event` object: for `pebble`, Pebble's `CodingAgentEvent`
+with `seq`, `stream_id`, `session_id`, `parent_session_id`, `tool_call_id`,
+`timestamp`, `event`) is forwarded as recorded, and the step's own keys
+beside it (the native backend records `node`, `firing`, `attempt` and
+`scope`) with it. Petri reads nothing into it and adds no variant per backend
+event; a host that wants Pebble's typed view asks Pebble's adapter, and an
+unfamiliar payload survives without a Petri release. A native agent's
+sub-agents are on the same stream: the lifecycle (`SubAgentSpawned`,
+`SubAgentTurnStarted`, `SubAgentCompleted`, `SubAgentFailed`,
+`SubAgentClosed`) under the parent's session, a child's own events under the
+child's session with `parent_session_id` naming its immediate parent, all
+attributed to the parent stage (`crates/fabro/FORMAT.md`, "Native Pebble").
+A hook's agent is never on the stage's stream: it is a `hook_activity`
+reading, so a consumer summing a stage's backend events never counts a
+hook's model requests as the stage's.
+
+Usage and timing: `step.finished` and `visit.completed` carry the outcome's
 `metrics` (`duration_ms`, `exit_code`, `custom`). The driver fills
 `duration_ms` with the observed wall-clock duration of the attempt when the step
 kind did not report one. The native agent backend reports `pebble.usage`,
@@ -144,65 +266,64 @@ failed and closed, and their summed usage by session) under `custom`.
 
 Times: every event carries `recorded_at`, when its record was appended to its
 log, the same live and on replay. A host reconstructs start and completion
-times from the events that mark them — `run_started`/`run_finished`,
-`invocation_declared`/`invocation_finished`, `execution_declared`/
-`execution_finished`, `visit_started`/`visit_completed`,
-`attempt_started`/`attempt_finished` (a command's boundaries),
-`question_asked`/`control_delivered` (an interview's) — and durations from
-their differences, beside the step-reported `duration_ms`. `observed_at` is
-when the projector saw the record live; it is absent on replay and is never a
-substitute for `recorded_at`: replay time is not execution time. A record
-replay regenerates that never reached a log (a crash's lost tail, before any
-resume re-recorded it) has no `recorded_at`; once a resume re-records it, it
-carries the resume's recording time, and a host that saw the original live
-keeps whichever copy it deduplicated first.
+times from the events that mark them — `run.started`/`run.finished`,
+`invocation.declared`/`invocation.finished`, `execution.declared`/
+`execution.finished`, `visit.started`/`visit.completed`,
+`step.started`/`step.finished` (a command's boundaries), a question's
+`step.progress.recorded`/`control.requested` (an interview's) — and
+durations from their differences, beside the step-reported `duration_ms`.
+`observed_at` is when the projector saw the record live; it is absent on
+replay and is never a substitute for `recorded_at`: replay time is not
+execution time. A record a crash kept off disk has no event until a resume
+stores it; it then carries the resume's recording time, and a host that saw
+the original live keeps whichever copy it deduplicated first.
 
 ## Fork closure
 
-Every fork that announced `fork_started` closes with exactly one
-`fork_completed`, live and on replay, whatever stopped it. The projection
+Every fork that announced `fork.started` closes with exactly one
+`fork.completed`, live and on replay, whatever stopped it. The projection
 keeps each open fork by its `ForkOccurrence` and ties its branches and its
 join to that occurrence through the generation the fork's tokens carry, so
 two visits of one fork or a fork inside a branch never share a closure, and
-every `branch_completed` and `fork_completed` names the occurrence its
-`fork_started` announced.
+every `branch.completed` and `fork.completed` names the occurrence its
+`fork.started` announced.
 
-| `disposition` | When | Each `branch_completed` | `results` |
+| `disposition` | When | Each `branch.completed` | `results` |
 | --- | --- | --- | --- |
-| `joined` | every branch's token reached the join and the join fired (`visit_started` on the join follows) | the token that reached the join, with its `payload` | every branch |
-| `cancelled` | the join completed without running (`visit_completed {executed: false}` with a `cancelled` outcome): its scope was cancelled, or every branch reached it cancelled | the branch's last record; no `payload`, since the join never ran | every branch with a record |
+| `joined` | every branch's token reached the join and the join fired (`visit.started` on the join follows) | the token that reached the join, with its `payload` | every branch |
+| `cancelled` | the join completed without running (`visit.completed {executed: false}` with a `cancelled` outcome): its scope was cancelled, or every branch reached it cancelled | the branch's last record; no `payload`, since the join never ran | every branch with a record |
 | `killed` | the fork's scope was killed, so the join's tokens were dropped and it never fires; the fork closes once no branch of it has a live firing left, on the fork's own firing as subject | the branch's last record; no `payload` | the branches with a record; one that never recorded is absent |
 
 A branch's own terminal facts stay where they are: the member's
-`visit_completed` (with `executed`, false for a branch cancelled before it was
-admitted) and, for a Fabro branch, the child's `invocation_finished`. A Fabro
+`visit.completed` (with `executed`, false for a branch cancelled before it was
+admitted) and, for a Fabro branch, the child's `invocation.finished`. A Fabro
 branch child cancelled before it was admitted still gets an execution that
-records the cancellation and no `attempt_started`.
+records the cancellation and no `step.started`.
 
 ### The Fabro branch events
 
-The Fabro frontend's branch delegates and fan-in add `step_custom` events
-with dispositions of their own. This is the mapping from Petri's facts to the
+The Fabro frontend's branch delegates and fan-in add custom payloads
+(`step.progress.recorded`) with dispositions of their own. This is the mapping from Petri's facts to the
 pinned Fabro's `parallel.*` events; Fabro emits no group event on
 cancellation, and this contract does not claim it does.
 
 | Petri | Fabro |
 | --- | --- |
-| `fork_started {occurrence}` | `parallel.started`; Fabro's `parallel_group_id` (`node@visit`) is the occurrence's fork node and visit |
-| `fabro.parallel.branch.started {fork, occurrence, branch, index, item_label, invocation}`, emitted once the child's engine has started (it holds a slot under the fork's gate, as Fabro's branch holds a permit). `occurrence` is `{fork, firing}`: the fork step's firing in the event's execution, the same firing the typed `fork_started` names. The child's `invocation_declared.call.slot` is `branch:<fork>@<firing>:<index>:<target>`, so the child link names the occurrence too | `parallel.branch.started` |
+| `fork.started {occurrence}` | `parallel.started`; Fabro's `parallel_group_id` (`node@visit`) is the occurrence's fork node and visit |
+| `fabro.parallel.branch.started {fork, occurrence, branch, index, item_label, invocation}`, emitted once the child's engine has started (it holds a slot under the fork's gate, as Fabro's branch holds a permit). `occurrence` is `{fork, firing}`: the fork step's firing in the event's execution, the same firing the typed `fork.started` names. The child's `invocation.declared` `call.slot` is `branch:<fork>@<firing>:<index>:<target>`, so the child link names the occurrence too | `parallel.branch.started` |
 | `fabro.parallel.branch.completed {fork, occurrence, branch, index, item_label, invocation, status, disposition, started, duration_ms}`, emitted on every path a branch ends. `status` is the envelope's Fabro status; `disposition` is `completed` (the child finished; `status` says how), `cancelled` (the child settled cancelled; `status` is `failed`), `killed` (the stop escalated to a kill before the child settled; `failed`) or `failed_to_start` (the child could not be declared; `failed`); `started` is whether the child's engine ever started (false for a queued branch the cancel reached first) | `parallel.branch.completed` with the same `status`, for every event with `started: true`. Fabro emits none for a branch that never held a slot, so a host projecting Fabro's stream drops `started: false`. Fabro reports a cancelled branch as `failed` with duration 0; Petri carries the observed duration |
-| `fabro.parallel.completed {node, fork, occurrence, branch_count, success_count, failure_count, status}`, emitted by the fan-in when it runs, with the occurrence its inputs carried | `parallel.completed`. Neither engine emits it for a cancelled or killed fork; the terminal group fact is then Petri's `fork_completed {disposition}`, which Fabro has no event for |
+| `fabro.parallel.completed {node, fork, occurrence, branch_count, success_count, failure_count, status}`, emitted by the fan-in when it runs, with the occurrence its inputs carried | `parallel.completed`. Neither engine emits it for a cancelled or killed fork; the terminal group fact is then Petri's `fork.completed {disposition}`, which Fabro has no event for |
 
 ## Ordering and delivery
 
 - Per execution, events are delivered in record order, and within one record
   in `index` order. The order is causal: admission before start, start before
-  finish, the final finish before `visit_completed`, `visit_completed` before
-  `routes_resolved`, `routes_resolved` before `route_applied`, host notes
+  finish, the final finish before `visit.completed`, `visit.completed` before
+  `routing.resolved`, `routing.resolved` before `route.applied`, host notes
   before the record they annotate.
-- Across executions the `parent` link and `execution_declared.predecessor` tie
+- Across executions the `parent` link and `execution.declared` `predecessor` tie
   the streams together. The coordinator log's records are delivered as they
-  are appended; a fresh run's `run_started` is delivered to an observer when
+  are appended; a fresh run's `run.started` is delivered to an observer when
   it attaches.
 - `EventProjector` is bounded: the observer callback derives each record's
   events and queues them without waiting; a pump task awaits the host's
@@ -212,7 +333,7 @@ cancellation, and this contract does not claim it does.
   keeps its pace. An event projected while the queue is full is not queued:
   the `ProjectionReceipt` counts it as `overflowed` (and `undelivered`),
   live delivery goes on with the next event that finds room, so the sink
-  sees each source in record order with gaps, and the durable log keeps the
+  sees each log in record order with gaps, and the durable log keeps the
   event. A sink error stops the pump; later events are counted as
   undelivered. A `deliver` or `finish` that does not return within
   `ProjectorOptions::stall_timeout` (30 seconds by default) is dropped, the
@@ -241,48 +362,39 @@ cancellation, and this contract does not claim it does.
   repeats is the attempt: an attempt whose finish never landed is
   re-dispatched on resume and emits its events again, so an acknowledged
   record can appear twice; a consumer deduplicates delivery by `EventId` and
-  agent activity by Pebble's `(stream_id, seq)`.
+  a backend's events by Pebble's `(stream_id, seq)`.
 - Every event is derived from a durable record, output lines included, and
   carries the record's `recorded_at`, identical live and on replay. The one
-  live-only field on a derived event is `observed_at` (milliseconds since the
+  live-only field is `observed_at` (milliseconds since the
   epoch when the projector saw the record), absent on replay. A backend's live
   stream chunks that never reached the step's progress channel are not in the
   contract.
 
-## Inversion
+## Export
 
-The stream is lossless for the records replay consumes. Every coordinator
-record and every engine record of `external` origin (the ones the host fed
-the engine: an execution's start, admissions, step starts, progress and
-finishes, routing decisions, elapsed retries, host cancels, kills and
-delivered controls) derives at least one event, and the first event derived
-from such a record (`index` 0) carries everything the record did.
-`execution::events::invert` rebuilds the records from the events alone: the
-coordinator log whole, and each execution's external records. Records of
-`core` origin (routed tokens, applied routes, splices, cascading cancels)
-derive events too (`visit_started`, `route_applied`, `node_expanded`, the
-fork events, and a `cancel_requested` the engine issued itself), but replay
-regenerates them from the external records, so inversion skips them by
-their `origin`.
+A record's own event carries the stored line, so a host that stores `record`
+values stores the logs: the coordinator log whole, and each execution's
+engine log whole. The record commit is the only durability boundary; view
+events are recomputed from records by `Projection`, live or after the fact.
 
-The first event of an external engine record is one of: `execution_started`,
-`execution_admitted`, `attempt_admitted`, `attempt_started`,
-`attempt_finished`, `retry_elapsed`, `routes_resolved`, `cancel_requested`,
-`kill_requested`, `control_delivered`, `output_line`, `artifact_recorded`,
-`question_asked`, `question_expired`, `agent_activity`, `hook_activity`,
-`host_note`, `budget_paused`, `budget_resumed`, `step_custom`. Its subject
-names the firing and attempt the record was about. A firing's identity is
-therefore never inferred from a `visit_started`; it is stated on every event
-of the firing.
+`execution::events::verify_export` is the proof, run over a run dir: it
+projects the run, takes the `record` values out of the stream, and checks
+that they equal the stored records as JSON values, that they reload through
+the existing log readers into the same logs, and that the stored external
+records replay to the stored logs, whole for an execution the coordinator
+recorded as finished and as a prefix for a crash log. The standalone host
+runs it at the end of every run beside `engine::verify_replay`
+(`RunOptions::verify_replay`, on by default), so every run in the test suites
+is an export case.
 
-`execution::events::verify_lossless` is the proof, run over a run dir: it
-projects the run, inverts the stream, checks the inverted coordinator log and
-external records against the stored ones, replays the inverted records
-through the engine and checks the regenerated logs against the stored ones
-whole, then re-projects the regenerated logs and checks the stream is the
-same, event for event. The standalone host runs it at the end of every run
-beside `engine::verify_replay` (`RunOptions::verify_replay`, on by default),
-so every run in the test suites is a round-trip case.
+Crash recovery: read-only projection publishes what is stored. `replay_run`
+regenerates the core records a crash kept off disk, so its state is right,
+but publishes no event attached to them. A resume writes those records
+through the normal storage path, with normal recording times, before its
+observers see them: the driver hands the regenerated suffix to the log
+writer first and to every other observer after it, before it dispatches
+pending work. Existing records keep their times. Live and replayed views
+agree at the same durable positions.
 
 ## Secrets
 
@@ -305,40 +417,40 @@ durable record (in the log, delivered live and on replay) or live-only, and
 the projection test that proves it from `RunEvent`s alone. The Fabro names
 describe the consumer's need, not Petri event names. Every row's events carry
 `recorded_at`, so the timestamps and durations Fabro's projection needs come
-from the same events. A `step_custom` row
-names the `kind` of the `StepEvent::Custom` payload; every such payload
+from the same events. A `step.progress.recorded` row
+names the `kind` of the `StepEvent::Custom` payload in the record; every such payload
 also carries `node`, `firing` and `attempt` beside the event's `subject`.
 
 | Fabro need | Public source | Identities | Durability | Projection test |
 | --- | --- | --- | --- | --- |
-| `run.started/completed/failed`, root vs internal invocation | `run_started {root, middleware_chain}`, `run_finished {status}`, `invocation_declared` (`call` is `None` on the root, a `ParentLink` on a child), `invocation_finished {result}`, `execution_declared/finished` | `EventId`, `invocation`, `execution`, `parent` | durable (coordinator log) | `embedding::the_workflow_runs_without_adapters_and_the_events_reconstruct_it`, `embedding_readiness` |
-| run notices, steer, interrupt, cancel reasons | `invocation_cancel_requested {reason}` (`stall_timeout`, `interrupt`, `control`), `cancel_requested`, `kill_requested`, `control_delivered {Deliver}` (a steer is `{"$steer": ...}`) | invocation, firing | durable | `fabro_readiness_blackbox::…_is_cancelled_…` (`reason = interrupt`), `controls::an_idle_run_is_cancelled_by_the_watchdog` (`stall_timeout`), `controls::the_control_file_pauses_unpauses_and_steers_without_answering` |
-| `stage.started/completed/failed/retrying` | `visit_started`, `attempt_admitted`, `attempt_started`, `attempt_finished {final, exhausted}`, `retry_scheduled`, `retry_elapsed`, `visit_completed {executed, attempts}`; `subject.node.meta.kind` and `synthetic` map lowering nodes to the logical stage | node, firing, visit, attempt, generation | durable | `embedding::the_workflow_runs_without_adapters_…` (the retry), `embedding_readiness` (every logical stage's final status) |
-| `stage.prompt`, `prompt.completed` | `step_custom` kinds `fabro.prompt`, `fabro.prompt.completed`; a prompt node's `attempt_finished` output | node, firing, attempt | durable | `petri-fabro-steps::prompt` (prompt events), `fabro_blackbox::a_prompt_node_makes_one_tool_free_model_call` |
-| `edge.selected`, `loop.restart` | `routes_resolved {choices}` (decision, target, overrides, jumps, blocks, weighted draw), `route_applied {edge / jump / none, transition, back}`; a restart is `execution_finished {Restart}` then `execution_declared {predecessor}` | firing, edge, execution | durable | `embedding::transitions_override_block_or_continue`, `controls::node_visit_totals_survive_a_restart_while_context_resets` |
-| `parallel.started`, branch start and completion, `parallel.completed` (static fan-out) | `fork_started {occurrence, branches}`, `branch_completed {occurrence, result}`, `fork_completed {occurrence, fork, results, disposition}` in branch order; `BranchRole` on every subject; the `fabro.parallel.*` `step_custom` events with the same occurrence and the branch dispositions ("Fork closure") | `ForkOccurrence {execution, fork, firing, visit, generation}`, `BranchRef {fork, index}` | durable | `embedding::the_workflow_runs_without_adapters_…` (`forks`, `joins`); `petri-fabro-steps::parallel` (`a_repeated_fork_publishes_results_per_visit_with_its_own_children`, `duplicate_targets_are_separate_branches_with_their_own_index`, `a_nested_fork_runs_inside_its_branch_and_reports_its_own_results`: two visits, duplicate targets and a nested fork each keyed on their own occurrence, live and replayed; `a_clean_cancel_during_work_closes_the_branches_and_the_fork`, `a_cancel_before_admission_records_a_branch_that_never_started`, `a_cancel_before_the_fan_in_keeps_the_finished_branch_result`, `a_kill_after_the_cancel_closes_the_fork_as_killed`: every closure live and through `replay_run`) |
-| the same for a `for_each` fan-out (an expansion) | the same three bodies, with the same identities: `fork_started {occurrence, branches}` on the parallel node once the expansion knows its items (one `BranchRef {fork, index}` per item, in item order; none for an empty list), `branch_completed {occurrence, result}` per clone as its token reaches the fan-in, `fork_completed {occurrence, fork, results}` at the fan-in in item order; the clones are `member {fork, index}`, the fan-in `join {fork}`. Beside them: `node_expanded {clones}`; one `invocation_declared` per branch child with its `parent` link, `invocation_finished` per child; `step_custom` kinds `fabro.parallel.branch.started`, `fabro.parallel.branch.completed` (the delegates) and `fabro.parallel.completed` (the fan-in, with `parallel.results`). The roles come from one mechanism for both fan-outs: `BranchMap::of` reads the graph shape, `BranchMap::with_expansions` reads the engine's applied splices (the template, its clones by item index, the one node whose forward arm reaches the template as the fork) | `ForkOccurrence`, `BranchRef {fork, index}`, child invocation (its call slot names the occurrence) | durable | `embedding::the_milestone_workflow_runs_through_the_embedding_boundary` (`fork:2`, `join`, `forks`, `joins`; live equals replay), `fabro_blackbox::for_each_branches_keep_distinct_values_under_one_key_in_item_order` (the three bodies through `replay_run`), `embedding_readiness`, `fabro_readiness_blackbox` (one expansion, one fork, one join, two children) |
-| `interview.started/completed/timeout/interrupted` | `question_asked {question}` (type, choices, interaction identity), `wait_state_changed {awaiting_answer}`, `control_delivered {Answer, deliverable}`; a timeout is `question_expired {question, waited_ms, default}`, the step's own report with the default it took (the gate's outcome then follows as `attempt_finished`: success with the default, or failure class `retry_requested` without one); an interruption is `control_delivered {Answer {cancelled}}` (the interviewer ended the interview) or `cancel_requested` with the attempt's `Cancelled` status; a sensitive answer stays `{"$secret": …}`. The interview receipt records the same disposition: `timed_out {default}` with delivery `expired` | node, firing, attempt, question id | durable | `embedding::the_workflow_runs_without_adapters_…`, `embedding_readiness` (`questions`, `answers`), `petri::interview` (the interviewer contract; expiry with and without a default, a cancelled reply, a reply after the deadline, each live and through `replay_run`), `fabro_blackbox::a_withheld_reply_…` (the receipt), `inspect_cli::inspect_shows_a_sensitive_answer_as_a_secret_reference_only` |
-| `command.started/completed` | `attempt_started`, `attempt_finished {outcome}` (`metrics.exit_code`, `duration_ms`, `output`), `output_line`, `artifact_recorded` | node, firing, attempt | durable | `embedding::the_workflow_runs_without_adapters_…` |
-| `agent.*` session, tool calls, LLM requests, steering | `agent_activity {backend, session, parent_session, tool_call, stream, stream_seq, envelope}`: Pebble's own `CodingAgentEvent` envelope, one stream per session | session id, stream id and sequence, tool call id | durable | `fabro_subagents_blackbox::a_parent_delegates_a_workspace_change_to_a_child`, `embedding_readiness` |
-| `agent.*` threads (retained sessions, fidelity) | `step_custom` kind `fabro.thread` (thread id, fidelity, resolution) once per native session | node, firing, attempt, session | durable | `fabro_readiness_blackbox`, `fabro_hooks_blackbox::full_fidelity_nodes_share_one_conversation_through_the_binary` |
-| `agent.failover` (C1): plan, per-target requests, decisions, accounting | `step_custom` kind `fabro.fallback.plan` (routes, notices: Petri's knowledge). Everything else is Pebble's, in `agent_activity`: `SessionStarted` (each route's provider and model), `RouteFailover` (from, to, attempt, the failed route's usage, cost and timings, typed error, `continuation`), `RouteFailoverStopped` (route, attempt, `ineligible`/`exhausted`, the error; published only when the plan named a fallback route), `AssistantMessage` (each answer's usage). The move and a server that did not start are also lines on the node's stderr. No `fabro.fallback.route`, `usage`, `failover` or `stop`, and no `metrics.custom.fallback.*` (removed 2026-09-12; see decision `pebble-events-are-the-agent-contract`) | node, firing, attempt, session | durable (a resumed node starts a new plan) | `fallback_events` (3), `fabro_fallback_blackbox` (15), `fabro_readiness_blackbox` (failover, then `RouteFailoverStopped` `exhausted` in the failure case), `embedding_readiness` |
-| `agent.mcp.*` (C2): server and tool lifecycle | Pebble's own events in `agent_activity`: `McpServerReady` (server, tools, `startup_ms`), `McpServerFailed` (server, error, `startup_ms`), `McpServerDisconnected` (server, error; once per closed connection), and `ToolCallStarted`/`ToolCallCompleted` under `mcp__<server>__<tool>` (call id, `is_error`, `error_kind`: `timeout`, `unavailable`, `cancelled`, `denied`, ...). One `step_custom` kind for the fact Pebble cannot know: `fabro.mcp.unavailable` (server, error), a server Petri never named to Pebble because a secret its entry needs is unavailable. A server that did not start is also a line on the node's stderr. No `fabro.mcp.server` phases and no `fabro.mcp.tool` (removed 2026-09-12; see decision `pebble-events-are-the-agent-contract`) | node, firing, attempt, server name, tool call id | durable | `petri-fabro-steps::mcp` (8), `fabro_readiness_blackbox`, `embedding_readiness` (through `replay_run`); terminal and workspace reads in `fabro_mcp_blackbox` |
-| `agent.skills.*` (C3): discovery and loading | `step_custom` kinds `fabro.skills` (the ordered directories with their sources, once per native session) and `fabro.skills.warning` (`malformed`, `unreadable`, `missing_directory`); Pebble's `SkillsDiscovered`/`SkillActivated` in `agent_activity` | node, firing, attempt, scope | durable | `fabro_readiness_blackbox`, `embedding_readiness`; raw-log reads in `fabro_skills_blackbox` |
-| `agent.subagent.*` (C4): spawn, input, wait, close, child usage | `agent_activity` under the parent's session: `SubAgentSpawned {agent_id, depth, task}`, `SubAgentCompleted`, `SubAgentFailed`, `SubAgentClosed`; the child's own events under the child's session with `parent_session`; `attempt_finished.metrics.custom.pebble.subagents` (counts and per-session usage) | parent session, child session, stream sequence | durable | `fabro_subagents_blackbox::a_parent_delegates_a_workspace_change_to_a_child` (usage rebuilt from events equals the metric), `fabro_readiness_blackbox`, `embedding_readiness` |
-| `agent.compaction.*` (C5): lifecycle and summary usage | Pebble's `CompactionStarted/Completed/Failed/Cancelled` in `agent_activity`; `step_custom` kind `fabro.compaction` (the summary call's usage and cost) once per compaction; `attempt_finished.metrics.custom.pebble.compaction_*` | node, firing, attempt, session | durable | `petri-fabro-steps::compaction::public_events_account_for_the_compaction_and_later_activity`, `fabro_readiness_blackbox`, `embedding_readiness` |
-| `agent.*` error and warning | `attempt_finished` failure class; `step_custom` kinds `fabro.hook.warning` (an unenforceable ACP hook), `fabro.skills.warning`, `fabro.mcp.server {failed}` | node, firing, attempt | durable | `petri-fabro-steps::hooks::acp_tool_hooks_are_best_effort_with_explicit_warnings`, `fabro_mcp_blackbox` |
-| `watchdog.timeout` | `stall_timeout {stall_timeout_ms, idle_ms}` beside `invocation_cancel_requested {reason: stall_timeout}` | invocation | durable (coordinator log) | `controls::an_idle_run_is_cancelled_by_the_watchdog` |
-| `subgraph.started/completed` | `invocation_declared {call: ParentLink}`, `invocation_finished`, `execution_*` with `parent` | invocation, parent execution, firing, attempt, call slot | durable | `petri-execution::inspect::a_nested_invocation_keeps_its_own_context_and_parent_link`, `petri-fabro-acceptance::workflow` |
-| local setup (`[run.prepare]`, `[run.clone]`) | the `run_prepare_N` stages' events; `step_custom` kind `fabro.checkout` (repository, commit, depth, files) on `start` | node, firing | durable | `embedding::the_milestone_workflow_runs_through_the_embedding_boundary`, `fabro_scenarios_blackbox` (checkout) |
-| hook decisions (workflow points) | `host_note {kind: "hook"}` with the `HookReport` (point, decision, each hook's state, duration and usage, fail-open warnings); a report that ran no hook is silent | node, firing, attempt | durable | `embedding::a_hook_service_runs_each_hook_once_at_its_point`, `petri-fabro-steps::hooks` |
-| hook-owned model requests, agent and tool activity, usage | `hook_activity {hook, activity}` per event of a hook's agent (a prompt hook has none), before the `host_note {kind: "hook"}` whose `hooks[].usage` sums the hook's requests, tool calls, tokens, cost and timings; the same for a point a step asks itself, beside its `fabro.hook` event; the stage's own `agent_activity` and `pebble.usage` count the stage's agent alone | node, firing, attempt, hook operation (point, hook name), the hook agent's session | durable | `petri-fabro-steps::hooks::an_agent_hooks_activity_is_kept_apart_from_the_stages_own` (live and replay), `agent_hooks_investigate_the_workspace_then_decide`, `prompt_hooks_evaluate_with_one_model_call_and_fail_open`, `prompt_hook_usage_records_a_failed_and_a_timed_out_request`, `an_agent_hook_timeout_stops_its_tool_before_failing_open` |
-| hook decisions (points a step asks itself) | `step_custom` kind `fabro.hook` (`event` = `sandbox_ready`, `run_start` and `stage_start` on the root `start` stage; `parallel_start` on the fork node, `parallel_complete` on the fan-in; `pre_tool_use`, `post_tool_use`, `post_tool_use_failure` at the tool boundary; and the report), one per point that ran a hook, a child's under the parent stage | node, firing, attempt | durable | `fabro_readiness_blackbox`, `embedding_readiness` (counts per stage, two `block` decisions), `petri-fabro-steps::hooks::a_replacement_service_receives_every_step_driven_phase_once` |
-| run-level hooks (`run_complete`, `run_failed`, `sandbox_cleanup`) | `host_note {kind: "hook"}` from the coordinator log's `RunNote` records, with no subject and the execution named: one per run-level point that ran a hook (`point` is `run_finished` or `scope_released`), in the order the points ran, before `run_finished`; the run's own end is `run_finished` | execution | durable (coordinator log) | `fabro_milestone_blackbox` (`assert_run_level_notes`: the reports through `replay_run` and `petri inspect` on a succeeded, a failed and a cancelled run, beside the hooks' effects) |
-| local sandbox, retention, output references | `invocation_declared.sandbox` (the binding), the reported workspace in `petri inspect`, `output_line`, `artifact_recorded`, `blob://sha256/…` references in outputs; the acquisition progress lines are terminal-only | invocation, scope | durable (the binding and outputs), live-only (progress lines) | `inspect_cli`, `petri-fabro-steps::steps::large_command_output_is_offloaded_and_reads_back_logically` |
-| budget pause and resume | `budget_paused {remaining_ms, pending_questions}`, `budget_resumed {remaining_ms}` from the driver's notes | node, firing, attempt | durable | `petri-driver::interview_budget::the_waiting_stage_pays_only_for_active_work` |
-| pause and unpause | `run_paused`, `run_unpaused` from the coordinator's `RunPaused` and `RunUnpaused` records | run | durable; a resume starts paused when the last control recorded is a pause | `controls::pause_holds_admission_and_unpause_releases_it`, `controls::a_pause_survives_resume_and_holds_admission_until_unpaused`, `fabro_resume_blackbox::a_paused_run_stays_paused_across_resume_until_unpaused` |
-| platform lifecycle, `checkpoint.*`, `git.*`, `pull_request.*`, product projections | not emitted; a host performs them in its `transition` and records `host_note {kind: "transition"}` | | | `embedding::adapters_run_in_order_and_checkpoint_work_follows_source_metadata` |
+| `run.started/completed/failed`, root vs internal invocation | `run.started {root, middleware_chain}`, `run.finished {status}`, `invocation.declared` (`call` is `None` on the root, a `ParentLink` on a child), `invocation.finished {result}`, `execution_declared/finished` | `EventId`, `context.invocation`, `context.execution`, `context.parent` | durable (coordinator log) | `embedding::the_workflow_runs_without_adapters_and_the_events_reconstruct_it`, `embedding_readiness` |
+| run notices, steer, interrupt, cancel reasons | `invocation.cancel.requested {reason}` (`stall_timeout`, `interrupt`, `control`), `cancel.requested`, `kill.requested`, `control.requested` (a steer is a delivered `{"$steer": ...}`) | invocation, firing | durable | `fabro_readiness_blackbox::…_is_cancelled_…` (`reason = interrupt`), `controls::an_idle_run_is_cancelled_by_the_watchdog` (`stall_timeout`), `controls::the_control_file_pauses_unpauses_and_steers_without_answering` |
+| `stage.started/completed/failed/retrying` | `visit.started`, `admission.decided`, `step.started`, `step.finished` (`derived.final`, `derived.exhausted`), `retry.scheduled`, `retry.elapsed`, `visit.completed {executed, attempts}`; `subject.node.meta.kind` and `synthetic` map lowering nodes to the logical stage | node, firing, visit, attempt, generation | durable | `embedding::the_workflow_runs_without_adapters_…` (the retry), `embedding_readiness` (every logical stage's final status) |
+| `stage.prompt`, `prompt.completed` | `step.progress.recorded` kinds `fabro.prompt`, `fabro.prompt.completed`; a prompt node's `step.finished` output | node, firing, attempt | durable | `petri-fabro-steps::prompt` (prompt events), `fabro_blackbox::a_prompt_node_makes_one_tool_free_model_call` |
+| `edge.selected`, `loop.restart` | `routing.resolved` (per group the decision, overrides, jumps, blocks and weighted draw in the record; the target in `derived.groups`), `route.applied` (`kind` edge, jump or none in the record; the target, `transition` and `back` in `derived`); a restart is `execution.finished {exit: restart}` then `execution.declared {predecessor}` | firing, edge, execution | durable | `embedding::transitions_override_block_or_continue`, `controls::node_visit_totals_survive_a_restart_while_context_resets` |
+| `parallel.started`, branch start and completion, `parallel.completed` (static fan-out) | `fork.started {occurrence, branches}`, `branch.completed {occurrence, result}`, `fork.completed {occurrence, fork, results, disposition}` in branch order; `BranchRole` on every subject; the `fabro.parallel.*` `step.progress.recorded` events with the same occurrence and the branch dispositions ("Fork closure") | `ForkOccurrence {execution, fork, firing, visit, generation}`, `BranchRef {fork, index}` | durable | `embedding::the_workflow_runs_without_adapters_…` (`forks`, `joins`); `petri-fabro-steps::parallel` (`a_repeated_fork_publishes_results_per_visit_with_its_own_children`, `duplicate_targets_are_separate_branches_with_their_own_index`, `a_nested_fork_runs_inside_its_branch_and_reports_its_own_results`: two visits, duplicate targets and a nested fork each keyed on their own occurrence, live and replayed; `a_clean_cancel_during_work_closes_the_branches_and_the_fork`, `a_cancel_before_admission_records_a_branch_that_never_started`, `a_cancel_before_the_fan_in_keeps_the_finished_branch_result`, `a_kill_after_the_cancel_closes_the_fork_as_killed`: every closure live and through `replay_run`) |
+| the same for a `for_each` fan-out (an expansion) | the same three bodies, with the same identities: `fork.started {occurrence, branches}` on the parallel node once the expansion knows its items (one `BranchRef {fork, index}` per item, in item order; none for an empty list), `branch.completed {occurrence, result}` per clone as its token reaches the fan-in, `fork.completed {occurrence, fork, results}` at the fan-in in item order; the clones are `member {fork, index}`, the fan-in `join {fork}`. Beside them: `node.expanded` (`derived.clones`); one `invocation.declared` per branch child with its `parent` link, `invocation.finished` per child; `step.progress.recorded` kinds `fabro.parallel.branch.started`, `fabro.parallel.branch.completed` (the delegates) and `fabro.parallel.completed` (the fan-in, with `parallel.results`). The roles come from one mechanism for both fan-outs: `BranchMap::of` reads the graph shape, `BranchMap::with_expansions` reads the engine's applied splices (the template, its clones by item index, the one node whose forward arm reaches the template as the fork) | `ForkOccurrence`, `BranchRef {fork, index}`, child invocation (its call slot names the occurrence) | durable | `embedding::the_milestone_workflow_runs_through_the_embedding_boundary` (`fork:2`, `join`, `forks`, `joins`; live equals replay), `fabro_blackbox::for_each_branches_keep_distinct_values_under_one_key_in_item_order` (the three bodies through `replay_run`), `embedding_readiness`, `fabro_readiness_blackbox` (one expansion, one fork, one join, two children) |
+| `interview.started/completed/timeout/interrupted` | `step.progress.recorded` with `parsed.question` (type, choices, interaction identity), `wait.state.changed {awaiting_answer}`, `control.requested` with `derived.answer` and `derived.deliverable`; a timeout is `parsed.expired {question, waited_ms, default}`, the step's own report with the default it took (the gate's outcome then follows as `step.finished`: success with the default, or failure class `retry_requested` without one); an interruption is `control.requested` with `derived.answer.cancelled` (the interviewer ended the interview) or `cancel.requested` with the attempt's `Cancelled` status; a sensitive answer stays `{"$secret": …}`. The interview receipt records the same disposition: `timed_out {default}` with delivery `expired` | node, firing, attempt, question id | durable | `embedding::the_workflow_runs_without_adapters_…`, `embedding_readiness` (`questions`, `answers`), `petri::interview` (the interviewer contract; expiry with and without a default, a cancelled reply, a reply after the deadline, each live and through `replay_run`), `fabro_blackbox::a_withheld_reply_…` (the receipt), `inspect_cli::inspect_shows_a_sensitive_answer_as_a_secret_reference_only` |
+| `command.started/completed` | `step.started`, `step.finished {outcome}` (`metrics.exit_code`, `duration_ms`, `output`), `step.progress.recorded` (log lines and artifacts) | node, firing, attempt | durable | `embedding::the_workflow_runs_without_adapters_…` |
+| `agent.*` session, tool calls, LLM requests, steering | the backend envelope in `step.progress.recorded` (`kind` naming the backend; `event` the envelope with `session_id`, `parent_session_id`, `tool_call_id`, `stream_id`, `seq`): Pebble's own `CodingAgentEvent`, one stream per session, forwarded as recorded | session id, stream id and sequence, tool call id | durable | `fabro_subagents_blackbox::a_parent_delegates_a_workspace_change_to_a_child`, `embedding_readiness` |
+| `agent.*` threads (retained sessions, fidelity) | `step.progress.recorded` kind `fabro.thread` (thread id, fidelity, resolution) once per native session | node, firing, attempt, session | durable | `fabro_readiness_blackbox`, `fabro_hooks_blackbox::full_fidelity_nodes_share_one_conversation_through_the_binary` |
+| `agent.failover` (C1): plan, per-target requests, decisions, accounting | `step.progress.recorded` kind `fabro.fallback.plan` (routes, notices: Petri's knowledge). Everything else is Pebble's, in the backend envelope in `step.progress.recorded`: `SessionStarted` (each route's provider and model), `RouteFailover` (from, to, attempt, the failed route's usage, cost and timings, typed error, `continuation`), `RouteFailoverStopped` (route, attempt, `ineligible`/`exhausted`, the error; published only when the plan named a fallback route), `AssistantMessage` (each answer's usage). The move and a server that did not start are also lines on the node's stderr. No `fabro.fallback.route`, `usage`, `failover` or `stop`, and no `metrics.custom.fallback.*` (removed 2026-09-12; see decision `pebble-events-are-the-agent-contract`) | node, firing, attempt, session | durable (a resumed node starts a new plan) | `fallback_events` (3), `fabro_fallback_blackbox` (15), `fabro_readiness_blackbox` (failover, then `RouteFailoverStopped` `exhausted` in the failure case), `embedding_readiness` |
+| `agent.mcp.*` (C2): server and tool lifecycle | Pebble's own events in the backend envelope in `step.progress.recorded`: `McpServerReady` (server, tools, `startup_ms`), `McpServerFailed` (server, error, `startup_ms`), `McpServerDisconnected` (server, error; once per closed connection), and `ToolCallStarted`/`ToolCallCompleted` under `mcp__<server>__<tool>` (call id, `is_error`, `error_kind`: `timeout`, `unavailable`, `cancelled`, `denied`, ...). One `step.progress.recorded` kind for the fact Pebble cannot know: `fabro.mcp.unavailable` (server, error), a server Petri never named to Pebble because a secret its entry needs is unavailable. A server that did not start is also a line on the node's stderr. No `fabro.mcp.server` phases and no `fabro.mcp.tool` (removed 2026-09-12; see decision `pebble-events-are-the-agent-contract`) | node, firing, attempt, server name, tool call id | durable | `petri-fabro-steps::mcp` (8), `fabro_readiness_blackbox`, `embedding_readiness` (through `replay_run`); terminal and workspace reads in `fabro_mcp_blackbox` |
+| `agent.skills.*` (C3): discovery and loading | `step.progress.recorded` kinds `fabro.skills` (the ordered directories with their sources, once per native session) and `fabro.skills.warning` (`malformed`, `unreadable`, `missing_directory`); Pebble's `SkillsDiscovered`/`SkillActivated` in the backend envelope in `step.progress.recorded` | node, firing, attempt, scope | durable | `fabro_readiness_blackbox`, `embedding_readiness`; raw-log reads in `fabro_skills_blackbox` |
+| `agent.subagent.*` (C4): spawn, input, wait, close, child usage | the backend envelope in `step.progress.recorded` under the parent's session: `SubAgentSpawned {agent_id, depth, task}`, `SubAgentCompleted`, `SubAgentFailed`, `SubAgentClosed`; the child's own events under the child's session with `parent_session`; `step.finished` (`outcome.metrics.custom.pebble.subagents`) (counts and per-session usage) | parent session, child session, stream sequence | durable | `fabro_subagents_blackbox::a_parent_delegates_a_workspace_change_to_a_child` (usage rebuilt from events equals the metric), `fabro_readiness_blackbox`, `embedding_readiness` |
+| `agent.compaction.*` (C5): lifecycle and summary usage | Pebble's `CompactionStarted/Completed/Failed/Cancelled` in the backend envelope in `step.progress.recorded`; `step.progress.recorded` kind `fabro.compaction` (the summary call's usage and cost) once per compaction; `step.finished` (`outcome.metrics.custom.pebble.compaction_*`) | node, firing, attempt, session | durable | `petri-fabro-steps::compaction::public_events_account_for_the_compaction_and_later_activity`, `fabro_readiness_blackbox`, `embedding_readiness` |
+| `agent.*` error and warning | `step.finished` failure class; `step.progress.recorded` kinds `fabro.hook.warning` (an unenforceable ACP hook), `fabro.skills.warning`, `fabro.mcp.server {failed}` | node, firing, attempt | durable | `petri-fabro-steps::hooks::acp_tool_hooks_are_best_effort_with_explicit_warnings`, `fabro_mcp_blackbox` |
+| `watchdog.timeout` | `run.stalled {stall_timeout_ms, idle_ms}` beside `invocation.cancel.requested {reason: stall_timeout}` | invocation | durable (coordinator log) | `controls::an_idle_run_is_cancelled_by_the_watchdog` |
+| `subgraph.started/completed` | `invocation.declared` (`context.parent`), `invocation.finished`, `execution.*` with `parent` | invocation, parent execution, firing, attempt, call slot | durable | `petri-execution::inspect::a_nested_invocation_keeps_its_own_context_and_parent_link`, `petri-fabro-acceptance::workflow` |
+| local setup (`[run.prepare]`, `[run.clone]`) | the `run_prepare_N` stages' events; `step.progress.recorded` kind `fabro.checkout` (repository, commit, depth, files) on `start` | node, firing | durable | `embedding::the_milestone_workflow_runs_through_the_embedding_boundary`, `fabro_scenarios_blackbox` (checkout) |
+| hook decisions (workflow points) | a `hook` note (`step.progress.recorded`, `parsed.note.kind = hook`) with the `HookReport` (point, decision, each hook's state, duration and usage, fail-open warnings); a report that ran no hook is silent | node, firing, attempt | durable | `embedding::a_hook_service_runs_each_hook_once_at_its_point`, `petri-fabro-steps::hooks` |
+| hook-owned model requests, agent and tool activity, usage | `parsed.hook_activity {hook, backend, envelope}` per event of a hook's agent (a prompt hook has none), before the `hook` note whose `hooks[].usage` sums the hook's requests, tool calls, tokens, cost and timings; the same for a point a step asks itself, beside its `fabro.hook` event; the stage's own the backend envelope in `step.progress.recorded` and `pebble.usage` count the stage's agent alone | node, firing, attempt, hook operation (point, hook name), the hook agent's session | durable | `petri-fabro-steps::hooks::an_agent_hooks_activity_is_kept_apart_from_the_stages_own` (live and replay), `agent_hooks_investigate_the_workspace_then_decide`, `prompt_hooks_evaluate_with_one_model_call_and_fail_open`, `prompt_hook_usage_records_a_failed_and_a_timed_out_request`, `an_agent_hook_timeout_stops_its_tool_before_failing_open` |
+| hook decisions (points a step asks itself) | `step.progress.recorded` kind `fabro.hook` (`event` = `sandbox_ready`, `run_start` and `stage_start` on the root `start` stage; `parallel_start` on the fork node, `parallel_complete` on the fan-in; `pre_tool_use`, `post_tool_use`, `post_tool_use_failure` at the tool boundary; and the report), one per point that ran a hook, a child's under the parent stage | node, firing, attempt | durable | `fabro_readiness_blackbox`, `embedding_readiness` (counts per stage, two `block` decisions), `petri-fabro-steps::hooks::a_replacement_service_receives_every_step_driven_phase_once` |
+| run-level hooks (`run_complete`, `run_failed`, `sandbox_cleanup`) | `run.note.recorded` (`parsed.note.kind = hook`) from the coordinator log, with no subject and the execution named: one per run-level point that ran a hook (`point` is `run.finished` or `scope_released`), in the order the points ran, before `run.finished`; the run's own end is `run.finished` | execution | durable (coordinator log) | `fabro_milestone_blackbox` (`assert_run_level_notes`: the reports through `replay_run` and `petri inspect` on a succeeded, a failed and a cancelled run, beside the hooks' effects) |
+| local sandbox, retention, output references | `invocation.declared` (`sandbox`) (the binding), the reported workspace in `petri inspect`, `step.progress.recorded` (log lines and artifacts), `blob://sha256/…` references in outputs; the acquisition progress lines are terminal-only | invocation, scope | durable (the binding and outputs), live-only (progress lines) | `inspect_cli`, `petri-fabro-steps::steps::large_command_output_is_offloaded_and_reads_back_logically` |
+| budget pause and resume | `parsed.budget {state, attempt, remaining_ms, pending_questions}` on the driver's `budget_paused` and `budget_resumed` notes | node, firing, attempt | durable | `petri-driver::interview_budget::the_waiting_stage_pays_only_for_active_work` |
+| pause and unpause | `run.paused`, `run.unpaused` from the coordinator's `RunPaused` and `RunUnpaused` records | run | durable; a resume starts paused when the last control recorded is a pause | `controls::pause_holds_admission_and_unpause_releases_it`, `controls::a_pause_survives_resume_and_holds_admission_until_unpaused`, `fabro_resume_blackbox::a_paused_run_stays_paused_across_resume_until_unpaused` |
+| platform lifecycle, `checkpoint.*`, `git.*`, `pull_request.*`, product projections | not emitted; a host performs them in its `transition` and records a `transition` note | | | `embedding::adapters_run_in_order_and_checkpoint_work_follows_source_metadata` |
 
 Replay equality: `embedding_readiness::the_combined_workflow_runs_through_the_embedding_boundary`
 compares the live stream with `replay_run` event for event over a run that
@@ -354,7 +466,7 @@ backend payloads survive the round trip exactly because the workspace's
   a crash, and a store that cannot write stops the prompt. Compaction of
   the agent's context appears in that stream as Pebble's `CompactionStarted`,
   `CompactionCompleted`, `CompactionFailed` and `CompactionCancelled`. Those
-  events carry no usage, so the Fabro backend adds one `step_custom` per
+  events carry no usage, so the Fabro backend adds one custom payload per
   compaction with `kind = "fabro.compaction"` carrying the summary call's
   usage, which Pebble bills to the prompt that compacted; see
   `crates/fabro/FORMAT.md`, "Compaction".
@@ -362,9 +474,9 @@ backend payloads survive the round trip exactly because the workspace's
   the agent does not report are not observable.
 - Agent facts are Pebble's; Petri adds run, invocation, node and attempt
   attribution and does not restate them.
-- A backend envelope is a `step_custom` object with a string `kind` and an
+- A backend envelope is a custom payload with a string `kind` and an
   `event` **object**. A step's own payload may carry a string `event` (a
-  hook report names its hook event); it stays a `step_custom`.
+  hook report names its hook event); it is not a backend envelope.
 - A `for_each` child invocation's own stage carries no `branch_role` in its
   `meta`: the item index is known only at run time. The parent-side clone
   (`<template>#<index>`, a `parallel.branch` delegate) carries the member
@@ -372,7 +484,7 @@ backend payloads survive the round trip exactly because the workspace's
 - An empty `for_each` list expands to one clone of the IR's placeholder item
   (`{"$placeholder": true}`, `ir::placeholder::PLACEHOLDER_ITEM_KEY`), so the
   fan-in still fires. The clone is no branch: `BranchMap` gives its nodes no
-  role, `fork_started` and `fork_completed` carry zero branches, and no
-  `branch_completed` is emitted. Its `node_expanded` clone and its own
+  role, `fork.started` and `fork.completed` carry zero branches, and no
+  `branch.completed` is emitted. Its `node.expanded` clone and its own
   `visit_*` events (`<template>#0`, `synthetic: true` from the template) are
   the only trace of it.

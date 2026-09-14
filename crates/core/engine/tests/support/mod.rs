@@ -134,7 +134,9 @@ impl Harness {
 
     /// Start the run and pump until the core reports it finished.
     pub(crate) fn run(&mut self) -> RunStatus {
-        self.feed(Event::ExecutionStarted(engine::EngineStart::default()));
+        self.feed(Event::ExecutionStarted {
+            start: engine::EngineStart::default(),
+        });
         // Steps are held until the whole batch is issued, so `max_concurrent`
         // reflects what the core allowed to run at once, not the order the host
         // happened to reply in.
@@ -237,7 +239,7 @@ impl Harness {
         for command in commands {
             match &command {
                 Command::Admit { decision_id } => {
-                    let event = Event::Admitted {
+                    let event = Event::AdmissionDecided {
                         decision_id: *decision_id,
                         decision:    Admission::Admit,
                         trace:       Vec::new(),
@@ -276,7 +278,7 @@ impl Harness {
 
     /// Cancel a scope mid-run, then keep pumping.
     pub(crate) fn cancel(&mut self, scope: ir::CancelScopeId) {
-        self.feed(Event::CancelRequested { scope });
+        self.feed(Event::cancel_scope(scope));
     }
 
     /// Pull the `StartStep` commands issued so far, as `(firing, node name)`.

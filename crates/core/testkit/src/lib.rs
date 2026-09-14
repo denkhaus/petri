@@ -220,7 +220,7 @@ pub fn log_lines(report: &ExecutionReport) -> Vec<String> {
         .log
         .events()
         .filter_map(|e| match e {
-            engine::Event::StepProgress {
+            engine::Event::StepProgressRecorded {
                 ev: ir::StepEvent::Log { line, .. },
                 ..
             } => Some(line.clone()),
@@ -456,3 +456,40 @@ pub fn env(pairs: &[(&str, &str)]) -> BTreeMap<smol_str::SmolStr, ir::ExprOrValu
 }
 
 pub const RETAIN: Retention = Retention::Always;
+
+/// A backend's own event as a step records it in a custom progress
+/// payload: an object with a string `kind` naming the backend and an
+/// `event` object, the backend's envelope (for the native agent backend:
+/// Pebble's `CodingAgentEvent`, with `seq`, `stream_id`, `session_id`,
+/// `parent_session_id`, `tool_call_id`, `timestamp`, `event`). Petri
+/// forwards the payload as recorded and reads nothing into it; tests that
+/// want the envelope's identities read them here.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackendEvent {
+    pub backend:        String,
+    pub session:        Option<String>,
+    pub parent_session: Option<String>,
+    pub tool_call:      Option<String>,
+    pub stream:         Option<String>,
+    pub stream_seq:     Option<u64>,
+    pub envelope:       Value,
+}
+
+/// Read a backend's envelope out of a custom progress payload. A step's own
+/// payload may carry a string `event` (a hook report names its hook event);
+/// only an object is a backend envelope.
+pub fn backend_event(value: &Value) -> Option<BackendEvent> {
+    let object = value.as_object()?;
+    let backend = object.get("kind")?.as_str()?;
+    let envelope = object.get("event").filter(|event| event.is_object())?;
+    let text = |key: &str| envelope.get(key).and_then(Value::as_str).map(str::to_owned);
+    Some(BackendEvent {
+        backend:        backend.to_owned(),
+        session:        text("session_id"),
+        parent_session: text("parent_session_id"),
+        tool_call:      text("tool_call_id"),
+        stream:         text("stream_id"),
+        stream_seq:     envelope.get("seq").and_then(Value::as_u64),
+        envelope:       envelope.clone(),
+    })
+}

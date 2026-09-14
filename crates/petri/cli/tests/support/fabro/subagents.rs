@@ -6,8 +6,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use petri::execution::events::{EventBody, RunEvent, replay_run};
+use petri::engine::Event;
+use petri::execution::events::{Derived, RunEvent, replay_run};
 use serde_json::{Map, Value, json};
+use testkit::backend_event;
 
 /// A reply that spawns one child per task, then waits for all of them, in
 /// one turn. The parent then makes no request until every child finished,
@@ -94,8 +96,9 @@ impl Activity {
 pub(crate) fn activities(events: &[RunEvent]) -> Vec<Activity> {
     events
         .iter()
-        .filter_map(|event| match &event.body {
-            EventBody::AgentActivity(activity) if activity.backend == "pebble" => Some(Activity {
+        .filter_map(|event| {
+            let activity = event.custom().and_then(backend_event)?;
+            (activity.backend == "pebble").then(|| Activity {
                 node:           event
                     .subject
                     .as_ref()
@@ -106,8 +109,7 @@ pub(crate) fn activities(events: &[RunEvent]) -> Vec<Activity> {
                 stream:         activity.stream.clone(),
                 seq:            activity.stream_seq,
                 event:          activity.envelope["event"].clone(),
-            }),
-            _ => None,
+            })
         })
         .collect()
 }
@@ -125,10 +127,11 @@ pub(crate) fn node_metrics(events: &[RunEvent], node: &str) -> Value {
     events
         .iter()
         .rev()
-        .find_map(|event| match &event.body {
-            EventBody::AttemptFinished {
-                outcome, is_final, ..
-            } if *is_final && event.subject.as_ref().is_some_and(|s| s.node.name == node) => {
+        .find_map(|event| match (event.engine(), &event.derived) {
+            (
+                Some(Event::StepFinished { outcome, .. }),
+                Some(Derived::StepFinished { is_final: true, .. }),
+            ) if event.subject.as_ref().is_some_and(|s| s.node.name == node) => {
                 Some(json!(outcome.metrics.custom))
             }
             _ => None,
