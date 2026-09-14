@@ -18,20 +18,24 @@
 //! every native session, resumed ones included, installs it. Pebble still
 //! chooses the cut, validates the summary and records the outcome.
 //!
-//! Accounting: Pebble bills the summary call to the prompt that compacted, so
-//! its usage and cost are in the prompt report, and the report names each
-//! compaction with its counts and the summary call's usage
-//! (`PromptReport::compactions`). After each prompt, [`Accounting`] emits one
-//! [`EVENT`] per compaction with that usage and sums them into the
-//! `pebble.compaction_*` metrics, which are a breakdown of `pebble.usage`.
+//! Accounting: Pebble reports each compaction on its event stream as it
+//! happens, and `CompactionCompleted` carries the summary call's usage and
+//! cost. The node's sink folds the session's own `CompactionStarted` and
+//! `CompactionCompleted` through [`Accounting`] as they arrive: each
+//! completion is one [`EVENT`] on the spot, and the completions sum into the
+//! `pebble.compaction_*` metrics. Pebble bills the summary call to the prompt
+//! that compacted, so those metrics are a breakdown of `pebble.usage`. A
+//! failed or cancelled compaction is neither reported nor counted, as Pebble
+//! does not bill it. A child's compactions are its own: Pebble reports them
+//! under the child's session and the sub-agent ledger counts them.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use frontend_fabro::{DEFAULT_PRESERVE_TURNS, DEFAULT_THRESHOLD_PERCENT};
 use ir::{Attempt, FiringId, StepEvent, Value};
-use pebble_coding_agent::events::TokenUsage;
+use pebble_coding_agent::events::{CodingAgentEvent, CodingEvent, CompactionReason, TokenUsage};
 use pebble_coding_agent::extensions::CompactionPolicy;
-use pebble_coding_agent::{CodingAgentBuilder, CodingAgentOptions, PromptReport};
+use pebble_coding_agent::{CodingAgentBuilder, CodingAgentOptions};
 use serde::Deserialize;
 use serde_json::json;
 use smol_str::SmolStr;
@@ -63,14 +67,17 @@ impl Default for CompactionSettings {
 pub struct CompactionPolicyHandle(pub Arc<dyn CompactionPolicy>);
 
 /// The `kind` of the `StepEvent::Custom` payload emitted once per completed
-/// compaction, after the prompt it happened in settles: `{ kind, node,
-/// firing, attempt, session, reason, original_turn_count,
-/// preserved_turn_count, estimated_tokens_before, summary_token_estimate,
-/// tracked_file_count, summary_truncated, usage, cost_usd_micros }`.
-/// Pebble's own `CompactionStarted`, `CompactionCompleted`,
-/// `CompactionFailed` and `CompactionCancelled` events arrive live through
-/// the `pebble` envelope; this one adds the summary call's usage, which those
-/// do not carry.
+/// compaction of the node's own session, right after Pebble's
+/// `CompactionCompleted` is recorded: `{ kind, node, firing, attempt,
+/// session, reason, original_turn_count, preserved_turn_count,
+/// estimated_tokens_before, summary_token_estimate, tracked_file_count,
+/// usage, cost_usd_micros }`. `estimated_tokens_before` is the estimate the
+/// compaction's `CompactionStarted` reported (null when none preceded the
+/// completion); the rest is the completion's, with the summary call's
+/// `usage` and `cost_usd_micros`. Pebble's own `CompactionStarted`,
+/// `CompactionCompleted`, `CompactionFailed` and `CompactionCancelled`
+/// events arrive live through the `pebble` envelope; this one attributes the
+/// completion to the node and its attempt.
 pub const EVENT: &str = "fabro.compaction";
 
 /// Fabro's compaction settings as Pebble options.
@@ -95,49 +102,123 @@ pub fn install(
 
 /// Where a session's compaction events are attributed.
 pub struct Attribution {
-    pub sender:  ProgressSender,
     pub node:    SmolStr,
     pub firing:  FiringId,
     pub attempt: Attempt,
 }
 
-/// The compactions one node's session performed, as each prompt's report
-/// accounts them.
+/// The compactions one node's own session completed, folded from Pebble's
+/// stream as the events arrive. Shared between the node's sink, which folds,
+/// and the session, which reports the metrics.
 #[derive(Debug, Default)]
 pub struct Accounting {
-    count: u64,
-    usage: TokenUsage,
-    cost:  Option<u64>,
+    state: Mutex<State>,
+}
+
+#[derive(Debug, Default)]
+struct State {
+    /// The estimate the session's compaction in progress reported when it
+    /// started, until it ends.
+    started: Option<usize>,
+    count:   u64,
+    usage:   TokenUsage,
+    cost:    Option<u64>,
+}
+
+/// One completed compaction of the session, as [`EVENT`] reports it.
+#[derive(Debug, PartialEq, Eq)]
+struct Completed {
+    session:                 String,
+    reason:                  CompactionReason,
+    original_turn_count:     usize,
+    preserved_turn_count:    usize,
+    estimated_tokens_before: Option<usize>,
+    summary_token_estimate:  usize,
+    tracked_file_count:      usize,
+    usage:                   TokenUsage,
+    cost_usd_micros:         Option<u64>,
 }
 
 impl Accounting {
-    /// Report every compaction the prompt completed and add its usage.
-    pub async fn settle(&mut self, session: &str, report: &PromptReport, at: &Attribution) {
-        for compaction in &report.compactions {
-            self.count += 1;
-            self.usage = self.usage.saturating_add(compaction.usage);
-            if let Some(cost) = compaction.cost_usd_micros {
-                self.cost = Some(self.cost.unwrap_or(0).saturating_add(cost));
+    /// Fold `event`; when it completes one of the session's own compactions,
+    /// report that as [`EVENT`] through `sender`. A send that fails means
+    /// the driver stopped taking this attempt's progress, which the
+    /// attempt's own outcome reports.
+    pub async fn observe(
+        &self,
+        event: &CodingAgentEvent,
+        sender: &ProgressSender,
+        at: &Attribution,
+    ) {
+        let Some(completed) = self.fold(event) else {
+            return;
+        };
+        let _ = sender
+            .send(StepEvent::Custom(json!({
+                "kind": EVENT,
+                "node": at.node,
+                "firing": at.firing,
+                "attempt": at.attempt,
+                "session": completed.session,
+                "reason": completed.reason,
+                "original_turn_count": completed.original_turn_count,
+                "preserved_turn_count": completed.preserved_turn_count,
+                "estimated_tokens_before": completed.estimated_tokens_before,
+                "summary_token_estimate": completed.summary_token_estimate,
+                "tracked_file_count": completed.tracked_file_count,
+                "usage": completed.usage,
+                "cost_usd_micros": completed.cost_usd_micros,
+            })))
+            .await;
+    }
+
+    /// What `event` says about the session's own compactions: the estimate
+    /// a start reported is kept for the completion that follows it; a
+    /// completion is counted, its usage added, and returned; a failure or a
+    /// cancellation only ends the compaction in progress.
+    fn fold(&self, event: &CodingAgentEvent) -> Option<Completed> {
+        if event.parent_session_id.is_some() {
+            return None;
+        }
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        match &event.event {
+            CodingEvent::CompactionStarted {
+                estimated_tokens, ..
+            } => {
+                state.started = Some(*estimated_tokens);
+                None
             }
-            let _ = at
-                .sender
-                .send(StepEvent::Custom(json!({
-                    "kind": EVENT,
-                    "node": at.node,
-                    "firing": at.firing,
-                    "attempt": at.attempt,
-                    "session": session,
-                    "reason": compaction.reason,
-                    "original_turn_count": compaction.original_turn_count,
-                    "preserved_turn_count": compaction.preserved_turn_count,
-                    "estimated_tokens_before": compaction.estimated_tokens_before,
-                    "summary_token_estimate": compaction.summary_token_estimate,
-                    "tracked_file_count": compaction.tracked_file_count,
-                    "summary_truncated": compaction.summary_truncated,
-                    "usage": compaction.usage,
-                    "cost_usd_micros": compaction.cost_usd_micros,
-                })))
-                .await;
+            CodingEvent::CompactionCompleted {
+                original_turn_count,
+                preserved_turn_count,
+                summary_token_estimate,
+                tracked_file_count,
+                reason,
+                usage,
+                cost_usd_micros,
+            } => {
+                state.count += 1;
+                state.usage = state.usage.saturating_add(*usage);
+                if let Some(cost) = cost_usd_micros {
+                    state.cost = Some(state.cost.unwrap_or(0).saturating_add(*cost));
+                }
+                Some(Completed {
+                    session:                 event.session_id.clone(),
+                    reason:                  *reason,
+                    original_turn_count:     *original_turn_count,
+                    preserved_turn_count:    *preserved_turn_count,
+                    estimated_tokens_before: state.started.take(),
+                    summary_token_estimate:  *summary_token_estimate,
+                    tracked_file_count:      *tracked_file_count,
+                    usage:                   *usage,
+                    cost_usd_micros:         *cost_usd_micros,
+                })
+            }
+            CodingEvent::CompactionFailed { .. } | CodingEvent::CompactionCancelled { .. } => {
+                state.started = None;
+                None
+            }
+            _ => None,
         }
     }
 
@@ -145,16 +226,25 @@ impl Accounting {
     /// `pebble.compaction_cost_usd_micros`.
     #[must_use]
     pub fn metrics(&self) -> [(SmolStr, Value); 3] {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         [
-            ("pebble.compactions".into(), json!(self.count)),
-            ("pebble.compaction_usage".into(), json!(self.usage)),
-            ("pebble.compaction_cost_usd_micros".into(), json!(self.cost)),
+            ("pebble.compactions".into(), json!(state.count)),
+            ("pebble.compaction_usage".into(), json!(state.usage)),
+            (
+                "pebble.compaction_cost_usd_micros".into(),
+                json!(state.cost),
+            ),
         ]
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::SystemTime;
+
+    use pebble_coding_agent::events::{ErrorData, ErrorKind};
+    use steps::Progress;
+
     use super::*;
 
     #[test]
@@ -171,5 +261,156 @@ mod tests {
         assert_eq!(explicit.threshold_percent, 50);
         assert_eq!(explicit.preserve_turns, 6);
         assert!(serde_json::from_value::<CompactionSettings>(json!({"window": 1})).is_err());
+    }
+
+    fn usage(input: u64, output: u64) -> TokenUsage {
+        TokenUsage {
+            input,
+            output,
+            ..TokenUsage::default()
+        }
+    }
+
+    fn started(estimated_tokens: usize) -> CodingEvent {
+        CodingEvent::CompactionStarted {
+            estimated_tokens,
+            context_window_size: 200_000,
+            reason: CompactionReason::Threshold,
+        }
+    }
+
+    fn completed(usage: TokenUsage, cost_usd_micros: Option<u64>) -> CodingEvent {
+        CodingEvent::CompactionCompleted {
+            original_turn_count: 10,
+            preserved_turn_count: 7,
+            summary_token_estimate: 12,
+            tracked_file_count: 1,
+            reason: CompactionReason::Threshold,
+            usage,
+            cost_usd_micros,
+        }
+    }
+
+    fn root(event: CodingEvent) -> CodingAgentEvent {
+        CodingAgentEvent::new("root", event, SystemTime::UNIX_EPOCH)
+    }
+
+    fn child(event: CodingEvent) -> CodingAgentEvent {
+        let mut envelope = CodingAgentEvent::new("child", event, SystemTime::UNIX_EPOCH);
+        envelope.parent_session_id = Some("root".into());
+        envelope
+    }
+
+    #[test]
+    fn a_completion_is_reported_with_the_estimate_its_start_carried() {
+        let accounting = Accounting::default();
+        assert_eq!(accounting.fold(&root(started(160_001))), None);
+        let reported = accounting
+            .fold(&root(completed(usage(70, 7), Some(21))))
+            .expect("the completion");
+        assert_eq!(reported, Completed {
+            session:                 "root".into(),
+            reason:                  CompactionReason::Threshold,
+            original_turn_count:     10,
+            preserved_turn_count:    7,
+            estimated_tokens_before: Some(160_001),
+            summary_token_estimate:  12,
+            tracked_file_count:      1,
+            usage:                   usage(70, 7),
+            cost_usd_micros:         Some(21),
+        });
+        // A second compaction sums, and reads its own start.
+        assert_eq!(accounting.fold(&root(started(170_000))), None);
+        let second = accounting
+            .fold(&root(completed(usage(30, 3), None)))
+            .expect("the second completion");
+        assert_eq!(second.estimated_tokens_before, Some(170_000));
+        let metrics = accounting.metrics();
+        assert_eq!(metrics[0], ("pebble.compactions".into(), json!(2)));
+        assert_eq!(metrics[1].1["input"], 100);
+        assert_eq!(metrics[1].1["output"], 10);
+        assert_eq!(
+            metrics[2],
+            ("pebble.compaction_cost_usd_micros".into(), json!(21))
+        );
+    }
+
+    #[test]
+    fn a_failure_or_a_cancellation_ends_the_compaction_without_counting_it() {
+        let accounting = Accounting::default();
+        assert_eq!(accounting.fold(&root(started(160_001))), None);
+        assert_eq!(
+            accounting.fold(&root(CodingEvent::CompactionFailed {
+                reason:          CompactionReason::Threshold,
+                error:           ErrorData::new(ErrorKind::Compaction, "summary refused"),
+                usage:           Some(usage(70, 0)),
+                cost_usd_micros: Some(5),
+            })),
+            None
+        );
+        assert_eq!(accounting.fold(&root(started(160_002))), None);
+        assert_eq!(
+            accounting.fold(&root(CodingEvent::CompactionCancelled {
+                reason: CompactionReason::Threshold,
+            })),
+            None
+        );
+        // A completion that no start preceded reports no estimate.
+        let reported = accounting
+            .fold(&root(completed(usage(70, 7), None)))
+            .expect("the completion");
+        assert_eq!(reported.estimated_tokens_before, None);
+        let metrics = accounting.metrics();
+        assert_eq!(metrics[0].1, json!(1));
+        assert_eq!(metrics[1].1["input"], 70, "the failed call is not billed");
+        assert_eq!(metrics[2].1, Value::Null);
+    }
+
+    #[test]
+    fn a_childs_compaction_is_the_childs_own() {
+        let accounting = Accounting::default();
+        assert_eq!(accounting.fold(&child(started(160_001))), None);
+        assert_eq!(
+            accounting.fold(&child(completed(usage(70, 7), Some(21)))),
+            None
+        );
+        assert_eq!(accounting.metrics()[0].1, json!(0));
+    }
+
+    #[tokio::test]
+    async fn the_event_is_sent_as_the_completion_arrives() {
+        let (sender, mut progress) = ProgressSender::channel(4);
+        let at = Attribution {
+            node:    "a".into(),
+            firing:  FiringId::new(4),
+            attempt: Attempt::FIRST,
+        };
+        let accounting = Accounting::default();
+        accounting
+            .observe(&root(started(160_001)), &sender, &at)
+            .await;
+        assert!(
+            progress.try_recv().is_err(),
+            "a start alone reports nothing"
+        );
+        accounting
+            .observe(&root(completed(usage(70, 7), Some(21))), &sender, &at)
+            .await;
+        let Progress {
+            event: StepEvent::Custom(payload),
+            ..
+        } = progress.try_recv().expect("the completion is reported")
+        else {
+            panic!("a custom event");
+        };
+        assert_eq!(payload["kind"], EVENT);
+        assert_eq!(payload["node"], "a");
+        assert_eq!(payload["session"], "root");
+        assert_eq!(payload["reason"], "threshold");
+        assert_eq!(payload["estimated_tokens_before"], 160_001);
+        assert_eq!(payload["original_turn_count"], 10);
+        assert_eq!(payload["usage"]["input"], 70);
+        assert_eq!(payload["cost_usd_micros"], 21);
+        assert!(payload.get("summary_truncated").is_none());
     }
 }

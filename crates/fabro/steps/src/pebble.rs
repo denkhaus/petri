@@ -107,8 +107,8 @@ pub(crate) struct NativeSession {
     /// The node run's steering bus, with this session attached under the
     /// node's name: every delivered follow-up goes through it.
     steering:        SteeringBus<SmolStr>,
-    compaction:      compaction::Accounting,
-    attribution:     compaction::Attribution,
+    /// What the session's own compactions cost, folded by the sink.
+    compaction:      Arc<compaction::Accounting>,
     cancel:          CancellationToken,
     kill:            CancellationToken,
     _cancel_on_drop: DropGuard,
@@ -233,14 +233,16 @@ impl NativeSession {
         // Fabro's skill directories, in its order then the workflow's own;
         // Pebble discovers and reports, the sink attributes.
         let (skill_discovery, skill_labels) = skills::for_node(config, ctx);
+        let compaction_accounting = Arc::new(compaction::Accounting::default());
         let events = Arc::new(PetriEvents {
-            sender:  ctx.logs.clone(),
-            masker:  ctx.secrets.masker(),
-            firing:  ctx.firing,
-            attempt: ctx.attempt,
-            scope:   ctx.scope,
-            node:    ctx.node.clone(),
-            skills:  skill_labels,
+            sender:     ctx.logs.clone(),
+            masker:     ctx.secrets.masker(),
+            firing:     ctx.firing,
+            attempt:    ctx.attempt,
+            scope:      ctx.scope,
+            node:       ctx.node.clone(),
+            skills:     skill_labels,
+            compaction: compaction_accounting.clone(),
         });
         // The plan's remaining routes, for Pebble to fail over to in order,
         // each with its own controls; an export starts with none of its own.
@@ -354,15 +356,8 @@ impl NativeSession {
             }
         };
         questions.set_session(agent.snapshot().session_id());
-        let attribution = compaction::Attribution {
-            sender:  ctx.logs.clone(),
-            node:    ctx.node.clone(),
-            firing:  ctx.firing,
-            attempt: ctx.attempt,
-        };
         let mut session = Self {
-            compaction: compaction::Accounting::default(),
-            attribution,
+            compaction: compaction_accounting,
             agent,
             events,
             plan,
@@ -438,10 +433,6 @@ impl NativeSession {
             }
         };
         self.account(&report);
-        let session = self.agent.snapshot().session_id().to_string();
-        self.compaction
-            .settle(&session, &report, &self.attribution)
-            .await;
         if cancel.is_cancelled() {
             return Err(AgentError::Cancelled);
         }
@@ -588,19 +579,24 @@ impl Redactor for PetriRedactor {
 ///
 /// Beside the envelope, the sink emits Petri's own events only for what
 /// Pebble cannot know: the conventions behind the skill directories Pebble
-/// reports having searched, and a server never named to Pebble because its
-/// secret is unavailable ([`PetriEvents::unavailable`]). Two of Pebble's
-/// facts also go to the node's stderr, for the terminal: a fallback move and
-/// a server that did not start ([`stderr_line`]).
+/// reports having searched, a server never named to Pebble because its
+/// secret is unavailable ([`PetriEvents::unavailable`]), and the node and
+/// attempt a completed compaction of the session belongs to
+/// ([`compaction::EVENT`], folded from Pebble's `CompactionCompleted` as it
+/// is recorded). Two of Pebble's facts also go to the node's stderr, for
+/// the terminal: a fallback move and a server that did not start
+/// ([`stderr_line`]).
 struct PetriEvents {
-    sender:  ProgressSender,
-    masker:  Masker,
-    firing:  FiringId,
-    attempt: Attempt,
-    scope:   ScopeId,
-    node:    SmolStr,
+    sender:     ProgressSender,
+    masker:     Masker,
+    firing:     FiringId,
+    attempt:    Attempt,
+    scope:      ScopeId,
+    node:       SmolStr,
     /// What names the skill directories Pebble reports having searched.
-    skills:  skills::Labels,
+    skills:     skills::Labels,
+    /// The session's own compactions, folded as Pebble reports them.
+    compaction: Arc<compaction::Accounting>,
 }
 
 impl PetriEvents {
@@ -686,6 +682,14 @@ impl EventSink for PetriEvents {
         if !skipped.is_empty() {
             skills::report(&self.sender, &at, &skipped).await;
         }
+        // The session's own compaction, as it completes: the envelope above
+        // is Pebble's record of it, this is Petri's attribution.
+        let at = compaction::Attribution {
+            node:    self.node.clone(),
+            firing:  self.firing,
+            attempt: self.attempt,
+        };
+        self.compaction.observe(event, &self.sender, &at).await;
         Ok(())
     }
 }

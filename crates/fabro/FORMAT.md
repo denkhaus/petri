@@ -1117,16 +1117,21 @@ resumed) starts again at `summary:high`, as after any lost session.
 
 Pebble emits `CompactionStarted`, `CompactionCompleted`, `CompactionFailed`
 and `CompactionCancelled` through the `pebble` envelope, and a
-`context_window` warning at the threshold. Those events do not carry the
-summary call's usage, so after each prompt Petri reads the `Compaction` turns
-Pebble put in the history and emits, per compaction, a `StepEvent::Custom`
-with `kind = "fabro.compaction"`:
+`context_window` warning at the threshold. `CompactionCompleted` carries the
+summary call's usage and cost, so the node's sink folds the session's own
+compactions as they arrive and emits, right after each `CompactionCompleted`
+it records, a `StepEvent::Custom` with `kind = "fabro.compaction"`:
 `{ kind, node, firing, attempt, session, reason, original_turn_count,
 preserved_turn_count, estimated_tokens_before, summary_token_estimate,
-tracked_file_count, summary_truncated, usage, cost_usd_micros }`. The attempt
+tracked_file_count, usage, cost_usd_micros }`. `estimated_tokens_before` is
+the estimate the compaction's `CompactionStarted` reported (null when none
+preceded the completion); the rest is the completion's. The payload no longer
+carries `summary_truncated`: Pebble puts that on the history's `Compaction`
+turn and on no event. A failed or cancelled compaction is not reported, and a
+child's is reported under the child's session by Pebble alone. The attempt
 metrics `pebble.compactions`, `pebble.compaction_usage` and
-`pebble.compaction_cost_usd_micros` sum those. Pebble also bills the summary
-call to the prompt that compacted, so these three are a breakdown of
+`pebble.compaction_cost_usd_micros` sum the completions. Pebble also bills the
+summary call to the prompt that compacted, so these three are a breakdown of
 `pebble.usage` and `pebble.cost_usd_micros`, not an addition to them.
 
 ## Refused

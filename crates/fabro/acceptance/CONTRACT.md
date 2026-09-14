@@ -445,10 +445,10 @@ shows a child crossing the trigger, its own summary call, Pebble's
 `CompactionStarted`/`CompactionCompleted` on the shared stream under the
 child's session naming the parent, and the stage's `pebble.subagents.sessions`
 entry counting the compaction. A child's compaction produces no
-`fabro.compaction` event and no `pebble.compaction_usage`: that event is read
-from the parent agent's own history. Pebble bills the child's summary call to
-the child's own prompt, so the ledger's `pebble.subagents.sessions` usage
-carries it.
+`fabro.compaction` event and no `pebble.compaction_usage`: the sink folds
+those from the parent session's own events. Pebble bills the child's summary
+call to the child's own prompt, so the ledger's `pebble.subagents.sessions`
+usage carries it.
 
 MCP (C2) landed: the servers are Pebble's tool sources
 (`CodingAgentBuilder::mcp_servers`, `pebble.rs`), so their tools live in the

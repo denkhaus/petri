@@ -809,11 +809,22 @@ async fn public_events_account_for_the_compaction_and_later_activity() {
             _ => None,
         })
         .expect("fabro.compaction");
+    // Emitted as the compaction completed: after Pebble's record of it and
+    // before the session's later activity.
     assert!(usage_event.0 > completed.0);
+    assert!(
+        usage_event.0 < later_tool.0,
+        "{usage_event:?} {later_tool:?}"
+    );
     assert_eq!(usage_event.1["node"], "a");
     assert_eq!(usage_event.1["session"], json!(session));
     assert_eq!(usage_event.1["usage"]["input"], 70);
     assert_eq!(usage_event.1["reason"], "threshold");
+    assert_eq!(
+        usage_event.1["estimated_tokens_before"],
+        json!(THRESHOLD + 5)
+    );
+    assert!(usage_event.1.get("summary_truncated").is_none());
     // The attempt's metrics carry the totals.
     let finished_a = events
         .iter()
