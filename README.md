@@ -5,12 +5,13 @@ explicit routing, plus the pure state machine that executes it.
 
 ```
 crates/core/ir         the vocabulary: graph, ids, expressions, values, validation
+crates/core/store      the run store seam: logs and blobs by key; the run directory and in-memory backends
 crates/core/engine     the sans-IO state machine: apply(state, event) -> (state, commands)
 crates/core/executor   the environment interface; executor-sandbox implements it
 crates/core/executor-sandbox  scopes and leases over Host, Docker, and Daytona plugins
 crates/core/steps      step kinds and the one registry; frontends depend on names, not on this
 crates/core/driver     the IO loop between the pure core and real processes
-crates/core/execution  run, invocation, and execution coordination; durable local store
+crates/core/execution  run, invocation, and execution coordination over the store seam
 crates/core/frontend   what every format shares; frontend-native is core's own format
 crates/core/runtime    core assembled: the `Runtime` builder components register onto
 crates/core/cli        the command line, format-agnostic; the shipped binary hands it a runtime
@@ -68,7 +69,7 @@ let (state, commands) = apply(state, Event::ExecutionStarted(EngineStart::defaul
 | exec §5 environments | `executor::scope` (the interface), `executor_sandbox::{HostExecutor, SandboxExecutor, RoutingExecutor}` |
 | exec §6 secrets | `executor::secrets`, `driver::LogSink` |
 | execution hierarchy | `execution::{Coordinator, InvocationId, ExecutionId, InvocationClient}` |
-| standalone persistence | `execution::{CoordinatorStore, ResourceStore}`, one engine log per execution |
+| standalone persistence | `store::{RunStore, RunLogs}` behind `execution::{CoordinatorStore, ResourceStore, StoreWriter}`; `store::RunDirStore` is the run directory, one engine log per execution |
 | §5a cancel scopes | `engine::state::CancelScope`, `apply::on_cancel`, `apply::on_kill` |
 | §6 HIR → plan lowering | `engine::context::resolve_config`, `apply::expand` |
 | §6 splice semantics | `engine::event::SubgraphSplice`, `apply::on_node_expanded` |
@@ -1222,8 +1223,9 @@ no platform vocabulary in them:
   grows memory; what finds the queue full, or follows a failed or stalled
   sink, is counted in the `ProjectionReceipt` and stays in the durable log.
   `replay_run` rebuilds the same events, with the same identities, from a
-  run dir after the fact, and `EventProjector::primed`
-  attaches at resume. Every event names its run, invocation, execution,
+  run's store after the fact (`replay_run_dir` over a run directory),
+  `replay_since` hands back the events past held positions, and
+  `EventProjector::primed` attaches at resume. Every event names its run, invocation, execution,
   node (with the frontend's `meta`), firing, visit, attempt and branch role.
   One vocabulary for records and events: every event is named after its
   record and carries the stored log line unchanged under `record`, with what
@@ -1256,24 +1258,32 @@ reconstructed from public events alone.
 
 ## Local run layout
 
-The standalone host stores one root run as `Run → Invocation → Execution → Firing`.
-`coordinator.jsonl` records graph registrations, invocation calls, execution
-successors, and final results. Each execution keeps an independent engine log. `petri inspect` reads this layout back.
+The standalone host stores one root run as `Run → Invocation → Execution → Firing`
+through the store seam (`crates/core/store`): every durable thing is a log of
+records or a content-addressed blob, and a backend stores what it is given. The
+run directory is the `RunDirStore` layout of that store. `coordinator.jsonl`
+records graph registrations, invocation calls, execution successors, and final
+results; `resources.jsonl` records every sandbox lease transition; each execution
+keeps an independent engine log. `petri inspect` reads this layout back.
 
 ```text
 <run-dir>/
-  run.json
+  run.json                 the run's key, and the file the writer lease locks
   coordinator.jsonl
+  resources.jsonl
   graphs/<sha256>.json
-  resources/
-  invocations/<invocation-id>/
-    invocation.json
-    executions/<execution-id>/events.jsonl
+  executions/<execution-id>/events.jsonl
 ```
 
+A line is the record's JSON value, `{seq, origin, recorded_at, body}`, the same
+value a public event carries under `record`; there is no header line, and the
+engine log version is pinned by the run format version on the run declaration.
 A restart creates a successor execution in the same invocation. It starts at the
 selected target with empty context and carried firing budgets. Nested workflow calls
-create invocations, not separately managed runs. The coordinator holds an exclusive
-lease on `run.json` while it creates or resumes the run. `petri resume --run-dir`
-continues the run from this layout alone; `RunPaused` and `RunUnpaused` records in
-`coordinator.jsonl` make a pause durable across it.
+create invocations, not separately managed runs. The coordinator holds the run's
+exclusive writer lease (a lock on `run.json`) while it creates or resumes the run;
+a reader takes no lease. A host with a store of its own installs it with
+`Runtime::store` and keeps the run directory for what is a file by nature
+(workspaces, step output). `petri resume --run-dir` continues the run from this
+layout alone; `RunPaused` and `RunUnpaused` records in `coordinator.jsonl` make a
+pause durable across it.
