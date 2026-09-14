@@ -491,3 +491,138 @@ impl PortRoutes for ScopePortRoutes {
 fn route_error(step: &'static str, error: EnvError) -> PortRouteError {
     PortRouteError::failed_with_source(step, error)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::error::Error as _;
+
+    use executor::PreviewUrl;
+
+    use super::*;
+
+    /// What the environment says when it refuses a route.
+    const REFUSAL: &str = "the forward could not be opened";
+
+    /// An environment whose only answers are about its ports: it runs
+    /// nothing and holds no files.
+    enum Ports {
+        /// Routes every port to a loopback URL with one header.
+        Routed,
+        /// Offers no route to its ports.
+        Unrouted,
+        /// Refuses to open or release a route.
+        Refusing,
+    }
+
+    #[async_trait]
+    impl ExecEnv for Ports {
+        async fn spawn(&self, _spec: ProcessSpec) -> Result<Box<dyn ProcessHandle>, EnvError> {
+            Err(EnvError::backend("test", "spawn", "runs nothing"))
+        }
+
+        fn workspace_path(&self) -> &'static str {
+            "/work"
+        }
+
+        async fn read_file(&self, _relative: &Path) -> Result<Option<Vec<u8>>, EnvError> {
+            Ok(None)
+        }
+
+        async fn write_file(&self, _relative: &Path, _contents: &[u8]) -> Result<(), EnvError> {
+            Ok(())
+        }
+
+        fn grace(&self) -> Duration {
+            Duration::from_millis(10)
+        }
+
+        async fn preview_url(&self, port: u16) -> Result<Option<PreviewUrl>, EnvError> {
+            match self {
+                Self::Routed => Ok(Some(PreviewUrl {
+                    url:     format!("http://127.0.0.1:{port}"),
+                    headers: BTreeMap::from([("X-Token".to_owned(), "t".to_owned())]),
+                })),
+                Self::Unrouted => Ok(None),
+                Self::Refusing => Err(EnvError::backend("test", "preview_url", REFUSAL)),
+            }
+        }
+
+        async fn release_preview_url(&self, _port: u16) -> Result<(), EnvError> {
+            match self {
+                Self::Routed | Self::Unrouted => Ok(()),
+                Self::Refusing => Err(EnvError::backend("test", "release_preview_url", REFUSAL)),
+            }
+        }
+    }
+
+    fn routes(env: Ports) -> ScopePortRoutes {
+        ScopePortRoutes::new(Arc::new(env))
+    }
+
+    #[tokio::test]
+    async fn a_routed_port_is_the_environments_url_and_headers() {
+        let route = routes(Ports::Routed).route(8080).await.expect("routed");
+        assert_eq!(route.url, "http://127.0.0.1:8080");
+        assert_eq!(
+            route.headers,
+            BTreeMap::from([("X-Token".to_owned(), "t".to_owned())])
+        );
+    }
+
+    #[tokio::test]
+    async fn an_environment_without_a_route_reports_unsupported() {
+        let error = routes(Ports::Unrouted)
+            .route(8080)
+            .await
+            .expect_err("no route");
+        assert!(matches!(error, PortRouteError::Unsupported), "{error:?}");
+        assert_eq!(
+            error.detail(),
+            "the environment does not route to its ports"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_route_fails_with_the_refusal_as_its_cause() {
+        let error = routes(Ports::Refusing)
+            .route(8080)
+            .await
+            .expect_err("refused");
+        assert!(matches!(error, PortRouteError::Failed { .. }), "{error:?}");
+        assert_eq!(error.to_string(), "opening the route");
+        let cause = error.source().expect("the refusal is the cause");
+        assert_eq!(
+            cause.to_string(),
+            format!("test preview_url failed: {REFUSAL}")
+        );
+        // The one-line reason Pebble reports names the step, then the
+        // refusal once.
+        let detail = error.detail();
+        assert_eq!(
+            detail,
+            format!("opening the route: test preview_url failed: {REFUSAL}")
+        );
+        assert_eq!(detail.matches(REFUSAL).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_release_succeeds_or_fails_as_the_environment_says() {
+        routes(Ports::Routed).release(8080).await.expect("released");
+        routes(Ports::Unrouted)
+            .release(8080)
+            .await
+            .expect("nothing to release");
+        let error = routes(Ports::Refusing)
+            .release(8080)
+            .await
+            .expect_err("refused");
+        assert!(matches!(error, PortRouteError::Failed { .. }), "{error:?}");
+        let detail = error.detail();
+        assert_eq!(
+            detail,
+            format!("releasing the route: test release_preview_url failed: {REFUSAL}")
+        );
+        assert_eq!(detail.matches(REFUSAL).count(), 1);
+    }
+}
