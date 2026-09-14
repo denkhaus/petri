@@ -117,9 +117,10 @@ The two run-level end points carry no firing, so the driver records nothing
 for them itself: `ExecutionHooks::run_finished` and `scope_released` return
 the adapter's `hook` notes, the driver hands them to its host in
 `ExecutionReport::run_notes` (masked, `run_finished` first, then each
-release), and the coordinator appends one `CoordinatorEvent::RunNote` per
-note before it records `RunFinished`. `replay_run` derives them as
-`host_note {kind: "hook"}` with no subject and the execution named, and
+release), and the coordinator appends one `run.note.recorded` per
+note before it records `run.finished`. `replay_run` carries them as
+`run.note.recorded` events (`parsed.note.kind = hook`) with no subject and the
+execution named, and
 `petri inspect` lists them under `notes`. The record is additive to
 coordinator format version 2: a log without it replays as before. A
 `sandbox_cleanup` report of an environment released after the run's finish
@@ -132,8 +133,8 @@ and return the inner notes, or the run-level hooks never run or never record.
 ## Recording
 
 Every non-silent report is recorded as a `hook` note on the firing, so it is in
-the engine log, replayed, and visible as `host_note { kind: "hook" }` in the
-public event stream. The note carries the point, the decision, each hook's
+the engine log, replayed, and visible in the public event stream as a
+`step.progress.recorded` whose `parsed.note.kind` is `hook`. The note carries the point, the decision, each hook's
 name, state, duration, message and usage, and the fail-open warnings.
 Executed hooks and hooks that could not run are told apart by
 `HookRun::state`.
@@ -145,8 +146,8 @@ identity, never as the stage's: `HookReport::notes` yields one
 backend, envelope }`), then the `hook` note; the adapter records them at the
 driver's points, and a step that asks a point itself records the same
 activity notes before its `fabro.hook` event (`fabro_steps::hooks::record_report`).
-The projector derives a `hook_activity` event from each note, apart from the
-stage's own `agent_activity`, so a consumer summing a stage's agent activity
+The projector reads each note as `parsed.hook_activity`, apart from the
+stage's own backend events, so a consumer summing a stage's agent activity
 or its `pebble.usage` never counts a hook's work, and `HookRun::usage` sums
 the hook's requests, tool calls, tokens, cost and timings (a prompt hook's
 one request; an agent hook's turns, from the prompt's report, including an

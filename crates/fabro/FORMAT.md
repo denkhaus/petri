@@ -354,7 +354,7 @@ envelope's `status`, a `disposition` of `completed`, `cancelled`, `killed` or
 `failed_to_start`, and whether the child ever `started`); the fan-in reports
 `fabro.parallel.completed` when it runs. All three carry the occurrence and
 are `StepEvent::Custom`; `crates/core/execution/EVENTS.md` ("Fork closure")
-maps them to Fabro's `parallel.*` events beside the typed `fork_completed`
+maps them to Fabro's `parallel.*` events beside the typed `fork.completed`
 that closes a cancelled or killed fork.
 
 Every Fabro run has a hard ceiling of 10,000 invocations, root and all
@@ -468,7 +468,7 @@ the coordinator registers `fabro_steps::workflow::ChildInvoker`.
   and keeps its question open.
   - `timeout` is the answer deadline. An unanswered question expires in the
     step, which reports the expiry on its progress channel first
-    (`question_expired` in the public stream, `timed_out` with the default
+    (`parsed.expired` on the `step.progress.recorded` event, `timed_out` with the default
     taken in the interview receipt, as Fabro emits `InterviewTimeout`): with
     `human.default_choice="<target or key>"` the gate takes that choice and
     records `timeout` as the answer; without one it fails with Fabro's retry
@@ -646,8 +646,9 @@ through the same event pipeline as every other step output, so Petri's
 secret masking applies to it. What a prompt or agent hook spent is on its
 record (`usage` on the hook's entry of the `hook` note or `fabro.hook`
 event: requests, tool calls, tokens, cost, timings), and every event an
-agent hook's agent produced is recorded under the hook's identity as
-`hook_activity`, apart from the stage's own agent activity and usage
+agent hook's agent produced is recorded under the hook's identity as a
+`hook.activity` note (`parsed.hook_activity` in the public stream), apart
+from the stage's own agent activity and usage
 (`crates/core/execution/HOOKS.md`, "Recording").
 
 What a decision does: `stage_start` `skip` skips the node, `block` fails it
@@ -655,7 +656,7 @@ with class `hook_blocked`; `edge_selected` `override` routes to `edge_to`
 when it names an edge out of the node, `block` fails the transition;
 `pre_tool_use` `block` denies the tool call (the tool never runs and the
 model sees the reason); every other event's decision is recorded and
-ignored. Per-firing reports are `host_note { kind: "hook" }` on the firing
+ignored. Per-firing reports are `hook` notes on the firing
 (point, decision, each hook's name, state, duration, message, and fail-open
 warnings). Tool and run-level reports are `StepEvent::Custom` with
 `kind = "fabro.hook"` (`node`, `firing`, `attempt`, `event`, `report`), and
@@ -756,8 +757,8 @@ assistant messages and `sessions` maps each child session to `{ parent,
 usage, cost_usd_micros, messages, compactions }` (a child compacts under the
 parent's settings; its `CompactionStarted`/`CompactionCompleted` events carry
 the child's session, and `compactions` counts them). A public consumer reconstructs the same
-totals from the `agent_activity` events (`AssistantMessage` payloads of
-sessions with a parent).
+totals from the backend envelopes in `step.progress.recorded`
+(`AssistantMessage` payloads of sessions with a parent).
 
 `Control::Deliver` accepts a string or `{ "text": "..." }` and queues a
 follow-up: a new user turn once the current answer is reached. Deliveries
@@ -891,7 +892,8 @@ know: `fabro.fallback.plan`, once per stage that builds a plan (`node`,
 `firing`, `attempt`, `requested`, `routes[]` with `position`, `provider`,
 `model`, `reasoning_effort`, `speed`, and `notices[]` with `code`, `level`,
 `message`); a node that reuses a retained thread emits none. Every route fact
-is Pebble's own event, recorded as `agent_activity` under the node:
+is Pebble's own event, recorded as a `step.progress.recorded` payload under
+the node:
 `SessionStarted` (`provider`, `model`) for the route each session starts on,
 the primary and then each route a failover moved to; `RouteFailover` (`from`
 and `to` as `provider/model`, `attempt`, the failed route's `usage`,
@@ -993,7 +995,8 @@ masker applies to every event. Sub-agents: Pebble registers MCP tools as
 inheritable by child sessions (readiness item 9d verifies that against the
 reference). ACP agents receive no MCP servers (Fabro passes none either).
 
-Events. Pebble's own events, recorded as `agent_activity` under the node,
+Events. Pebble's own events, recorded as `step.progress.recorded` payloads
+under the node,
 are the record of the servers and their calls: `McpServerReady` (`server`,
 `tools` as `[{ name, original_name }]`, `startup_ms`: launch to tools
 listed) or `McpServerFailed` (`server`, `error`, `startup_ms`) once per

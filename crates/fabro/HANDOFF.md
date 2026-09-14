@@ -29,7 +29,7 @@ subset; the unconfigured path stays the standalone runner.
 | The local hook system, or a replacement | `execution::hooks::HookService` behind `HookAdapter` and the `HookServiceHandle` capability; the standalone service is `fabro_steps::hooks::LocalHooks`. Every point, the ones steps ask themselves included (`ScopeReady`, `RunStarted`, the start stage's admission, `ForkStarted`, `ForkCompleted`, the tool boundary of both agent backends), reaches the one service through that handle, so a replacement receives each exactly once (`embedding::a_hook_service_runs_each_hook_once_at_its_point`). A host that installs its own `ExecutionHooks` and still wants `[[run.hooks]]` calls `register` first and wraps `Runtime::installed_hooks()`, forwarding every point, `run_finished` and `scope_released` included (the `EmbeddingHost` in `embedding_readiness.rs` is the pattern) | `crates/core/execution/HOOKS.md` |
 | Questions and answers | `execution::interview::{Interviewer, InterviewDispatcher}`; `InterviewRequest` carries the interaction identity (node, firing, occurrence, invocation path), the question type and choices; `InterviewReply::Answered(Answer)`, expiry, cancellation | `crates/core/execution/src/interview.rs` |
 | Pause, unpause, steer, cancel | `execution::controls` (the control service; `petri run --control <FILE>` is the terminal transport), `RunHandle` for cancel and kill | `crates/core/execution/src/controls.rs` |
-| The public event stream | `execution::events::{EventProjector, RunEventSink, replay_run}`; `EVENT_CONTRACT_VERSION`. The stream is lossless for replay: `execution::events::invert` rebuilds the coordinator log and every execution's external engine records from the events, and `verify_lossless` proves it over a run dir | `crates/core/execution/EVENTS.md` ("Inversion") |
+| The public event stream | `execution::events::{EventProjector, RunEventSink, replay_run}`; `EVENT_CONTRACT_VERSION`. A public event carries its record unchanged under `record`, plus what Petri derived under `derived`; `execution::events::verify_export` proves the records equal the stored logs and replay, at the end of every run | `crates/core/execution/EVENTS.md` ("Inversion") |
 | Durable inspection of a run directory | `execution::inspect::inspect_run` (`petri inspect --run-dir --json`), `INSPECT_FORMAT_VERSION` | `crates/core/execution/INSPECT.md` |
 | Output references and large values | the `OutputStore` capability (`BlobStore`); the default is a local store under `<run_dir>/blobs` writing `blob://sha256/<hex>` | `crates/fabro/steps/src/blobs.rs` |
 | Secrets | the `SecretProvider` capability; the standalone runner reads `PETRI_SECRET_<NAME>`; records are masked before they are appended | `crates/core/executor/src/secrets.rs` |
@@ -58,8 +58,8 @@ subset; the unconfigured path stays the standalone runner.
 - **Branches.** `BranchRole` (`none`, `fork {branches}`, `member {fork,
   index}`, `join {fork}`) on every subject of a fan-out, static or
   `for_each`: the parallel node is the fork, each branch node or clone a
-  member of its index, the fan-in the join. `fork_started`,
-  `branch_completed` and `fork_completed` carry the same `BranchRef {fork,
+  member of its index, the fan-in the join. `fork.started`,
+  `branch.completed` and `fork.completed` carry the same `BranchRef {fork,
   index}` for both and one `ForkOccurrence {execution, fork, firing, visit,
   generation}` per fork visit; the `fabro.parallel.*` payloads carry the
   index and the same occurrence (`{fork, firing}`), and a branch child's call
@@ -67,41 +67,43 @@ subset; the unconfigured path stays the standalone runner.
   branch fact on the occurrence, never on the fork it saw last.
 - **Interactions.** A question's identity is the node, the firing, its
   occurrence within the run, and the invocation path; `InterviewRequest` and
-  `question_asked` carry it, `control_delivered {Answer}` closes it with an
-  answer, `question_expired` closes it when the gate's own deadline passes
+  the `step.progress.recorded` whose `parsed.question` is the question
+  carry it, `control.requested` with a `derived.answer` closes it with an
+  answer, a `parsed.expired` closes it when the gate's own deadline passes
   (with the default the gate took, when it had one), and the interview
   receipt (`<run_dir>/interviews.json`) keeps every question and its
   disposition (`answered`, `cancelled`, `failed`, `timed_out`).
 - **Agent sessions.** Pebble's session id, parent session id, stream id and
-  sequence, and tool call id are read out of every `agent_activity` envelope
-  and never rewritten. A retained thread keeps one session across the nodes
+  sequence, and tool call id are in every backend envelope a
+  `step.progress.recorded` forwards as recorded, never rewritten. A retained thread keeps one session across the nodes
   that share it; `fabro.thread` names the thread and fidelity per node.
 - **Model routes.** `fabro.fallback.route` carries the position in the plan,
   the provider and model, whether the session was reused, and the session id.
-- **Sandboxes and workspaces.** `invocation_declared.sandbox` is the binding;
+- **Sandboxes and workspaces.** `invocation.declared`'s `sandbox` is the binding;
   `petri inspect` reports every scope's workspace and the retrieval command
   for a container; the workspace survives success, failure and cancellation
   under `--retain always` (the Fabro default).
 
 ## Event positions
 
-`EventId {source, seq, index}` is the position: the log the record came from
-(`coordinator`, or `execution: <id>`), the record's sequence in that log, and
-the ordinal among the events one record produced. Within one source the order
-is total and causal (admission before start, start before finish, the final
-finish before `visit_completed`, `visit_completed` before `routes_resolved`,
-`routes_resolved` before `route_applied`, notes before the record they
-annotate). Across executions the `parent` link and
-`execution_declared.predecessor` tie the streams together. A host records
-the last `EventId` it has applied per source; on resume the driver
+`EventId {log, seq, index}` is the position: the log the record came from
+(`coordinator`, or `execution` with the id), the record's sequence in that
+log, and the ordinal among the events one record produced (`0` is the
+record's own event, which carries the stored line under `record`). Within one
+log the order is total and causal (admission before start, start before
+finish, the final finish before `visit.completed`, `visit.completed` before
+`routing.resolved`, `routing.resolved` before `route.applied`, notes before
+the record they annotate). Across executions `context.parent` and
+`execution.declared`'s `predecessor` tie the streams together. A host records
+the last `EventId` it has applied per log; on resume the driver
 redelivers the regenerated suffix with the same identities, at least once,
 and the host deduplicates by `EventId`. `replay_run` over the run directory
 yields the same stream, event for event, floats included; `recorded_at` —
 when each record was appended, read at the recording boundary and persisted
 with it — is the same live and on replay, so run, stage, attempt and
 interview times come from the logs, never from the time of a replay.
-`observed_at` is the one live-only field. `run_paused` and `run_unpaused`
-are the two live-only notices.
+`observed_at` is the one live-only field. `run.paused` and `run.unpaused`
+are coordinator records like any other, so replay carries them.
 
 ## Lifecycle acknowledgements
 
@@ -109,7 +111,7 @@ Every extension point is awaited at Petri's durability boundary, so a host's
 acknowledgement gates the next step of the run:
 
 - `before_attempt` runs before an attempt is dispatched; its decision and
-  notes are recorded (`attempt_admitted`, `host_note`) before the attempt
+  notes are recorded (`admission.decided`, a note in `step.progress.recorded`) before the attempt
   starts. Holding it pauses admission (the control service's pause is built
   on it).
 - `prepare_result` runs after an attempt returned and before its record is
@@ -117,7 +119,7 @@ acknowledgement gates the next step of the run:
   stage's failure policy, exhaustion included, has already run, so the
   final attempt (`will_retry == false`) is the completion to prepare, and
   routing follows the record it produces. An adjustment keeps the original
-  evidence beside the effective record (`host_note {kind: result_prepared}`).
+  evidence beside the effective record (a `result_prepared` note).
 - `after_record` runs after the final outcome is recorded and before routing
   is resolved; its notes precede the routing record.
 - `transition` runs after routes are selected and before they are recorded
@@ -151,10 +153,10 @@ acknowledgement gates the next step of the run:
 
 | Version | Where | Rule |
 |---|---|---|
-| `EVENT_CONTRACT_VERSION` (2) | `execution::events` | additive within a version; a host checks it before projecting. Version 2 added the fields that make the stream invert to the records replay consumes, and the `graph_registered` event |
-| `INSPECT_FORMAT_VERSION` (1) | `execution::inspect` | the `petri inspect` document's field contract |
-| the run-directory format (`run.json`) and the coordinator record version (3, with `recorded_at` on every record) | `execution::store` | a run written by a newer or older format is refused, never migrated |
-| the engine log version (`Log` records, v9, with `recorded_at` beside every persisted record) | `engine::log` | a log whose version the runner does not speak is refused; replay must reproduce the log byte for byte or inspection reports corruption |
+| `EVENT_CONTRACT_VERSION` (3) | `execution::events` | additive within a version; a host checks it before projecting. Version 3 names every event after its record, carries the stored line under `record` and the derived values under `derived`; the version 2 presentation names are gone |
+| `INSPECT_FORMAT_VERSION` (2) | `execution::inspect` | the `petri inspect` document's field contract; version 2 spells the enums it carries from records with snake-case tags |
+| the run-directory format (`run.json`) and the coordinator record version (4: `{seq, origin, recorded_at, body}` lines, `body` tagged by `event` with `<subject>.<verb>` names) | `execution::store` | a run written by a newer or older format is refused, never migrated |
+| the engine log version (v10: `{seq, origin, recorded_at, body}` lines, `body` tagged by `event` with `<subject>.<verb>` names) | `engine::log` | a log whose version the runner does not speak is refused; replay must reproduce the log byte for byte or inspection reports corruption |
 | `inspect_format_version`, `event_contract_version` | in the documents themselves | |
 | Library pins (Pebble, lithos-llm, sandbox-driver, twins, the Fabro reference, the runner image) | `CONTRACT.md` "Pinned revisions", `scripts/check-pins.py` | moved together with the manifests and the evidence records |
 
