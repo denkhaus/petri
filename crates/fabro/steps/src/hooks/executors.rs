@@ -35,7 +35,7 @@ use frontend_fabro::hooks::{
 };
 use lithos_llm::types::{Message, Request, ResponseFormat, Role};
 use pebble_coding_agent::events::{
-    CodingAgentEvent, CodingEvent, EventSink, EventSinkError, PermissionLevel, TokenUsage,
+    CodingAgentEvent, CodingEvent, EventSink, EventSinkError, PermissionLevel,
 };
 use pebble_coding_agent::{
     CodingAgent, CodingAgentOptions, Error as AgentError, PromptReport, ShutdownReason,
@@ -475,8 +475,7 @@ async fn prompt_hook(
     };
     let outcome = match timeout(hook.timeout(), client.0.complete(request)).await {
         Ok(Ok(response)) => {
-            usage.tokens = Some(json!(TokenUsage::from(response.usage)));
-            usage.cost_usd_micros = response.cost.as_ref().map(|cost| cost.usd_micros);
+            usage.usage = Some(json!(response.usage_with_cost()));
             match verdict(&response.text()) {
                 Some(decision) => Executed::Decided(decision),
                 None => Executed::FailedOpen("the model did not return a hook verdict".into()),
@@ -610,8 +609,7 @@ impl HookEvents {
 /// Add a settled prompt's accounting to the hook's usage.
 fn account(usage: &mut HookUsage, report: &PromptReport) {
     let ms = |duration: Duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
-    usage.tokens = Some(json!(report.usage));
-    usage.cost_usd_micros = report.cost_usd_micros;
+    usage.usage = Some(json!(report.usage));
     usage.inference_ms = Some(ms(report.timing.inference));
     usage.tool_ms = Some(ms(report.timing.tool));
 }

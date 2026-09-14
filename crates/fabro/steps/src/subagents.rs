@@ -34,10 +34,11 @@ use pebble_coding_agent::subagents::{SubagentLimits, SubagentOptions};
 use serde_json::{Value, json};
 
 /// The per-stage metric under `Metrics::custom`: `{ spawned, turns_started,
-/// completed, failed, closed, usage, cost_usd_micros, sessions }`, where
-/// `usage` and `cost_usd_micros` sum every descendant session's committed
-/// assistant messages and `sessions` maps each child session to `{ parent,
-/// provider, model, usage, cost_usd_micros, messages, compactions }`.
+/// completed, failed, closed, usage, sessions }`, where `usage` (lithos-llm's
+/// `Usage`: `tokens`, and `cost` when every message was priced) sums every
+/// descendant session's committed assistant messages and `sessions` maps
+/// each child session to `{ parent, provider, model, usage, messages,
+/// compactions }`.
 /// `provider` and `model` are the route the child runs on, as its
 /// `SessionStarted` reported it (or the model of its first answer), so a
 /// host prices the child's tokens at the child's own model; null when the
@@ -99,7 +100,7 @@ impl Ledger {
             .projection
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let (usage, cost) = projection.descendant_usage();
+        let usage = projection.descendant_usage();
         let sessions: serde_json::Map<String, Value> = projection
             .descendants
             .iter()
@@ -111,7 +112,6 @@ impl Ledger {
                         "provider": account.provider,
                         "model": account.model,
                         "usage": account.usage,
-                        "cost_usd_micros": account.cost_usd_micros,
                         "messages": account.messages,
                         "compactions": account.compactions,
                     }),
@@ -126,7 +126,6 @@ impl Ledger {
             "failed": counts.failed,
             "closed": counts.closed,
             "usage": usage,
-            "cost_usd_micros": cost,
             "sessions": sessions,
         })
     }

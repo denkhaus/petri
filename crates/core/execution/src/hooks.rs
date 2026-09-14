@@ -134,26 +134,25 @@ pub enum HookDecision {
 }
 
 /// What a hook's own model and tool work cost. A prompt hook makes one
-/// request; an agent hook makes one per model turn and runs tools. `tokens`
-/// is the backend's token accounting in the shape the native agent reports
-/// under `pebble.usage` (`input`, `output`, `reasoning`, `cache_read`,
-/// `cache_write`); it is absent when no answer arrived (a timeout, a failed
-/// request).
+/// request; an agent hook makes one per model turn and runs tools. `usage`
+/// is the backend's accounting in the shape the native agent reports under
+/// `pebble.usage`, lithos-llm's `Usage`: `tokens` (`input`, `output`,
+/// `reasoning`, `cache_read`, `cache_write`) and, when every answer that
+/// used tokens was priced, `cost` (`usd_micros`, `source`). It is absent
+/// when no answer arrived (a timeout, a failed request).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct HookUsage {
     /// Model requests the hook made, answered or not.
-    pub requests:        u64,
+    pub requests:     u64,
     /// Tool calls the hook's agent started; none for a prompt hook.
     #[serde(default)]
-    pub tool_calls:      u64,
+    pub tool_calls:   u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tokens:          Option<Value>,
+    pub usage:        Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost_usd_micros: Option<u64>,
+    pub inference_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inference_ms:    Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_ms:         Option<u64>,
+    pub tool_ms:      Option<u64>,
 }
 
 /// One hook the service ran, or could not run, for the record.

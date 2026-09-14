@@ -607,9 +607,38 @@ names the decision record under `decisions/`; "gap" names the owner.
 
 ## Library pin
 
-Pebble is pinned at `69969420c9017ca15ac6c175c820a0cb8090866a`, which is
-Pebble `main`. That commit is Pebble PRs #13, #14, #15 and #16 on top of
-`430740f`. PR #13 folds the command line's closing summary onto
+Pebble is pinned at `c91810fe51aece80359b9cd8efea971af0c46925`, which is
+Pebble `main`. That commit is Pebble PRs #18, #19 and #20 on top of
+`6996942`. PR #18 adds tool-result and transcript rendering options to
+`pebble-cli-core`, which Petri does not use. PR #19 keeps a paired human's
+hold across a route failover; Petri needs no change for it. PR #20 is step
+2 of the one-usage-type plan: it deletes Pebble's `TokenUsage` and its
+`CostSource` copy, re-exports lithos-llm's `TokenCounts`, `Cost`,
+`CostSource` and `Usage` from `pebble_coding_agent::types` and `events`,
+and collapses every `usage` beside a `cost_usd_micros` into one
+`usage: Usage` (`{ tokens: { input, output, reasoning, cache_read,
+cache_write }, cost: { usd_micros, source } }`, `cost` absent when unknown)
+on `AssistantMessage` (whose `cost_source` is gone too),
+`CompactionCompleted`, `CompactionFailed` (`Option<Usage>`),
+`RouteFailover`, `PromptReport`, `SessionProjection`, `PromptDelta`,
+`DescendantAccount`, `CompactionProjection` and `RouteFailoverProjection`;
+both `descendant_usage()` return a `Usage`. Every sum is
+`Usage::saturating_add`, so a total has a cost only when every part that
+used tokens was priced. Pebble's session record is format 5; a format 4
+record is refused on resume, not migrated, and a stored event in the old
+shape reads back with zero usage. Petri follows: its own `usage` payloads
+and metrics take the same `Usage` (`crates/fabro/FORMAT.md`, "Usage"), and
+`pebble.cost_usd_micros`, `pebble.compaction_cost_usd_micros`,
+`prompt.cost_usd_micros` and every `cost_usd_micros` field are gone
+(`crates/core/execution/EVENTS.md`, "Usage and timing"). lithos-llm moves
+with it to `55add4596b861a0623d00c3a54aa5c147c8d504b`, which is
+lithoscomputer/lithos-llm#7 on top of #6: `Usage` with `saturating_add`
+and `total_tokens()`, `TokenCounts::saturating_add`,
+`From<TokenCounts> for Usage` and `Response::usage_with_cost()`, all
+additive; `TokenCounts`, `Cost`, `CostSource` and `Response` keep their
+fields and serialized shapes.
+`69969420c9017ca15ac6c175c820a0cb8090866a` is Pebble PRs #13, #14, #15 and
+#16 on top of `430740f`. PR #13 folds the command line's closing summary onto
 `SessionProjection` and adds `SessionProjection.retries` and
 `PromptDelta.retries`, one per `LlmRetry` across the tree. PR #14 fixes the
 two tests that flaked in Pebble's own CI (the MCP fixture's bind and the
@@ -622,8 +651,9 @@ from the `mcp` feature; Petri implements it as
 `fabro_steps::pebble::environment::ScopePortRoutes` over
 `ExecEnv::preview_url`, and its sandbox-driver pin no longer has to match
 Pebble's. PR #16 completes `SessionProjection` for embedders: the summary
-call's `usage` and `cost_usd_micros` on `CompactionCompleted` and (when the
-model answered) `CompactionFailed`, the failover history as
+call's `usage` and `cost_usd_micros` (one `usage` since `c91810f`) on
+`CompactionCompleted` and (when the model answered) `CompactionFailed`, the
+failover history as
 `SessionProjection.failovers` and `failover_stopped` with `PromptDelta.failovers`,
 each descendant's `provider` and `model` on `DescendantAccount`,
 `McpServerProjection.startup_ms`, and `SkillsDiscovered` announced again on a
@@ -632,7 +662,8 @@ nothing new from the projection yet.
 `430740f1114f859d6d173683f25b5007cf2023ca` is Pebble PR #12
 (`embedder-failover-and-followup`)
 on top of `4c00633`. PR #12 grows `CodingEvent::RouteFailover` with the
-failed route's `usage`, `cost_usd_micros`, `inference_ms`, `tool_ms` and a
+failed route's `usage`, `cost_usd_micros` (one `usage` since `c91810f`),
+`inference_ms`, `tool_ms` and a
 `continuation` (`replay_prompt` or `continue_turn`), adds
 `CodingEvent::RouteFailoverStopped { route, attempt, reason, error }` with
 `reason` `ineligible` or `exhausted` for a prompt Pebble did not fail over
@@ -680,8 +711,8 @@ bound is reached) and the public `ProjectMemory` loader. The readiness
 batch itself brought five changes:
 
 - The summary call's usage and cost are in the prompt report, so
-  `pebble.usage` and `pebble.cost_usd_micros` include compaction and the
-  `pebble.compaction_*` metrics break that share out.
+  `pebble.usage` (and, until `c91810f`, `pebble.cost_usd_micros`) includes
+  compaction and the `pebble.compaction_*` metrics break that share out.
 - `Agent::continue_prompt` and `CodingAgent::continue_prompt` continue an
   unfinished turn on the next model with no new input, so the failover no
   longer sends a continuation message.
@@ -712,8 +743,8 @@ fails when any of them disagree. The row names are the keys of a record's
 
 | Pin | Revision | Repository | Role |
 |---|---|---|---|
-| `pebble` | `69969420c9017ca15ac6c175c820a0cb8090866a` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
-| `lithos_llm` | `a1e3fd37b7153870411701327ac117606753fe90` | `lithoscomputer/lithos-llm` (public) | provider transport and request retries |
+| `pebble` | `c91810fe51aece80359b9cd8efea971af0c46925` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
+| `lithos_llm` | `55add4596b861a0623d00c3a54aa5c147c8d504b` | `lithoscomputer/lithos-llm` (public) | provider transport, request retries, and the `Usage` type every usage takes |
 | `sandbox_driver` | `ddb32e19e763299319ecf6aebc8961298db80c0c` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `ca45f0e50a6716d716aa2f638ca3cf767e88f613` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
 | `fabro_reference` | `05ebd0fd1beec214b558f4b478e36bd08b507dc7` | `fabro-sh/fabro` (public, `main`) | the reference Fabro the corpus, oracle, bundles, and differential matrix use |

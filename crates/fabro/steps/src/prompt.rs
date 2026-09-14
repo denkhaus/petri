@@ -25,8 +25,9 @@
 //! Fabro's `stage.prompt` and `prompt.completed` events, each with a stable
 //! `kind`: [`PROMPT_EVENT`] before the first model call carries the rendered
 //! prompt, the model selector and the fan-in sources; [`COMPLETED_EVENT`]
-//! after the last call carries the response text, the outcome, the usage,
-//! the cost, the number of calls and the duration.
+//! after the last call carries the response text, the outcome, the usage
+//! (tokens and, when every answer was priced, cost), the number of calls and
+//! the duration.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -34,9 +35,7 @@ use std::time::{Duration, Instant};
 use frontend_fabro::Policy;
 use frontend_fabro::kinds::{PROMPT_KIND, StageOutcome};
 use ir::{Control, LogStream, Metrics, Outcome, StepEvent, StepKindId, Value};
-use lithos_llm::types::{
-    Message, ReasoningEffort, Request, Response, ResponseFormat, Role, TokenCounts,
-};
+use lithos_llm::types::{Message, ReasoningEffort, Request, Response, ResponseFormat, Role, Usage};
 use lithos_llm::{Client, Error};
 use pebble_coding_agent::{MemoryDiscovery, ProjectMemory};
 use serde::Deserialize;
@@ -69,7 +68,7 @@ pub const PROMPT_EVENT: &str = "fabro.prompt";
 
 /// The `kind` of the `StepEvent::Custom` payload emitted after the last
 /// model call: `{ kind, node, firing, attempt, model, outcome, response,
-/// calls, repairs, usage, cost_usd_micros, duration_ms }`.
+/// calls, repairs, usage, duration_ms }`; `usage` is lithos-llm's `Usage`.
 pub const COMPLETED_EVENT: &str = "fabro.prompt.completed";
 
 #[derive(Debug, Deserialize)]
@@ -399,34 +398,28 @@ impl Step for PromptStep {
                 "sources": config.sources,
             })))
             .await;
-        let completed = |outcome: &str,
-                         response: Option<&str>,
-                         calls: u64,
-                         repairs: u64,
-                         usage: &TokenCounts,
-                         cost: Option<u64>| {
-            StepEvent::Custom(json!({
-                "kind": COMPLETED_EVENT,
-                "node": config.node,
-                "firing": ctx.firing,
-                "attempt": ctx.attempt,
-                "model": selector,
-                "outcome": outcome,
-                "response": response,
-                "calls": calls,
-                "repairs": repairs,
-                "usage": usage,
-                "cost_usd_micros": cost,
-                "duration_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            }))
-        };
+        let completed =
+            |outcome: &str, response: Option<&str>, calls: u64, repairs: u64, usage: &Usage| {
+                StepEvent::Custom(json!({
+                    "kind": COMPLETED_EVENT,
+                    "node": config.node,
+                    "firing": ctx.firing,
+                    "attempt": ctx.attempt,
+                    "model": selector,
+                    "outcome": outcome,
+                    "response": response,
+                    "calls": calls,
+                    "repairs": repairs,
+                    "usage": usage,
+                    "duration_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                }))
+            };
         let mut messages = Vec::new();
         if let Some(system) = &system_prompt {
             messages.push(Message::text(Role::System, system.clone()));
         }
         messages.push(Message::text(Role::User, prompt));
-        let mut usage = TokenCounts::default();
-        let mut cost: Option<u64> = None;
+        let mut usage = Usage::default();
         let mut turns = 0_u64;
         let mut repairs = 0_u64;
         let (parsed, text) = loop {
@@ -488,18 +481,15 @@ impl Step for PromptStep {
                     }
                     let _ = ctx
                         .logs
-                        .send(completed("failed", None, turns, repairs, &usage, cost))
+                        .send(completed("failed", None, turns, repairs, &usage))
                         .await;
                     let mut outcome = fail(failure.to_string(), &failure.class());
-                    outcome.metrics = metrics(started, turns, &usage, cost);
+                    outcome.metrics = metrics(started, turns, &usage);
                     return outcome;
                 }
             };
             turns += 1;
-            usage = add_usage(usage, response.usage);
-            if let Some(response_cost) = &response.cost {
-                cost = Some(cost.unwrap_or(0).saturating_add(response_cost.usd_micros));
-            }
+            usage = usage.saturating_add(response.usage_with_cost());
             let text = response.text();
             ctx.log(LogStream::Stdout, text.clone()).await;
             match validate(&contract, &text) {
@@ -520,14 +510,7 @@ impl Step for PromptStep {
                 Err(problem) => {
                     let _ = ctx
                         .logs
-                        .send(completed(
-                            "failed",
-                            Some(&text),
-                            turns,
-                            repairs,
-                            &usage,
-                            cost,
-                        ))
+                        .send(completed("failed", Some(&text), turns, repairs, &usage))
                         .await;
                     let mut outcome = fail(
                         format!(
@@ -536,7 +519,7 @@ impl Step for PromptStep {
                         ),
                         "bad_output",
                     );
-                    outcome.metrics = metrics(started, turns, &usage, cost);
+                    outcome.metrics = metrics(started, turns, &usage);
                     return outcome;
                 }
             }
@@ -602,11 +585,10 @@ impl Step for PromptStep {
                 turns,
                 repairs,
                 &usage,
-                cost,
             ))
             .await;
         let mut outcome = stage.into_outcome(&config.node);
-        outcome.metrics = metrics(started, turns, &usage, cost);
+        outcome.metrics = metrics(started, turns, &usage);
         outcome
     }
 }
@@ -650,23 +632,12 @@ async fn complete(
     }
 }
 
-fn add_usage(total: TokenCounts, next: TokenCounts) -> TokenCounts {
-    TokenCounts {
-        input:       total.input.saturating_add(next.input),
-        output:      total.output.saturating_add(next.output),
-        reasoning:   total.reasoning.saturating_add(next.reasoning),
-        cache_read:  total.cache_read.saturating_add(next.cache_read),
-        cache_write: total.cache_write.saturating_add(next.cache_write),
-    }
-}
-
-fn metrics(started: Instant, turns: u64, usage: &TokenCounts, cost: Option<u64>) -> Metrics {
+fn metrics(started: Instant, turns: u64, usage: &Usage) -> Metrics {
     Metrics {
         duration_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
         custom: [
             (SmolStr::new("prompt.calls"), json!(turns)),
             (SmolStr::new("prompt.usage"), json!(usage)),
-            (SmolStr::new("prompt.cost_usd_micros"), json!(cost)),
         ]
         .into_iter()
         .collect(),

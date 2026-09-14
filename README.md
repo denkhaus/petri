@@ -269,7 +269,7 @@ before Petri moves its pin; then the manifests, the contract's pin table, and
 the affected evidence records move together, and the relevant Petri scenarios
 run again through the shipped binary. A library test pass never replaces a
 required Petri scenario. The current pins are in the contract's "Pinned
-revisions" table (Pebble `6996942`, lithos-llm `a1e3fd3`, sandbox-driver
+revisions" table (Pebble `c91810f`, lithos-llm `55add45`, sandbox-driver
 `ddb32e19`, twins `ca45f0e`, Fabro `05ebd0f`, the runner image
 `f8bbbfd81934`); `mise run check:pins` keeps every citation in agreement.
 The library batch the readiness work asked for landed on
@@ -281,6 +281,9 @@ scripted provider; sandbox-driver's silence-based output drain and the
 preview-URL operation for servers inside containers. The later
 `petri-readiness-gaps` revision exports Pebble's project-memory loader, which
 prompt nodes now load through, and the tool-round budget agent hooks enforce.
+Pebble `c91810f` and lithos-llm `55add45` carry token usage and cost as one
+lithos-llm `Usage`; every `usage` Petri records takes that shape
+(`crates/fabro/FORMAT.md`, "Usage").
 
 Host and container scopes use the `sandbox-driver-host` and
 `sandbox-driver-docker` plugins. Petri launches them and communicates over
