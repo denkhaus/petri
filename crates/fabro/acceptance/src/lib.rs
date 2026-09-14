@@ -17,7 +17,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
 use frontend::{CompileInputs, Diagnostic, DirFiles, Frontend as _, Severity};
-use frontend_attractor::Fabro;
+use frontend_fabro::Fabro;
 
 pub mod runs;
 

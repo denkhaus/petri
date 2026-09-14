@@ -116,10 +116,9 @@ impl Context {
         }
     }
 
-    /// The text `{{ inputs.NAME }}`, `{{ vars.NAME }}` or `{{ goal }}` renders
-    /// to in a script.
-    /// The text of one `inputs.*`, `vars.*` or `goal` token.
-    pub(crate) fn token_text(&self, token: &str) -> Result<String, TemplateError> {
+    /// The text of one `inputs.*`, `vars.*` or `goal` token: the same
+    /// spelling in a prompt, a script and a settings string.
+    pub fn token_text(&self, token: &str) -> Result<String, TemplateError> {
         if token == "goal" {
             return self.goal.clone().ok_or_else(|| TemplateError::Unbound {
                 name: "goal".into(),

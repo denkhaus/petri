@@ -1,4 +1,4 @@
-//! Fabro workflow → HIR.
+//! Attractor workflow → HIR.
 //!
 //! One pass over the semantic [`Workflow`]: node kinds and step configs,
 //! then routing — one tiered group per node, the four Fabro tiers — then the
@@ -10,19 +10,15 @@
 mod attrs;
 mod compaction;
 pub mod fallbacks;
-mod hooks;
 mod imports;
-mod mcps;
-mod model_layers;
 mod parallel;
 pub(crate) mod policy;
 mod promotion;
 mod routing;
-mod secrets;
-mod skills;
+mod settings;
+pub mod skills;
 pub mod subagents;
 mod threads;
-mod workflow_toml;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Duration;
@@ -40,23 +36,21 @@ pub use parallel::{BRANCH_META_KIND, DEFAULT_MAX_PARALLEL};
 pub use policy::MAX_INVOCATIONS;
 pub use promotion::ROUTES_KEY;
 pub use routing::{FailurePolicy, Policy};
-pub(crate) use secrets::{InterpolationError, interpolate};
 use serde_json::{Map, Value, json};
-use smol_str::SmolStr;
-pub use workflow_toml::{
-    ENVIRONMENT_PARAM, EnvValue, Environment, LAUNCH_PARAM, ModelDefaults, PREPARE_NODE_PREFIX,
-    PrepareStep, RunSettings,
+pub use settings::{
+    CloneSettings, EnvValue, Environment, ModelDefaults, PREPARE_NODE_PREFIX, PrepareStep,
+    RunSettings,
 };
+pub use skills::SkillSettings;
+use smol_str::SmolStr;
 
-use crate::hooks::HookDefinition;
 use crate::kinds::{
     AGENT_KIND, COMMAND_KIND, GOAL_CHECK_NODE, HUMAN_KIND, MAX_OUTPUT_RETRIES, PROMPT_KIND,
     STAGE_KIND, WAIT_KIND, WORKFLOW_KIND,
 };
-use crate::mcps::McpServer;
 use crate::model::{Attrs, EdgeDecl, NodeDecl, Workflow};
 use crate::template::{self, Context, TemplateError};
-use crate::{condition, dot, labels, model, stylesheet};
+use crate::{condition, dot, hooks, labels, model, stylesheet};
 
 /// The hard maximum on firings of any node in a loop, and the value Fabro's
 /// "unlimited" lowers to.
@@ -197,14 +191,10 @@ struct Ctx<'a> {
     /// Whether an unbound template input is a warning that leaves the text
     /// unrendered: `petri check` with no inputs. A run is always strict.
     lenient_unbound:  bool,
-    /// What `workflow.toml` asked of the run.
-    settings:         workflow_toml::RunSettings,
-    /// The env each synthetic `[run.prepare]` command node carries.
-    prepare_envs:     BTreeMap<String, BTreeMap<String, workflow_toml::EnvValue>>,
-    /// The run's merged `[[run.hooks]]`, carried on the stage steps.
-    hooks:            Vec<HookDefinition>,
-    /// The run's merged `[run.agent.mcps]`, carried on every agent node.
-    mcps:             Vec<McpServer>,
+    /// What the run's settings ask of this lowering, resolved by the caller.
+    settings:         RunSettings,
+    /// The env each synthetic prepare command node carries.
+    prepare_envs:     BTreeMap<String, BTreeMap<String, EnvValue>>,
     /// The workflow's name, `FABRO_WORKFLOW` for hooks.
     workflow_name:    String,
     /// The absolute repository root the host bound (`petri.repository`),
@@ -213,28 +203,26 @@ struct Ctx<'a> {
 }
 
 /// Lower a semantic workflow. `file` is the name spans carry; `files` reads
-/// `@file` references and child workflows relative to the repository root.
+/// `@file` references and child workflows relative to the repository root;
+/// `inputs` are resolved (the caller has applied any file defaults);
+/// `settings` is what the run's configuration asks of the lowering; `diags`
+/// carries what the caller diagnosed while resolving them, so an error there
+/// still rejects the graph.
 pub(crate) fn lower(
     workflow: Workflow,
     file: &str,
     files: &dyn FileSource,
     inputs: &CompileInputs,
+    settings: RunSettings,
     diags: Diagnostics,
 ) -> Lowered {
-    lower_nested(
-        workflow,
-        file,
-        files,
-        inputs,
-        diags,
-        Vec::new(),
-        Vec::new(),
-        workflow_toml::ModelDefaults::default(),
-    )
+    lower_nested(workflow, file, files, inputs, diags, Vec::new(), settings)
 }
 
 /// [`lower`] for a workflow `stack` deep in nested-workflow calls. A nested
-/// workflow's agents connect to the parent's `inherited_mcps`.
+/// workflow shares its parent's run settings, narrowed: the model defaults
+/// and the MCP servers come along; hooks, prepare steps, the environment and
+/// the checkout belong to the root alone.
 fn lower_nested(
     mut workflow: Workflow,
     file: &str,
@@ -242,50 +230,14 @@ fn lower_nested(
     inputs: &CompileInputs,
     mut diags: Diagnostics,
     stack: Vec<String>,
-    inherited_mcps: Vec<McpServer>,
-    inherited_model: workflow_toml::ModelDefaults,
+    settings: RunSettings,
 ) -> Lowered {
-    let mut template = Context::new(inputs);
-    // A nested workflow shares its parent's run settings; only the root reads
-    // the file beside it. The parent's `[run.model]` defaults come along, as
-    // Fabro's nested run shares the parent's run settings.
-    let mut settings = if stack.is_empty() {
-        workflow_toml::read(file, files, &mut template, &mut diags)
-    } else {
-        workflow_toml::RunSettings {
-            model: inherited_model,
-            ..workflow_toml::RunSettings::default()
-        }
-    };
-    if stack.is_empty() {
-        model_layers::apply(files, inputs, &mut settings.model, &mut diags);
-        // The launch itself, below every file layer: a node that names no
-        // model, in a graph with no default, in a run whose configuration
-        // names none, runs on what `petri run --model`/`--provider` gave.
-        settings.launch = model_layers::LaunchModel::from_inputs(inputs);
-        settings.launch.fill(&mut settings.model);
-    }
+    let template = Context::new(inputs);
     let repository = inputs
         .vars
         .get(frontend::REPOSITORY_VAR)
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let hooks = if stack.is_empty() {
-        hooks::load(files, inputs, settings.hooks_text.as_ref(), &mut diags)
-    } else {
-        Vec::new()
-    };
-    let mcps = if stack.is_empty() {
-        mcps::load(
-            files,
-            inputs,
-            settings.hooks_text.as_ref(),
-            &template,
-            &mut diags,
-        )
-    } else {
-        inherited_mcps
-    };
 
     let mut b = GraphBuilder::bare();
     let scope = b.add_scope(Scope::new(ScopeId::new(0)));
@@ -313,8 +265,6 @@ fn lower_nested(
         lenient_unbound: inputs.unbound_is_warning,
         settings,
         prepare_envs: BTreeMap::new(),
-        hooks,
-        mcps,
         workflow_name: workflow.name.clone(),
         repository,
     };
@@ -326,8 +276,8 @@ fn lower_nested(
         return Lowered::rejected(ctx.diags);
     };
     if ctx.stack.len() == 1 {
-        let span = Span::file(&ctx.workflow_toml_path());
-        ctx.prepare_envs = workflow_toml::insert_prepare_nodes(
+        let span = Span::file(&ctx.settings_path());
+        ctx.prepare_envs = settings::insert_prepare_nodes(
             &mut workflow,
             &structure.start,
             &ctx.settings,
@@ -415,20 +365,17 @@ fn duration_ms(duration: Duration) -> Value {
 
 impl Ctx<'_> {
     /// The run parameters every graph this lowering produces carries: the
-    /// launch settings on the root, the rendered inputs and vars, the goal.
-    /// A branch child graph carries the same set, so an expression reads the
-    /// same statics inside a branch.
+    /// merged hooks on the root, the rendered inputs and vars, the goal. A
+    /// branch child graph carries the same set, so an expression reads the
+    /// same statics inside a branch. A host frontend adds its own (Fabro's
+    /// launch record) to the graph it gets back.
     fn params(&self) -> BTreeMap<SmolStr, Value> {
         let mut params = BTreeMap::new();
         if self.stack.len() == 1 {
-            params.insert(SmolStr::new(hooks::PARAM), hooks::param(&self.hooks));
             params.insert(
-                SmolStr::new(LAUNCH_PARAM),
-                self.settings.launch_param(self.repository.as_deref()),
+                SmolStr::new(hooks::PARAM),
+                settings::hooks_param(&self.settings.hooks),
             );
-            if let Some(environment) = self.settings.environment_param() {
-                params.insert(SmolStr::new(ENVIRONMENT_PARAM), environment);
-            }
         }
         params.insert(
             SmolStr::new("inputs"),
@@ -543,8 +490,9 @@ impl Ctx<'_> {
         }
     }
 
-    /// The `workflow.toml` path beside the root workflow, for spans.
-    fn workflow_toml_path(&self) -> String {
+    /// The settings file beside the root workflow, for the spans of what
+    /// the settings put into the graph (Fabro's `workflow.toml`).
+    fn settings_path(&self) -> String {
         if self.base_dir.is_empty() {
             "workflow.toml".to_string()
         } else {
@@ -552,7 +500,7 @@ impl Ctx<'_> {
         }
     }
 
-    /// Apply the resolved `[run.environment]` to the one scope: its literal
+    /// Apply the resolved environment to the one scope: its literal
     /// `env` and, for a container provider with an image, the container
     /// target. Secret values reach commands through their configs.
     fn environment_scope(&mut self) {
@@ -570,7 +518,7 @@ impl Ctx<'_> {
             return;
         };
         for (key, value) in &environment.env {
-            if let workflow_toml::EnvValue::Literal(text) = value {
+            if let EnvValue::Literal(text) = value {
                 scope.env.insert(
                     SmolStr::new(key),
                     ir::ExprOrValue::Value(Value::String(text.clone())),
@@ -689,7 +637,7 @@ impl Ctx<'_> {
         self.unknown_attrs(&attrs, attrs::GRAPH, attrs::GRAPH_IGNORED, "the graph");
         let span = workflow.span.clone();
         let goal_span = attrs.span_of("goal", &span);
-        // The graph's `goal` wins over `[run] goal`, as Fabro's run
+        // The graph's `goal` wins over the settings' goal, as Fabro's run
         // materialization orders them.
         let goal = attrs
             .text("goal")
@@ -987,14 +935,16 @@ impl Ctx<'_> {
                     "kv": placeholder(kv),
                 });
                 if self.stack.len() == 1 {
-                    config["hooks"] = hooks::param(&self.hooks);
-                    // `[run.clone]` and the repository the host bound: the
+                    config["hooks"] = settings::hooks_param(&self.settings.hooks);
+                    // The checkout and the repository the host bound: the
                     // root `start` stage checks the repository out into its
                     // workspace before anything runs there.
                     if kind == Kind::Start {
-                        let launch = self.b.exprs().var(LAUNCH_PARAM);
-                        let clone = self.b.exprs().field(launch, "clone");
-                        config["checkout"] = placeholder(clone);
+                        config["checkout"] = json!({
+                            "enabled": self.settings.clone.enabled,
+                            "depth": self.settings.clone.depth,
+                            "repository": self.repository,
+                        });
                     }
                 }
                 // `[run.model.fallbacks]` as written: the `start` stage
@@ -1221,7 +1171,7 @@ impl Ctx<'_> {
                 config.insert(key.into(), Value::String(value));
             }
         }
-        // The graph's defaults, then `[run.model]` from `workflow.toml`.
+        // The graph's defaults, then the run settings' model defaults.
         if !config.contains_key("model")
             && let Some(model) = workflow
                 .attrs
@@ -1260,7 +1210,7 @@ impl Ctx<'_> {
         }
         config.insert("stages".into(), threads::stages(workflow, &self.kinds));
         if !is_prompt {
-            config.insert("mcps".into(), mcps::param(&self.mcps));
+            config.insert("mcps".into(), settings::mcps_param(&self.settings.mcps));
         }
         self.output_schema(node, &mut config);
         if let Some(retries) = node.attrs.int("output_retries", &mut self.diags) {
@@ -1412,7 +1362,7 @@ impl Ctx<'_> {
         let mut env = Map::new();
         if let Some(environment) = &self.settings.environment {
             for (key, value) in &environment.env {
-                if let workflow_toml::EnvValue::Secret(_) = value {
+                if let EnvValue::Secret(_) = value {
                     env.insert(key.clone(), value.to_json());
                 }
             }
@@ -1756,8 +1706,11 @@ impl Ctx<'_> {
             &inputs,
             Diagnostics::new(),
             self.stack.clone(),
-            self.mcps.clone(),
-            self.settings.model.clone(),
+            RunSettings {
+                model: self.settings.model.clone(),
+                mcps: self.settings.mcps.clone(),
+                ..RunSettings::default()
+            },
         );
         for diagnostic in lowered.diagnostics.iter() {
             self.diags.push(diagnostic.clone());

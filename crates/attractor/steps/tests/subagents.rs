@@ -23,7 +23,9 @@ use attractor_steps::skills::FabroHome;
 use attractor_steps::subagents::METRIC;
 use execution::host::{self, HostRun};
 use execution::inspect::inspect_run_dir;
-use frontend::{CompileInputs, Lowered, MapFiles, NoFiles};
+use frontend::{CompileInputs, Diagnostics, Lowered, NoFiles};
+use frontend_attractor::RunSettings;
+use frontend_attractor::hooks::{HookDefinition, HookEvent, HookKind};
 use ir::{CancelScopeId, Graph, RunStatus, StepEvent, Value};
 use lithos_llm::types::{ErrorKind, Request, Response, TokenCounts};
 use pebble_coding_agent::test_support::{
@@ -57,17 +59,19 @@ fn one_agent(extra: &str) -> String {
     clippy::print_stderr,
     reason = "a graph that fails to lower explains itself in the test output"
 )]
-fn lower(text: &str, workflow_toml: Option<&str>) -> Lowered {
-    let lowered = match workflow_toml {
-        Some(toml) => {
-            let files = MapFiles(BTreeMap::from([(
-                "wf/workflow.toml".to_string(),
-                toml.to_string(),
-            )]));
-            frontend_attractor::load("wf/test.fabro", text, &files, &CompileInputs::new())
-        }
-        None => frontend_attractor::load("test.fabro", text, &NoFiles, &CompileInputs::new()),
+fn lower(text: &str, hooks: Vec<HookDefinition>) -> Lowered {
+    let settings = RunSettings {
+        hooks,
+        ..RunSettings::default()
     };
+    let lowered = frontend_attractor::lower(
+        "test.fabro",
+        text,
+        &NoFiles,
+        &CompileInputs::new(),
+        settings,
+        Diagnostics::new(),
+    );
     for d in lowered.diagnostics.iter() {
         eprintln!("{d}");
     }
@@ -75,8 +79,25 @@ fn lower(text: &str, workflow_toml: Option<&str>) -> Lowered {
     lowered
 }
 
-fn graph(text: &str, workflow_toml: Option<&str>) -> Graph {
-    lower(text, workflow_toml).graph.expect("lowers")
+fn graph(text: &str, hooks: Vec<HookDefinition>) -> Graph {
+    lower(text, hooks).graph.expect("lowers")
+}
+
+/// A command hook as the Fabro frontend resolves one `[[run.hooks]]` entry.
+fn command_hook(name: &str, event: HookEvent, script: &str) -> HookDefinition {
+    HookDefinition {
+        name: name.to_owned(),
+        id: None,
+        event,
+        kind: HookKind::Command {
+            command: script.to_owned(),
+        },
+        matcher: None,
+        blocking: None,
+        timeout_ms: None,
+        sandbox: None,
+        source: Some("workflow.toml".to_owned()),
+    }
 }
 
 fn runtime(dir: &Path, client: lithos_llm::Client, retention: Retention) -> Runtime {
@@ -204,7 +225,7 @@ async fn a_child_changes_the_parents_workspace_and_the_stage_accounts_for_it() {
         )],
     );
     let report = runtime(dir.path(), client, Retention::Always)
-        .run(graph(&one_agent(""), None))
+        .run(graph(&one_agent(""), Vec::new()))
         .await
         .expect("replay");
     assert_eq!(
@@ -354,19 +375,20 @@ async fn the_runs_tool_hooks_apply_inside_a_child() {
             ]),
         )],
     );
-    let toml = r#"
-[[run.hooks]]
-name = "no-destruction"
-event = "pre_tool_use"
-script = "if grep -q 'rm ' \"$FABRO_HOOK_CONTEXT\"; then echo '{\"decision\":\"block\",\"reason\":\"destructive commands are not allowed\"}'; exit 2; fi"
-
-[[run.hooks]]
-name = "log-tools"
-event = "post_tool_use"
-script = "echo ran:$FABRO_NODE_ID >> tool-hooks.log"
-"#;
+    let hooks = vec![
+        command_hook(
+            "no-destruction",
+            HookEvent::PreToolUse,
+            r#"if grep -q 'rm ' "$FABRO_HOOK_CONTEXT"; then echo '{"decision":"block","reason":"destructive commands are not allowed"}'; exit 2; fi"#,
+        ),
+        command_hook(
+            "log-tools",
+            HookEvent::PostToolUse,
+            "echo ran:$FABRO_NODE_ID >> tool-hooks.log",
+        ),
+    ];
     let report = runtime(dir.path(), client, Retention::Always)
-        .run(graph(&one_agent(""), Some(toml)))
+        .run(graph(&one_agent(""), hooks))
         .await
         .expect("replay");
     assert_eq!(
@@ -412,7 +434,7 @@ async fn a_child_has_no_question_tool() {
         vec![(task, answers("Looked."))],
     );
     let report = runtime(dir.path(), client, Retention::Never)
-        .run(graph(&one_agent(""), None))
+        .run(graph(&one_agent(""), Vec::new()))
         .await
         .expect("replay");
     assert_eq!(report.status, RunStatus::Success);
@@ -454,7 +476,7 @@ async fn a_child_reads_the_project_documents_its_parent_read() {
         vec![(task, answers("Noted."))],
     );
     let report = runtime(dir.path(), client, Retention::Always)
-        .run(graph(&one_agent(""), None))
+        .run(graph(&one_agent(""), Vec::new()))
         .await
         .expect("replay");
     assert_eq!(report.status, RunStatus::Success);
@@ -493,7 +515,7 @@ async fn agent_children_do_not_consume_the_invocation_ceiling() {
             .map(|task| (*task, answers("Reporting.")))
             .collect(),
     );
-    let lowered = lower(&one_agent(""), None);
+    let lowered = lower(&one_agent(""), Vec::new());
     let mut graph = lowered.graph.expect("lowers");
     // Fabro's ceiling is 10,000; one is the smallest the coordinator takes,
     // and it leaves no room for any child invocation.
@@ -546,7 +568,7 @@ async fn a_spawn_over_the_open_session_bound_is_refused_and_the_stage_carries_on
         )),
         ScriptedCall::response(text_response("No room; did it myself.")),
     ]);
-    let mut graph = graph(&one_agent(""), None);
+    let mut graph = graph(&one_agent(""), Vec::new());
     let node = graph
         .body
         .nodes
@@ -598,7 +620,7 @@ async fn a_childs_failure_reaches_the_parent_without_failing_the_stage() {
         )],
     );
     let report = runtime(dir.path(), client, Retention::Never)
-        .run(graph(&one_agent(""), None))
+        .run(graph(&one_agent(""), Vec::new()))
         .await
         .expect("replay");
     assert_eq!(
@@ -668,7 +690,7 @@ async fn nested_delegation_reaches_a_grandchild_within_the_open_session_bound() 
         ],
     );
     let report = runtime(dir.path(), client, Retention::Always)
-        .run(graph(&one_agent(""), None))
+        .run(graph(&one_agent(""), Vec::new()))
         .await
         .expect("replay");
     assert_eq!(
@@ -750,7 +772,7 @@ async fn cancelling_the_run_stops_every_descendant() {
         )],
     );
     let rt = runtime(dir.path(), client, Retention::Never);
-    let driver = rt.driver(graph(&one_agent(""), None));
+    let driver = rt.driver(graph(&one_agent(""), Vec::new()));
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
     timeout(Duration::from_secs(15), async {
@@ -825,7 +847,7 @@ async fn a_retained_thread_keeps_a_childs_result_for_the_next_node() {
   start -> a -> b -> exit"#,
     );
     let report = runtime(dir.path(), client, Retention::Never)
-        .run(graph(&text, None))
+        .run(graph(&text, Vec::new()))
         .await
         .expect("replay");
     assert_eq!(
@@ -907,7 +929,7 @@ async fn a_resumed_run_restarts_the_stage_and_keeps_an_unfinished_childs_files()
             ),
         ],
     );
-    let lowered = lower(&one_agent(""), None);
+    let lowered = lower(&one_agent(""), Vec::new());
     let graph = lowered.graph.expect("lowers");
     let workspace = dir.path().join("scopes/invocation-0-scope-0/work");
     let rt = runtime(dir.path(), client.clone(), Retention::Always);
@@ -1030,7 +1052,10 @@ async fn a_child_sees_the_skills_its_parent_discovered() {
             .capability(PebbleClient(client))
             .capability(FabroHome(dir.path().join("no-home"))),
     );
-    let report = rt.run(graph(&one_agent(""), None)).await.expect("replay");
+    let report = rt
+        .run(graph(&one_agent(""), Vec::new()))
+        .await
+        .expect("replay");
     assert_eq!(report.status, RunStatus::Success);
     let root = provider.root().requests();
     let parent = serde_json::to_string(&root[0]).expect("request");
@@ -1105,7 +1130,7 @@ async fn a_child_compacts_under_the_inherited_settings_and_its_events_name_the_c
         vec![(task, child)],
     );
     let report = runtime(dir.path(), client, Retention::Never)
-        .run(graph(&one_agent(""), None))
+        .run(graph(&one_agent(""), Vec::new()))
         .await
         .expect("replay");
     assert_eq!(
@@ -1184,7 +1209,7 @@ async fn a_parent_still_delegates_after_its_own_compaction() {
     ))]);
     let (client, provider) = routed_client(root, vec![(task, answers("Finished."))]);
     let report = runtime(dir.path(), client, Retention::Never)
-        .run(graph(&one_agent(""), None))
+        .run(graph(&one_agent(""), Vec::new()))
         .await
         .expect("replay");
     assert_eq!(

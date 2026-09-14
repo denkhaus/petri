@@ -18,6 +18,7 @@ name = "fabro_acceptance"
 ir = { workspace = true }
 frontend = { workspace = true }
 frontend-attractor = { workspace = true }
+frontend-fabro = { workspace = true }
 attractor-steps = { workspace = true }
 runtime = { workspace = true }
 execution = { workspace = true }

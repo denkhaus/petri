@@ -8,7 +8,9 @@ use std::time::Duration;
 use attractor_steps::pebble::PebbleClient;
 use attractor_steps::pebble::environment::PebbleEnvironment;
 use attractor_steps::register;
-use frontend::MapFiles;
+use frontend::Diagnostics;
+use frontend_attractor::RunSettings;
+use frontend_attractor::mcps::{DEFAULT_TOOL_TIMEOUT_MS, McpServer, McpTransport};
 use ir::{CancelScopeId, Graph, RunStatus, ScopeId};
 use lithos_llm::types::ReasoningEffort;
 use pebble_coding_agent::environment::{Environment, ExecRequest};
@@ -438,13 +440,23 @@ async fn a_delivery_before_the_session_is_built_runs_as_a_follow_up() {
         ScriptedCall::response(text_response("original answer")),
         ScriptedCall::response(text_response("follow-up answer")),
     ]);
-    let files = MapFiles(BTreeMap::from([(
-        "wf/workflow.toml".to_string(),
-        "[run.agent.mcps.slow]\ntype = \"stdio\"\ncommand = [\"sleep\", \"5\"]\nstartup_timeout = \
-         \"1s\"\n"
-            .to_string(),
-    )]));
-    let lowered = frontend_attractor::load(
+    // One stdio server whose handshake never completes within its startup
+    // timeout, as the Fabro frontend resolves `[run.agent.mcps.slow]` with
+    // `command = ["sleep", "5"]` and `startup_timeout = "1s"`.
+    let settings = RunSettings {
+        mcps: vec![McpServer {
+            name:               "slow".to_owned(),
+            transport:          McpTransport::Stdio {
+                command: vec!["sleep".to_owned(), "5".to_owned()],
+                env:     BTreeMap::new(),
+            },
+            startup_timeout_ms: 1_000,
+            tool_timeout_ms:    DEFAULT_TOOL_TIMEOUT_MS,
+            source:             "workflow.toml".to_owned(),
+        }],
+        ..RunSettings::default()
+    };
+    let lowered = frontend_attractor::lower(
         "wf/w.fabro",
         r#"digraph T {
         graph [backend="api", default_model="test/model"]
@@ -453,8 +465,10 @@ async fn a_delivery_before_the_session_is_built_runs_as_a_follow_up() {
         exit [shape=Msquare]
         start -> a -> exit
     }"#,
-        &files,
+        &NoFiles,
         &CompileInputs::new(),
+        settings,
+        Diagnostics::new(),
     );
     assert!(
         !lowered.diagnostics.has_errors(),

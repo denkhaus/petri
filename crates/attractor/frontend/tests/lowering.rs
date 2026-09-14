@@ -1,21 +1,21 @@
 //! Acceptance §7 item 3, the pure half: what lowering produces — routing
 //! tiers, failure policies, goal gates, parallel, budgets, and the specific
-//! rejections. The run half is `crates/fabro/acceptance/tests/routing.rs`.
+//! rejections. The run half is `crates/fabro/acceptance/tests/routing.rs`. What
+//! the settings files put into a graph is the Fabro frontend's
+//! (`crates/fabro/frontend/tests/lowering.rs`).
 
 mod support;
 
 use std::num::NonZeroU32;
 use std::time::Duration;
-use std::{env, fs, process};
 
 use frontend::print::print_expr;
-use frontend::{CompileInputs, Frontend, NoFiles};
-use frontend_attractor::hooks::SETTINGS_HOOKS_VAR;
+use frontend::{CompileInputs, NoFiles};
 use frontend_attractor::kinds::{
     AGENT_KIND, BRANCH_KIND, COMMAND_KIND, FAN_IN_KIND, FORK_KIND, HUMAN_KIND, PROMPT_KIND,
     STAGE_KIND, WAIT_KIND, WORKFLOW_KIND,
 };
-use frontend_attractor::{Fabro, MAX_FIRINGS, load};
+use frontend_attractor::{MAX_FIRINGS, load};
 use ir::placeholder::{BRANCH_ROLE_META, contains_placeholder};
 use ir::{Completion, EdgeTransition, Exhaustion, Guard, JoinPolicy, PickPolicy, TimeoutPolicy};
 use serde_json::json;
@@ -931,211 +931,6 @@ fn templates_render_inputs_and_unbound_inputs_are_specific_rejections() {
     );
 }
 
-#[test]
-fn file_references_and_workflow_toml_defaults_resolve_through_the_file_source() {
-    let files = files(&[
-        (
-            "wf/prompts/plan.md",
-            "Plan {{ inputs.mode }}\n{% include \"partials/tail.md\" %}",
-        ),
-        (
-            "wf/prompts/partials/tail.md",
-            "tail {% include \"nested/end.md\" %}",
-        ),
-        ("wf/prompts/partials/nested/end.md", "done"),
-        ("wf/workflow.toml", "[run.inputs]\nmode = \"fast\"\n"),
-    ]);
-    let text = dot(r#"
-        a [prompt="@prompts/plan.md"]
-        start -> a -> exit
-    "#);
-    let lowered =
-        frontend_attractor::load("wf/workflow.fabro", &text, &files, &CompileInputs::new());
-    let graph = lowered.graph.expect("lowers");
-    assert_eq!(
-        node(&graph, "a").step.config["prompt"],
-        json!("Plan fast\ntail done")
-    );
-    assert!(
-        codes(&dot(r#"
-        a [prompt="@missing.md"]
-        start -> a -> exit
-    "#))
-        .contains(&"fabro.file_not_found".to_string())
-    );
-}
-
-/// Every `workflow.toml` section is diagnosed. Platform-only sections warn
-/// with why, a requirement the standalone runner cannot meet is an
-/// `unsupported.workflow_toml.*` error, and a key Fabro's own parser refuses
-/// is an error with Fabro's rename hint.
-#[test]
-fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
-    let diags = |toml: &str| {
-        let files = files(&[("wf/workflow.toml", toml)]);
-        frontend_attractor::load(
-            "wf/workflow.fabro",
-            &dot(r#"
-                a [shape=parallelogram, script="true"]
-                start -> a -> exit
-            "#),
-            &files,
-            &CompileInputs::new(),
-        )
-        .diagnostics
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>()
-    };
-    let codes = |toml: &str| {
-        let mut out: Vec<String> = diags(toml).iter().map(|d| d.code.to_string()).collect();
-        out.sort();
-        out.dedup();
-        out
-    };
-
-    // The code-review bundle's platform-only sections: warnings, and the
-    // graph still lowers.
-    let platform_only = diags(
-        "_version = 1\n[workflow]\ngraph = \"workflow.fabro\"\n[run]\ngoal = \"g\"\n\
-         [run.inputs]\nmode = \"changes\"\n[run.clone]\ndepth = 1\n[run.run_branch]\n\
-         enabled = false\n[run.pull_request]\nenabled = false\n[run.model.fallbacks]\n\
-         \"m\" = [\"p:m\"]\n[run.model]\nprovider = \"openai\"\n[run.environment]\n\
-         id = \"review\"\n[run.integrations.github.permissions]\npull_requests = \"write\"\n\
-         [run.checkpoint]\nexclude_globs = []\n[run.artifacts]\ninclude = []\n\
-         [run.execution]\nmode = \"normal\"\n[run.agent]\nfabro_tools = true\n\
-         [environments.review]\nprovider = \"docker\"\n[environments.review.network]\n\
-         mode = \"none\"\n[environments.review.image]\ndockerfile = { path = \"Dockerfile\" }\n",
-    );
-    assert!(
-        platform_only.iter().all(|d| !d.is_error()),
-        "platform-only sections are warnings: {platform_only:#?}"
-    );
-    let platform_codes: Vec<String> = platform_only.iter().map(|d| d.code.to_string()).collect();
-    for code in [
-        "ignored.workflow_toml.run.run_branch",
-        "ignored.workflow_toml.run.pull_request",
-        "ignored.workflow_toml.run.integrations",
-        "ignored.workflow_toml.run.checkpoint",
-        "ignored.workflow_toml.run.artifacts",
-        "ignored.workflow_toml.run.agent.fabro_tools",
-        "ignored.workflow_toml.environments.review.network",
-        "ignored.workflow_toml.environments.review.image.dockerfile",
-    ] {
-        assert!(
-            platform_codes.contains(&code.to_string()),
-            "{code} in {platform_codes:?}"
-        );
-    }
-    // Sections the runner now applies do not warn.
-    for code in [
-        "ignored.workflow_toml.run.goal",
-        "ignored.workflow_toml.run.clone",
-        "ignored.workflow_toml.run.model",
-        "ignored.workflow_toml.run.model.fallbacks",
-        "ignored.workflow_toml.run.environment",
-        "ignored.workflow_toml.run.execution",
-        "ignored.workflow_toml.environments",
-    ] {
-        assert!(
-            !platform_codes.contains(&code.to_string()),
-            "{code} is applied, not ignored: {platform_codes:?}"
-        );
-    }
-    assert!(
-        platform_only
-            .iter()
-            .all(|d| d.message.contains("is ignored: ")),
-        "each warning says why: {platform_only:#?}"
-    );
-
-    // Requirements the standalone runner cannot meet: specific errors.
-    assert_eq!(
-        codes("[run.environment]\nid = \"nowhere\"\n"),
-        ["unsupported.workflow_toml.run.environment"],
-        "an environment id with no table is refused, as Fabro refuses it"
-    );
-    assert_eq!(
-        codes("[run.environment]\nid = \"e\"\n[environments.e]\nprovider = \"k8s\"\n"),
-        ["unsupported.workflow_toml.environments.provider"]
-    );
-    assert_eq!(
-        codes("[run.prepare]\nsteps = [{ script = \"a\", command = [\"b\"] }]\n"),
-        ["unsupported.workflow_toml.run.prepare"],
-        "exactly one of script or command"
-    );
-    // A hook whose event Fabro does not know is a specific error; a good one
-    // loads (see `hooks_load_from_every_layer_and_merge_by_id`).
-    assert_eq!(
-        codes("[[run.hooks]]\nevent = \"stage.completed\"\nscript = \"true\"\n"),
-        ["fabro.hooks.event"]
-    );
-    // A malformed MCP entry is an error from the MCP reader (`fabro.mcps.*`);
-    // a well-formed one lowers onto the agent nodes
-    // (`mcps_lower_onto_agent_nodes`).
-    assert_eq!(
-        codes("[run.agent.mcps.files]\ntype = \"stdio\"\ncommand = \"mcp\"\n"),
-        ["fabro.mcps.entry"]
-    );
-    // An empty hook list or MCP table asks for nothing.
-    assert!(codes("[run]\nhooks = []\n[run.agent.mcps]\n").is_empty());
-    // Sub-agents and compaction have no `workflow.toml` surface at the
-    // pinned Fabro (its `[run.agent]` accepts `fabro_tools` and `mcps` only),
-    // so a request for one is refused as Fabro refuses it, never passed
-    // silently. `skills` is the runner's own extension
-    // (`run_agent_skills_is_a_warned_extension`).
-    for key in ["subagents", "compaction", "context_window"] {
-        assert_eq!(
-            codes(&format!("[run.agent]\n{key} = {{ enabled = true }}\n")),
-            ["unsupported.workflow_toml.key"],
-            "`[run.agent] {key}` is refused"
-        );
-    }
-    // The model fallback chain is read (task 12): a well-formed table is
-    // silent, a provider-qualified key is refused as Fabro refuses it.
-    assert!(codes("[run.model.fallbacks]\n\"m\" = [\"p:m\"]\n").is_empty());
-    assert_eq!(codes("[run.model.fallbacks]\n\"p/m\" = [\"q:m\"]\n"), [
-        "fabro.model_fallbacks"
-    ]);
-
-    // Keys Fabro's parser refuses, with its rename hint.
-    let legacy = diags("version = 1\n[vars]\nmode = \"x\"\n[llm]\nmodel = \"m\"\n");
-    let hints: Vec<(String, Option<String>)> = legacy
-        .iter()
-        .filter(|d| d.is_error())
-        .map(|d| (d.code.to_string(), d.hint.clone()))
-        .collect();
-    assert!(
-        hints.contains(&(
-            "unsupported.workflow_toml.key".to_string(),
-            Some("rename to `_version`".to_string())
-        )),
-        "{hints:?}"
-    );
-    assert!(
-        hints.contains(&(
-            "unsupported.workflow_toml.key".to_string(),
-            Some("rename to `[run.inputs]`".to_string())
-        )),
-        "{hints:?}"
-    );
-    assert!(
-        hints.contains(&(
-            "unsupported.workflow_toml.key".to_string(),
-            Some("rename to `[run.model]`".to_string())
-        )),
-        "{hints:?}"
-    );
-    assert_eq!(codes("_version = 2\n"), [
-        "unsupported.workflow_toml.version"
-    ]);
-    assert_eq!(codes("[run]\nnot_a_key = 1\n"), [
-        "unsupported.workflow_toml.key"
-    ]);
-    // A clean file is clean.
-    assert!(codes("_version = 1\n[workflow]\ngraph = \"workflow.fabro\"\n").is_empty());
-}
-
 /// Imports expand at load as Fabro's transform expands them: prefixed ids,
 /// dropped sentinels, spliced boundary edges, inherited defaults, propagated
 /// classes, rewritten retry targets, nested imports relative to their own
@@ -1331,125 +1126,6 @@ fn imports_expand_at_load_with_fabro_rules() {
     assert_eq!(tiers(&graph, "start")[0].1[0].0, "y");
 }
 
-/// `[run.environment]` maps the provider onto the launch settings the CLI
-/// reads, the image onto the scope's container target, and literal env onto
-/// the scope env; `[run.prepare]` steps become the first command nodes.
-#[test]
-fn run_environment_and_prepare_lower_onto_the_scope_and_the_graph() {
-    let files = files(&[(
-        "wf/workflow.toml",
-        "[run]\ngoal = \"Fix {{ inputs.target }}\"\n[run.inputs]\ntarget = \"main\"\n\
-         [run.model]\nprovider = \"openai\"\nname = \"gpt-5.6-sol\"\n\
-         [run.model.controls]\nreasoning_effort = \"low\"\nspeed = \"fast\"\n\
-         [run.model.fallbacks]\n\"gpt-5.6-sol\" = [\"anthropic:claude-opus\", \"openrouter/kimi-k3\"]\n\
-         [run.execution]\nmode = \"dry_run\"\napproval = \"auto\"\n\
-         [run.environment]\nid = \"review\"\n[run.environment.env]\nOVERRIDE = \"run\"\n\
-         [environments.review]\nprovider = \"docker\"\n[environments.review.image]\n\
-         docker = \"ghcr.io/acme/review:1\"\n[environments.review.resources]\ncpu = 4\n\
-         [environments.review.env]\nLANG = \"C.UTF-8\"\nOVERRIDE = \"base\"\n\
-         TOKEN = \"{{ secrets.REVIEW_TOKEN }}\"\n\
-         [run.prepare]\ntimeout = \"30s\"\n[[run.prepare.steps]]\nscript = \"make deps\"\n\
-         [[run.prepare.steps]]\ncommand = [\"sh\", \"-c\", \"echo {{ inputs.target }}\"]\n\
-         env = { STEP = \"two\" }\n",
-    )]);
-    let lowered = frontend_attractor::load(
-        "wf/workflow.fabro",
-        &dot(r#"
-            a [prompt="x"]
-            c [shape=parallelogram, script="true"]
-            start -> a -> c -> exit
-        "#),
-        &files,
-        &CompileInputs::new(),
-    );
-    assert!(
-        !lowered.diagnostics.has_errors(),
-        "{:?}",
-        lowered.diagnostics
-    );
-    let graph = lowered.graph.expect("lowers");
-    // Launch settings, as the CLI reads them.
-    let launch = Fabro::new().launch_settings(&graph);
-    assert_eq!(launch.sandbox_backend.as_deref(), Some("docker"));
-    assert!(launch.dry_run && launch.auto_approve);
-    assert_eq!(
-        graph.params["fabro.launch"]["cpu_cores"],
-        json!(null),
-        "resources size Daytona only"
-    );
-    assert_eq!(
-        graph.params["goal"],
-        json!("Fix main"),
-        "[run] goal renders and applies"
-    );
-    // The scope: image and literal env; the secret is not on the scope.
-    let scope = &graph.scopes[0];
-    assert!(
-        matches!(&scope.runtime.target, ir::RuntimeTarget::Container { image, .. } if image == "ghcr.io/acme/review:1"),
-        "{:?}",
-        scope.runtime.target
-    );
-    assert_eq!(scope.env["LANG"], ir::ExprOrValue::Value(json!("C.UTF-8")));
-    assert_eq!(
-        scope.env["OVERRIDE"],
-        ir::ExprOrValue::Value(json!("run")),
-        "the run's env wins over the named environment's"
-    );
-    assert!(
-        !scope.env.contains_key("TOKEN"),
-        "a secret never lands on the scope"
-    );
-    // Commands carry the secret as a reference, resolved at spawn.
-    assert_eq!(
-        node(&graph, "c").step.config["env"]["TOKEN"],
-        json!({ "$secret": "REVIEW_TOKEN" })
-    );
-    // Model defaults reach the LLM node.
-    let a = &node(&graph, "a").step.config;
-    assert_eq!(a["model"], json!("gpt-5.6-sol"));
-    assert_eq!(a["provider"], json!("openai"));
-    assert_eq!(a["reasoning_effort"], json!("low"));
-    assert_eq!(a["speed"], json!("fast"));
-    // The fallback chains ride on the node as written, references canonical.
-    assert_eq!(
-        a["fallbacks"],
-        json!({ "gpt-5.6-sol": ["anthropic:claude-opus", "openrouter:kimi-k3"] })
-    );
-    // Prepare steps: first after start, in order, with env, timeout, exit.
-    assert_eq!(tiers(&graph, "start")[0].1[0].0, "run_prepare_1");
-    assert_eq!(tiers(&graph, "run_prepare_1")[0].1[0].0, "run_prepare_2");
-    assert_eq!(tiers(&graph, "run_prepare_2")[0].1[0].0, "a");
-    let two = node(&graph, "run_prepare_2");
-    assert_eq!(two.step.kind, COMMAND_KIND);
-    assert_eq!(two.step.config["script"], json!("sh -c 'echo main'"));
-    assert_eq!(two.step.config["env"]["STEP"], json!("two"));
-    assert_eq!(
-        two.step.config["env"]["TOKEN"],
-        json!({ "$secret": "REVIEW_TOKEN" })
-    );
-    assert_eq!(two.step.config["on_failure"], json!("exit"));
-    assert_eq!(two.budget.timeout, Duration::from_secs(30));
-    assert_eq!(two.meta["classes"], json!(["run-prepare"]));
-    // A reserved id is refused.
-    let clash = frontend_attractor::load(
-        "wf/workflow.fabro",
-        &dot(r#"
-            run_prepare_1 [prompt="x"]
-            start -> run_prepare_1 -> exit
-        "#),
-        &files,
-        &CompileInputs::new(),
-    );
-    assert!(
-        clash
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "fabro.reserved_node_id"),
-        "{:?}",
-        clash.diagnostics
-    );
-}
-
 #[test]
 fn structural_mistakes_are_specific_errors() {
     let id_only = lower_ok("digraph G { start; exit; start -> exit }");
@@ -1609,34 +1285,6 @@ fn unknown_attributes_are_refused_with_the_closest_name_as_the_hint() {
         "#))
         .is_empty(),
         "`x.` attributes are carried without a word"
-    );
-}
-
-/// `[run.model.fallbacks]` rides on the `start` node as written, beside
-/// every LLM node's copy, so the start stage can check the table against
-/// the catalog before anything runs.
-#[test]
-fn the_start_node_carries_the_fallback_table() {
-    let files = files(&[(
-        "wf/workflow.toml",
-        "[run.model.fallbacks]\n\"gpt-5.6-sol\" = [\"anthropic:claude-sonnet-5\"]\n",
-    )]);
-    let lowered = load(
-        "wf/workflow.fabro",
-        &dot(r#"
-            a [prompt="x", backend="api", model="gpt-5.6-sol"]
-            start -> a -> exit
-        "#),
-        &files,
-        &CompileInputs::new(),
-    );
-    let graph = lowered.graph.expect("a graph");
-    let table = json!({ "gpt-5.6-sol": ["anthropic:claude-sonnet-5"] });
-    assert_eq!(node(&graph, "start").step.config["fallbacks"], table);
-    assert_eq!(node(&graph, "a").step.config["fallbacks"], table);
-    assert!(
-        node(&graph, "exit").step.config.get("fallbacks").is_none(),
-        "only `start` checks the table"
     );
 }
 
@@ -1934,30 +1582,6 @@ fn a_check_with_no_inputs_warns_on_unbound_inputs_and_keeps_the_text() {
 }
 
 #[test]
-fn the_bundle_root_is_the_parent_of_dot_fabro() {
-    let base = env::temp_dir().join(format!("petri-fabro-root-{}", process::id()));
-    let inside = base.join(".fabro/workflows/one");
-    fs::create_dir_all(&inside).expect("create the bundle");
-    fs::create_dir_all(base.join("docs")).expect("create docs");
-    let frontend = Fabro::new();
-    assert_eq!(
-        frontend.repo_root(&inside.join("workflow.fabro")),
-        base,
-        "a file inside the bundle belongs to the bundle's parent"
-    );
-    assert_eq!(frontend.repo_root(&base.join("docs/demo.fabro")), base);
-    let loose = env::temp_dir().join(format!("petri-fabro-loose-{}", process::id()));
-    fs::create_dir_all(&loose).expect("create a dir with no bundle");
-    assert_eq!(
-        frontend.repo_root(&loose.join("w.fabro")),
-        loose,
-        "no bundle: the file's own directory"
-    );
-    let _ = fs::remove_dir_all(&base);
-    let _ = fs::remove_dir_all(&loose);
-}
-
-#[test]
 fn a_template_local_set_inside_an_if_renders_and_a_missing_input_is_named() {
     let text = dot(r#"
         graph [model_stylesheet="
@@ -2110,133 +1734,6 @@ fn codes_of(text: &str) -> Vec<String> {
     codes(text)
 }
 
-#[test]
-fn an_unparseable_workflow_toml_that_configures_hooks_is_an_error() {
-    let files = files(&[(
-        "wf/workflow.toml",
-        "[[run.hooks]]\nevent = \"stage_start\"\nscript = \"sed 's/\\(x\\)/y/'\"\n",
-    )]);
-    let lowered = frontend_attractor::load(
-        "wf/workflow.fabro",
-        &dot(r#"
-            a [prompt="x"]
-            start -> a -> exit
-        "#),
-        &files,
-        &CompileInputs::new(),
-    );
-    let codes: Vec<String> = lowered
-        .diagnostics
-        .iter()
-        .map(|d| d.code.to_string())
-        .collect();
-    assert!(codes.contains(&"fabro.hooks.toml".to_string()), "{codes:?}");
-    assert!(
-        lowered.graph.is_none(),
-        "a hook that cannot be read is never skipped silently"
-    );
-    // The same broken file without hooks stays a warning.
-    let plain = self::files(&[("wf/workflow.toml", "[run]\ngoal = \"bad \\( escape\"\n")]);
-    let lowered = frontend_attractor::load(
-        "wf/workflow.fabro",
-        &dot(r#"
-            a [prompt="x"]
-            start -> a -> exit
-        "#),
-        &plain,
-        &CompileInputs::new(),
-    );
-    assert!(lowered.graph.is_some(), "{:?}", lowered.diagnostics);
-    assert!(
-        lowered
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "fabro.workflow_toml")
-    );
-}
-
-#[test]
-fn hooks_load_from_every_layer_and_merge_by_id() {
-    let files = files(&[
-        (
-            ".fabro/project.toml",
-            "[[run.hooks]]\nid = \"guard\"\nevent = \"stage_start\"\nscript = \"project-guard\"\n\
-             [[run.hooks]]\nevent = \"run_complete\"\nurl = \"https://example.test/done\"\n",
-        ),
-        (
-            "wf/workflow.toml",
-            "[[run.hooks]]\nid = \"guard\"\nevent = \"stage_start\"\nscript = \"workflow-guard\"\nmatcher = \"^agent$\"\n\
-             [[run.hooks]]\nevent = \"checkpoint_saved\"\nscript = \"never\"\n",
-        ),
-    ]);
-    let inputs = CompileInputs::new().with_var(
-        SETTINGS_HOOKS_VAR,
-        "[[run.hooks]]\nevent = \"run_start\"\nscript = \"user-start\"\nsandbox = false\n",
-    );
-    let lowered = frontend_attractor::load(
-        "wf/workflow.fabro",
-        &dot(r#"
-            a [prompt="x"]
-            start -> a -> exit
-        "#),
-        &files,
-        &inputs,
-    );
-    let codes: Vec<String> = lowered
-        .diagnostics
-        .iter()
-        .map(|d| d.code.to_string())
-        .collect();
-    assert!(
-        codes.contains(&"fabro.hooks.checkpoint_saved".to_string()),
-        "{codes:?}"
-    );
-    assert!(lowered.diagnostics.errors().count() == 0, "{codes:?}");
-    let graph = lowered.graph.expect("lowers");
-    let hooks = graph.params["fabro_hooks"]
-        .as_array()
-        .expect("hook list")
-        .clone();
-    let summary: Vec<(String, String, String)> = hooks
-        .iter()
-        .map(|h| {
-            (
-                h["event"].as_str().unwrap_or("?").to_owned(),
-                h["command"]
-                    .as_str()
-                    .or(h["url"].as_str())
-                    .unwrap_or("?")
-                    .to_owned(),
-                h["source"].as_str().unwrap_or("?").to_owned(),
-            )
-        })
-        .collect();
-    assert_eq!(summary, vec![
-        (
-            "run_start".into(),
-            "user-start".into(),
-            "settings.toml".into()
-        ),
-        (
-            "stage_start".into(),
-            "workflow-guard".into(),
-            "wf/workflow.toml".into()
-        ),
-        (
-            "run_complete".into(),
-            "https://example.test/done".into(),
-            ".fabro/project.toml".into()
-        ),
-        (
-            "checkpoint_saved".into(),
-            "never".into(),
-            "wf/workflow.toml".into()
-        ),
-    ]);
-    assert_eq!(hooks[1]["matcher"], json!("^agent$"));
-    assert_eq!(hooks[0]["sandbox"], json!(false));
-}
-
 /// Every agent node carries Fabro's compaction values (always on, 80
 /// percent of the context window, six preserved turns); a prompt node, which
 /// runs no agent loop, carries none.
@@ -2255,438 +1752,60 @@ fn agent_nodes_carry_fabros_compaction_settings() {
     assert!(node(&graph, "p").step.config.get("compaction").is_none());
 }
 
-/// `[run.agent.mcps]` from the three settings layers lands on every agent
-/// node (never on a prompt node), merged by name with the higher layer
-/// winning, interpolated, with secrets as `$secret` references; a nested
-/// workflow's agents inherit the parent's servers.
+/// The language alone: a `workflow.toml` beside the file, a
+/// `.fabro/project.toml` at the root and a settings-layer variable are not
+/// this frontend's to read. The same DOT lowers to the same graph with and
+/// without them, and none of their sections reaches a node. The Fabro
+/// frontend is what applies them (`crates/fabro/frontend/tests/lowering.rs`).
 #[test]
-fn mcps_lower_onto_agent_nodes_and_into_nested_workflows() {
-    let files = files(&[
+fn attractor_lowers_the_same_graph_beside_fabro_settings_files() {
+    let text = dot(r#"
+        graph [default_model="graph/model"]
+        a [prompt="Do the work"]
+        c [shape=parallelogram, script="true"]
+        start -> a -> c -> exit
+    "#);
+    // The settings-layer text rides a compile variable, and every compile
+    // variable lands in the graph's `vars` parameter whoever reads it, so
+    // both lowerings get the same inputs and only the files differ.
+    let inputs = CompileInputs::new().with_var(
+        "fabro.settings_toml",
+        "[run.model]\nprovider = \"settings-provider\"\n",
+    );
+    let bare = lower_ok_with(&text, &NoFiles, &inputs);
+    let with_files = files(&[
         (
-            "wf/workflow.toml",
-            "[run.agent.mcps.notes]\ntype = \"stdio\"\ncommand = [\"srv\", \"{{ inputs.root }}\"]\nenv = { TOKEN = \"{{ secrets.NOTES }}\" }\ntool_timeout = \"90s\"\n[run.agent.mcps.gone]\ntype = \"http\"\nurl = \"http://gone\"\nenabled = false\n",
+            "workflow.toml",
+            "_version = 1\n[run.model]\nname = \"toml/model\"\n[run.prepare]\nsteps = [{ script = \
+             \"echo prepared\" }]\n[[run.hooks]]\nevent = \"stage_start\"\nscript = \"true\"\n\
+             [run.agent.mcps.files]\ntype = \"stdio\"\ncommand = [\"true\"]\n",
         ),
         (
             ".fabro/project.toml",
-            "[run.agent.mcps.notes]\ntype = \"http\"\nurl = \"http://low\"\n[run.agent.mcps.gone]\ntype = \"http\"\nurl = \"http://gone\"\n",
-        ),
-        (
-            "wf/child.fabro",
-            "digraph C { start [shape=Mdiamond] exit [shape=Msquare] inner [prompt=\"x\"] start -> inner -> exit }",
+            "[run.model]\nprovider = \"project-provider\"\n",
         ),
     ]);
-    let inputs = CompileInputs::new().with_input("root", "/srv").with_var(
-        SETTINGS_HOOKS_VAR,
-        "[run.agent.mcps.user]\ntype = \"http\"\nurl = \"http://user\"\n",
+    let beside = lower_ok_with(&text, &with_files, &inputs);
+    assert_eq!(
+        frontend::graph_digest(&bare),
+        frontend::graph_digest(&beside),
+        "the settings files change nothing in the language's lowering"
     );
-    let lowered = frontend_attractor::load(
-        "wf/w.fabro",
-        &dot(r#"
-            graph [backend="api", default_model="m"]
-            a [prompt="a"]
-            p [shape=tab, prompt="p"]
-            child [shape=house, stack.child_workflow="child.fabro"]
-            start -> a -> p -> child -> exit
-        "#),
-        &files,
-        &inputs,
+    let agent = node(&beside, "a");
+    assert_eq!(agent.step.config["model"], json!("graph/model"));
+    assert!(agent.step.config.get("provider").is_none());
+    assert_eq!(
+        agent.step.config["mcps"],
+        json!([]),
+        "no server reaches the node"
     );
     assert!(
-        !lowered.diagnostics.has_errors(),
-        "{:?}",
-        lowered.diagnostics
-    );
-    let graph = lowered.graph.expect("graph");
-    let mcps = &node(&graph, "a").step.config["mcps"];
-    let names: Vec<&str> = mcps
-        .as_array()
-        .expect("a list")
-        .iter()
-        .map(|s| s["name"].as_str().expect("name"))
-        .collect();
-    assert_eq!(names, ["notes", "user"], "merged by name, `gone` disabled");
-    assert_eq!(mcps[0]["transport"]["type"], json!("stdio"));
-    assert_eq!(
-        mcps[0]["transport"]["command"],
-        json!(["srv", "/srv"]),
-        "the workflow layer wins and interpolates"
-    );
-    assert_eq!(
-        mcps[0]["transport"]["env"]["TOKEN"],
-        json!({"$secret": "NOTES"})
-    );
-    assert_eq!(mcps[0]["tool_timeout_ms"], json!(90_000));
-    assert_eq!(mcps[0]["startup_timeout_ms"], json!(10_000));
-    assert_eq!(mcps[0]["source"], json!("wf/workflow.toml"));
-    assert_eq!(mcps[1]["transport"]["url"], json!("http://user"));
-    assert!(
-        node(&graph, "p").step.config.get("mcps").is_none(),
-        "a prompt node has no tools"
-    );
-    let child = lowered.children.first().expect("the child graph");
-    let inner = child
-        .body
-        .nodes
-        .iter()
-        .find(|n| n.name == "inner")
-        .expect("inner");
-    assert_eq!(
-        inner.step.config["mcps"].as_array().map(Vec::len),
-        Some(2),
-        "the nested workflow inherits the servers"
-    );
-}
-
-/// `[run.agent] skills` names extra skill directories: a Petri extension
-/// Fabro refuses, so it warns, and it reaches agent nodes (not prompt
-/// nodes) as `skill_dirs`. A value that is not a list of paths is refused.
-#[test]
-fn run_agent_skills_is_a_warned_extension() {
-    let lowered = |toml: &str| {
-        let files = files(&[("wf/workflow.toml", toml)]);
-        frontend_attractor::load(
-            "wf/workflow.fabro",
-            &dot(r#"
-                a [prompt="Work."]
-                p [shape=tab, prompt="Summarize."]
-                start -> a -> p -> exit
-            "#),
-            &files,
-            &CompileInputs::new(),
-        )
-    };
-    let good =
-        lowered("_version = 1\n[run.agent]\nskills = [\"own/skills\", \"/shared/skills\"]\n");
-    let codes: Vec<String> = good
-        .diagnostics
-        .iter()
-        .map(|d| d.code.to_string())
-        .collect();
-    assert_eq!(codes, ["fabro.petri_extension"], "{:?}", good.diagnostics);
-    let graph = good.graph.expect("lowers");
-    let config = |name: &str| {
-        graph
-            .body
+        !beside
             .nodes
             .iter()
-            .find(|n| n.name == name)
-            .expect("node")
-            .step
-            .config
-            .clone()
-    };
-    assert_eq!(
-        config("a")["skill_dirs"],
-        serde_json::json!(["own/skills", "/shared/skills"])
+            .any(|n| n.name.starts_with(frontend_attractor::PREPARE_NODE_PREFIX)),
+        "no prepare node"
     );
-    assert!(
-        config("p").get("skill_dirs").is_none(),
-        "a prompt node has no tools, so no skills"
-    );
-    let none = lowered("_version = 1\n[run.agent]\nskills = []\n");
-    assert!(
-        none.diagnostics.iter().next().is_none(),
-        "{:?}",
-        none.diagnostics
-    );
-    for bad in [
-        "[run.agent]\nskills = { enabled = true }\n",
-        "[run.agent]\nskills = [\"\"]\n",
-        "[run.agent]\nskills = [1]\n",
-    ] {
-        let refused = lowered(bad);
-        let codes: Vec<String> = refused
-            .diagnostics
-            .iter()
-            .map(|d| d.code.to_string())
-            .collect();
-        assert_eq!(
-            codes,
-            ["unsupported.workflow_toml.run.agent.skills"],
-            "{bad}: {:?}",
-            refused.diagnostics
-        );
-    }
-}
-
-/// Every agent node carries the reference sub-agent configuration (on,
-/// Pebble's open-session bound); a prompt node, which runs no tools, does
-/// not; and the `[run.agent] subagents` key stays refused as Fabro refuses
-/// it, with a hint that says the tools are always on.
-#[test]
-fn agent_nodes_carry_the_reference_subagent_configuration() {
-    use frontend_attractor::subagents::{CONFIG_KEY, DEFAULT_MAX_OPEN_SESSIONS, SubagentConfig};
-    let graph = lower_ok(&dot(r#"
-        graph [backend="api", default_model="test/model"]
-        agent [prompt="delegate"]
-        ask [shape=tab, prompt="summarize"]
-        start -> agent -> ask -> exit
-    "#));
-    let agent = &node(&graph, "agent").step.config;
-    let read: SubagentConfig =
-        serde_json::from_value(agent[CONFIG_KEY].clone()).expect("the configuration reads");
-    assert_eq!(read, SubagentConfig::reference());
-    assert!(read.enabled);
-    assert_eq!(read.max_open_sessions, DEFAULT_MAX_OPEN_SESSIONS);
-    assert!(
-        node(&graph, "ask").step.config.get(CONFIG_KEY).is_none(),
-        "a prompt node runs no tools"
-    );
-
-    let files = files(&[(
-        "wf/workflow.toml",
-        "[run.agent]\nsubagents = { enabled = false }\n",
-    )]);
-    let lowered = frontend_attractor::load(
-        "wf/workflow.fabro",
-        &dot(r#"
-            a [shape=parallelogram, script="true"]
-            start -> a -> exit
-        "#),
-        &files,
-        &CompileInputs::new(),
-    );
-    let refusal = lowered
-        .diagnostics
-        .iter()
-        .find(|d| d.code.as_str() == "unsupported.workflow_toml.key")
-        .expect("the key is refused");
-    assert!(refusal.is_error());
-    assert!(
-        refusal.message.contains("run.agent.subagents")
-            && refusal
-                .message
-                .contains("always available to native agents"),
-        "{}",
-        refusal.message
-    );
-}
-
-/// `[run.clone]` lowers onto the launch parameter with Fabro's defaults
-/// (enabled, 100 commits), the repository the host bound rides beside it,
-/// and the root `start` stage reads the same entry as its `checkout`.
-#[test]
-fn run_clone_lands_on_the_launch_param_with_the_bound_repository() {
-    let lowered = frontend_attractor::load(
-        "wf/workflow.fabro",
-        &dot("c [shape=parallelogram, script=\"true\"]\nstart -> c -> exit"),
-        &files(&[("wf/workflow.toml", "_version = 1\n")]),
-        &CompileInputs::new(),
-    );
-    let graph = lowered.graph.expect("lowers");
-    assert_eq!(
-        graph.params["fabro.launch"]["clone"],
-        json!({ "enabled": true, "depth": 100, "repository": null }),
-        "Fabro's defaults, no repository when the host bound none"
-    );
-    let checkout = &node(&graph, "start").step.config["checkout"];
-    assert!(
-        checkout.is_object(),
-        "the start stage reads the clone entry through an expression: {checkout}"
-    );
-
-    let lowered = frontend_attractor::load(
-        "wf/workflow.fabro",
-        &dot("c [shape=parallelogram, script=\"true\"]\nstart -> c -> exit"),
-        &files(&[(
-            "wf/workflow.toml",
-            "_version = 1\n[run.clone]\nenabled = false\ndepth = 0\n",
-        )]),
-        &CompileInputs::new().with_var(frontend::REPOSITORY_VAR, "/srv/repo"),
-    );
-    assert!(
-        !lowered.diagnostics.has_errors(),
-        "{:?}",
-        lowered.diagnostics
-    );
-    assert!(
-        !lowered
-            .diagnostics
-            .iter()
-            .any(|d| d.code.as_str() == "ignored.workflow_toml.run.clone"),
-        "[run.clone] is applied, not ignored"
-    );
-    let graph = lowered.graph.expect("lowers");
-    assert_eq!(
-        graph.params["fabro.launch"]["clone"],
-        json!({ "enabled": false, "depth": 0, "repository": "/srv/repo" })
-    );
-
-    let lowered = frontend_attractor::load(
-        "wf/workflow.fabro",
-        &dot("c [shape=parallelogram, script=\"true\"]\nstart -> c -> exit"),
-        &files(&[(
-            "wf/workflow.toml",
-            "_version = 1\n[run.clone]\nmirror = true\n",
-        )]),
-        &CompileInputs::new(),
-    );
-    assert!(
-        lowered
-            .diagnostics
-            .iter()
-            .any(|d| d.code.as_str() == "unsupported.workflow_toml.key"),
-        "a key Fabro's clone table refuses is refused: {:?}",
-        lowered.diagnostics
-    );
-}
-
-/// `[run.model]` from the settings and project layers fills what
-/// `workflow.toml` left unset, in Fabro's order: workflow over project over
-/// settings.
-#[test]
-fn run_model_defaults_come_from_the_project_and_settings_layers() {
-    let layered = files(&[
-        (
-            ".fabro/project.toml",
-            "_version = 1\n[run.model]\nname = \"project-model\"\n[run.model.controls]\nreasoning_effort = \"low\"\n",
-        ),
-        (
-            "wf/workflow.toml",
-            "_version = 1\n[run.model.controls]\nreasoning_effort = \"high\"\n",
-        ),
-    ]);
-    let inputs = CompileInputs::new().with_var(
-        SETTINGS_HOOKS_VAR,
-        "[run.model]\nprovider = \"openai\"\nname = \"settings-model\"\n[run.model.controls]\nspeed = \"fast\"\n",
-    );
-    let lowered = frontend_attractor::load(
-        "wf/workflow.fabro",
-        &dot("a [prompt=\"x\"]\nstart -> a -> exit"),
-        &layered,
-        &inputs,
-    );
-    assert!(
-        !lowered.diagnostics.has_errors(),
-        "{:?}",
-        lowered.diagnostics
-    );
-    let graph = lowered.graph.expect("lowers");
-    let config = &node(&graph, "a").step.config;
-    assert_eq!(
-        config["model"],
-        json!("project-model"),
-        "project over settings"
-    );
-    assert_eq!(
-        config["provider"],
-        json!("openai"),
-        "settings fills what no layer above set"
-    );
-    assert_eq!(
-        config["reasoning_effort"],
-        json!("high"),
-        "workflow over project"
-    );
-    assert_eq!(config["speed"], json!("fast"));
-
-    // A bundle that declares no model at all takes the settings layer's.
-    let lowered = frontend_attractor::load(
-        "wf/workflow.fabro",
-        &dot("a [prompt=\"x\"]\nstart -> a -> exit"),
-        &files(&[("wf/workflow.toml", "_version = 1\n")]),
-        &CompileInputs::new().with_var(
-            SETTINGS_HOOKS_VAR,
-            "[run.model]\nprovider = \"anthropic\"\nname = \"claude-sonnet-5\"\n",
-        ),
-    );
-    assert!(
-        !lowered.diagnostics.has_errors(),
-        "{:?}",
-        lowered.diagnostics
-    );
-    let graph = lowered.graph.expect("lowers");
-    let config = &node(&graph, "a").step.config;
-    assert_eq!(config["model"], json!("claude-sonnet-5"));
-    assert_eq!(config["provider"], json!("anthropic"));
-}
-
-/// The launch-level model default (`petri run --model`, `--provider`, bound
-/// as the `petri.launch_*` compile variables) sits below every other layer:
-/// a node's own attribute, the graph's `default_model`, then `[run.model]`
-/// all beat it, and it fills only what none of them set. The launch
-/// parameter records what the launch gave, as given.
-#[test]
-fn the_launch_model_default_sits_below_every_layer() {
-    let launch = CompileInputs::new()
-        .with_var(frontend::LAUNCH_MODEL_VAR, "launch-model")
-        .with_var(frontend::LAUNCH_PROVIDER_VAR, "launch-provider");
-    let lower = |workflow_toml: &str, body: &str, inputs: &CompileInputs| {
-        let lowered = frontend_attractor::load(
-            "wf/workflow.fabro",
-            &dot(body),
-            &files(&[("wf/workflow.toml", workflow_toml)]),
-            inputs,
-        );
-        assert!(
-            !lowered.diagnostics.has_errors(),
-            "{:?}",
-            lowered.diagnostics
-        );
-        lowered.graph.expect("lowers")
-    };
-
-    // The node's attribute, then `[run.model]`, beat the launch.
-    let graph = lower(
-        "_version = 1\n[run.model]\nname = \"wf-model\"\n",
-        "a [prompt=\"x\", model=\"node-model\"]\nb [prompt=\"x\"]\nstart -> a -> b -> exit",
-        &launch,
-    );
-    assert_eq!(node(&graph, "a").step.config["model"], json!("node-model"));
-    assert_eq!(node(&graph, "b").step.config["model"], json!("wf-model"));
-    assert_eq!(
-        node(&graph, "b").step.config["provider"],
-        json!("launch-provider"),
-        "the launch fills the provider no layer set"
-    );
-    assert_eq!(
-        graph.params["fabro.launch"]["model"],
-        json!("launch-model"),
-        "the launch parameter records the launch as given"
-    );
-    assert_eq!(
-        graph.params["fabro.launch"]["provider"],
-        json!("launch-provider")
-    );
-
-    // The graph's `default_model` beats the launch.
-    let graph = lower(
-        "_version = 1\n",
-        "graph [default_model=\"graph-model\"]\na [prompt=\"x\"]\nstart -> a -> exit",
-        &launch,
-    );
-    assert_eq!(node(&graph, "a").step.config["model"], json!("graph-model"));
-
-    // Nothing else named a model: the launch's model and provider apply.
-    let graph = lower(
-        "_version = 1\n",
-        "a [prompt=\"x\"]\nstart -> a -> exit",
-        &launch,
-    );
-    let config = &node(&graph, "a").step.config;
-    assert_eq!(config["model"], json!("launch-model"));
-    assert_eq!(config["provider"], json!("launch-provider"));
-
-    // A provider alone: the node carries the provider and no model; the
-    // runner picks the provider's default model from its catalog.
-    let graph = lower(
-        "_version = 1\n",
-        "a [prompt=\"x\"]\nstart -> a -> exit",
-        &CompileInputs::new().with_var(frontend::LAUNCH_PROVIDER_VAR, "openai"),
-    );
-    let config = &node(&graph, "a").step.config;
-    assert_eq!(config.get("model"), None, "{config}");
-    assert_eq!(config["provider"], json!("openai"));
-    assert_eq!(graph.params["fabro.launch"]["model"], json!(null));
-    assert_eq!(graph.params["fabro.launch"]["provider"], json!("openai"));
-
-    // No launch: the parameter says so, and the node names nothing.
-    let graph = lower(
-        "_version = 1\n",
-        "a [prompt=\"x\"]\nstart -> a -> exit",
-        &CompileInputs::new(),
-    );
-    assert_eq!(node(&graph, "a").step.config.get("model"), None);
-    assert_eq!(graph.params["fabro.launch"]["model"], json!(null));
-    assert_eq!(graph.params["fabro.launch"]["provider"], json!(null));
+    assert_eq!(beside.params["fabro_hooks"], json!([]));
+    assert!(!beside.params.contains_key("fabro.launch"));
 }

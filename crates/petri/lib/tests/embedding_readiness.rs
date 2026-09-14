@@ -23,6 +23,9 @@ use std::time::Duration;
 use std::{env, fs};
 
 use lithos_llm::credentials::{CredentialHeader, Credentials, SecretValue, StaticCredentials};
+use petri::attractor::pebble::PebbleClient;
+use petri::attractor::register;
+use petri::attractor::skills::FabroHome;
 use petri::driver::lifecycle::{
     AdmitAttempt, AttemptDecision, ExecutionHooks, Note, PrepareError, PrepareResult, Prepared,
     Recorded, RunFinished, ScopeReleased, Transition, TransitionError, TransitionReport,
@@ -37,9 +40,6 @@ use petri::execution::{
     Interviewer,
 };
 use petri::executor::Retention;
-use petri::fabro::pebble::PebbleClient;
-use petri::fabro::register;
-use petri::fabro::skills::FabroHome;
 use petri::frontend::CompileInputs;
 use petri::frontend::fabro::Fabro;
 use petri::ir::RunStatus;

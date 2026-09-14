@@ -1,13 +1,19 @@
-//! The Fabro frontend: Graphviz DOT workflows → HIR.
+//! The Attractor frontend: Graphviz DOT workflows → HIR.
 //!
 //! Text in, `Graph` and diagnostics out, exactly as the GitHub Actions
-//! frontend. Fabro renders templates, resolves `@file` references and applies
-//! its model stylesheet once at run creation and persists the literal graph;
-//! this frontend does the same at load, so what the engine sees is literal.
+//! frontend. The reference implementation (Fabro) renders templates,
+//! resolves `@file` references and applies its model stylesheet once at run
+//! creation and persists the literal graph; this frontend does the same at
+//! load, so what the engine sees is literal.
+//!
+//! This crate lowers the language alone. It reads no settings file: a host
+//! frontend that has one (Fabro's `workflow.toml` and its settings layers,
+//! `frontend_fabro`) resolves it into a [`RunSettings`] and calls [`lower`].
+//! [`Attractor`] is the bare frontend, with default settings.
 //!
 //! What lowers where:
 //!
-//! | Fabro                         | Petri                                            |
+//! | Attractor                     | Petri                                            |
 //! |-------------------------------|--------------------------------------------------|
 //! | `Mdiamond` start              | `noop`, the graph entry                          |
 //! | `Msquare` exit                | `noop`; `Completion::TerminalNode`               |
@@ -25,7 +31,7 @@
 //! | `loop_restart`                | `EdgeTransition::Restart`                        |
 //!
 //! Everything else is refused with a specific `unsupported.*` code. See
-//! `FORMAT.md` for the dialect as lowered.
+//! `FORMAT.md` for the language as lowered.
 
 pub mod condition;
 pub mod dot;
@@ -40,27 +46,34 @@ pub mod model;
 pub mod stylesheet;
 pub mod template;
 
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 use frontend::{
-    CompileInputs, Diagnostics, FileSource, Frontend, LaunchSettings, Lowered, NoFiles,
-    WorkspaceRetention,
+    CompileInputs, Diagnostics, FileSource, Frontend, Lowered, NoFiles, WorkspaceRetention,
 };
 pub use lower::policy::{DEFAULT_SIGNATURE_LIMIT, DEFAULT_STALL_TIMEOUT};
 pub use lower::{
-    BRANCH_META_KIND, CompactionSettings, DEFAULT_MAX_PARALLEL, DEFAULT_PRESERVE_TURNS,
-    DEFAULT_THRESHOLD_PERCENT, ENVIRONMENT_PARAM, EnvValue, Environment, FailurePolicy,
-    IMPORT_ERROR, Kind, LAUNCH_PARAM, MAX_CALL_DEPTH, MAX_FIRINGS, MAX_FOR_EACH_ITEMS,
-    MAX_INVOCATIONS, ModelDefaults, PREPARE_NODE_PREFIX, Policy, PrepareStep, ROUTES_KEY,
-    RunSettings, shape_of, subagents,
+    BRANCH_META_KIND, CloneSettings, CompactionSettings, DEFAULT_MAX_PARALLEL,
+    DEFAULT_PRESERVE_TURNS, DEFAULT_THRESHOLD_PERCENT, EnvValue, Environment, FailurePolicy,
+    IMPORT_ERROR, Kind, MAX_CALL_DEPTH, MAX_FIRINGS, MAX_FOR_EACH_ITEMS, MAX_INVOCATIONS,
+    ModelDefaults, PREPARE_NODE_PREFIX, Policy, PrepareStep, ROUTES_KEY, RunSettings,
+    SkillSettings, shape_of, skills, subagents,
 };
-use serde_json::Value;
-use smol_str::SmolStr;
 
-/// Parse and lower one workflow. `file` is the repository-relative path the
-/// spans carry and `@file` references resolve beside; `files` reads them.
-pub fn load(file: &str, text: &str, files: &dyn FileSource, inputs: &CompileInputs) -> Lowered {
-    let mut diags = Diagnostics::new();
+/// Parse and lower one workflow under `settings`. `file` is the
+/// repository-relative path the spans carry and `@file` references resolve
+/// beside; `files` reads them; `inputs` are the run's inputs and variables,
+/// resolved (a host frontend has applied its file defaults); `diags` is what
+/// the caller diagnosed while resolving them, so an error there still
+/// rejects the graph.
+pub fn lower(
+    file: &str,
+    text: &str,
+    files: &dyn FileSource,
+    inputs: &CompileInputs,
+    settings: RunSettings,
+    mut diags: Diagnostics,
+) -> Lowered {
     let dot = match dot::parse(file, text) {
         Ok(dot) => dot,
         Err(diagnostic) => {
@@ -69,7 +82,19 @@ pub fn load(file: &str, text: &str, files: &dyn FileSource, inputs: &CompileInpu
         }
     };
     let workflow = model::build(&dot);
-    lower::lower(workflow, file, files, inputs, diags)
+    lower::lower(workflow, file, files, inputs, settings, diags)
+}
+
+/// [`lower`] under the default settings: the bare language.
+pub fn load(file: &str, text: &str, files: &dyn FileSource, inputs: &CompileInputs) -> Lowered {
+    lower(
+        file,
+        text,
+        files,
+        inputs,
+        RunSettings::default(),
+        Diagnostics::new(),
+    )
 }
 
 /// [`load`] with no repository: every `@file` reference is missing.
@@ -77,38 +102,26 @@ pub fn load_text(file: &str, text: &str) -> Lowered {
     load(file, text, &NoFiles, &CompileInputs::new())
 }
 
-/// Fabro, as a [`Frontend`]: it claims `*.fabro` and `*.dot`.
+/// The bare language, as a [`Frontend`]: it claims `*.fabro` and `*.dot`
+/// and lowers under [`RunSettings::default`]. The shipped binary registers
+/// the Fabro frontend instead, which wraps this one; a host that wants the
+/// language without Fabro's settings files registers this.
 #[derive(Debug, Default)]
-pub struct Fabro {
-    /// The host's user settings layer (`$FABRO_HOME/settings.toml`), bound
-    /// as the `fabro.settings_toml` variable of every load that does not
-    /// bind its own.
-    settings_toml: Option<String>,
-}
+pub struct Attractor;
 
-impl Fabro {
+impl Attractor {
     pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Carry the user settings layer's text into every load. Fabro reads
-    /// `~/.fabro/settings.toml` (`$FABRO_HOME` when set) for hooks, MCP
-    /// servers, and `[run.model]` defaults; the host reads the file and
-    /// hands the text here, so lowering stays free of environment reads.
-    #[must_use]
-    pub fn with_settings_toml(mut self, text: Option<String>) -> Self {
-        self.settings_toml = text;
-        self
+        Self
     }
 }
 
-impl Frontend for Fabro {
+impl Frontend for Attractor {
     #[expect(
         clippy::unnecessary_literal_bound,
         reason = "the `Frontend` trait fixes this signature; an impl cannot widen the lifetime"
     )]
     fn name(&self) -> &str {
-        "fabro"
+        "attractor"
     }
 
     fn claims(&self, path: &Path) -> bool {
@@ -125,68 +138,13 @@ impl Frontend for Fabro {
         files: &dyn FileSource,
         inputs: &CompileInputs,
     ) -> Lowered {
-        match &self.settings_toml {
-            Some(settings) if !inputs.vars.contains_key(hooks::SETTINGS_HOOKS_VAR) => {
-                let mut inputs = inputs.clone();
-                inputs.vars.insert(
-                    SmolStr::new(hooks::SETTINGS_HOOKS_VAR),
-                    Value::String(settings.clone()),
-                );
-                load(file, text, files, &inputs)
-            }
-            _ => load(file, text, files, inputs),
-        }
+        load(file, text, files, inputs)
     }
 
-    /// The launch settings `workflow.toml` declared, read back from the
-    /// persisted graph's `fabro.launch` parameter.
-    /// Every root graph this frontend lowers carries the launch parameter.
-    fn claims_graph(&self, graph: &ir::Graph) -> bool {
-        graph.params.contains_key(LAUNCH_PARAM)
-    }
-
-    fn launch_settings(&self, graph: &ir::Graph) -> LaunchSettings {
-        let Some(launch) = graph.params.get(LAUNCH_PARAM) else {
-            return LaunchSettings::default();
-        };
-        LaunchSettings {
-            sandbox_backend: launch["sandbox_backend"].as_str().map(str::to_owned),
-            dry_run:         launch["dry_run"].as_bool().unwrap_or(false),
-            auto_approve:    launch["auto_approve"].as_bool().unwrap_or(false),
-        }
-    }
-
-    /// A Fabro run's result is the files its stages produced or changed, so a
+    /// A run's result is the files its stages produced or changed, so a
     /// standalone run keeps its workspace after success, failure and
     /// cancellation; only an explicit `--retain never` deletes it.
     fn default_retention(&self) -> WorkspaceRetention {
         WorkspaceRetention::Always
-    }
-
-    /// The nearest ancestor holding a `.fabro` directory — the bundle root
-    /// Fabro resolves `fabro/...` paths against — else the file's own
-    /// directory. A file inside the bundle itself belongs to the bundle's
-    /// parent, never to `.fabro`.
-    fn repo_root(&self, file: &Path) -> PathBuf {
-        let dir = file
-            .parent()
-            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        let mut current = Some(dir.as_path());
-        while let Some(candidate) = current {
-            if candidate.join(".fabro").is_dir() {
-                return candidate.to_path_buf();
-            }
-            if candidate
-                .components()
-                .next_back()
-                .is_some_and(|c| c == Component::Normal(".fabro".as_ref()))
-            {
-                return candidate
-                    .parent()
-                    .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-            }
-            current = candidate.parent();
-        }
-        dir
     }
 }

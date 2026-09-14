@@ -80,7 +80,7 @@ impl Customs {
 }
 
 fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fabro/acceptance/testdata/skills")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../acceptance/testdata/skills")
 }
 
 fn copy_tree(from: &Path, to: &Path) {
@@ -117,7 +117,7 @@ fn lower(dot: &str, toml: &str) -> Graph {
         "wf/workflow.toml".to_string(),
         toml.to_string(),
     )]));
-    let lowered = frontend_attractor::load("wf/w.fabro", dot, &files, &CompileInputs::new());
+    let lowered = frontend_fabro::load("wf/w.fabro", dot, &files, &CompileInputs::new());
     assert!(
         !lowered.diagnostics.has_errors(),
         "{:?}",

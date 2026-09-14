@@ -36,8 +36,8 @@ pub const EVENT_KIND: &str = "fabro.checkout";
 /// The archive's name inside the workspace while it is extracted.
 const ARCHIVE: &str = ".petri-checkout.tar";
 
-/// What the `start` stage's `checkout` config resolves to: the `clone`
-/// entry of the `fabro.launch` parameter.
+/// The `start` stage's `checkout` config: the run's clone settings and the
+/// repository the host bound, as the lowering wrote them.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Checkout {

@@ -143,7 +143,7 @@ fn lower_all(dot: &str, toml: &str) -> Lowered {
         "wf/workflow.toml".to_string(),
         toml.to_string(),
     )]));
-    let lowered = frontend_attractor::load("wf/w.fabro", dot, &files, &CompileInputs::new());
+    let lowered = frontend_fabro::load("wf/w.fabro", dot, &files, &CompileInputs::new());
     assert!(
         !lowered.diagnostics.has_errors(),
         "{:?}",
@@ -2465,8 +2465,8 @@ async fn speed_and_max_tokens_reach_the_model_requests() {
 // ── ACP: best effort ────────────────────────────────────────────────────────
 
 fn fake_agent(dir: &RunDir) -> PathBuf {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fabro/acceptance/testdata/fake_acp_agent.py");
+    let source =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../acceptance/testdata/fake_acp_agent.py");
     let script =
         fs::read_to_string(&source).unwrap_or_else(|e| panic!("{}: {e}", source.display()));
     let path = dir.path().join("fake_acp_agent.py");

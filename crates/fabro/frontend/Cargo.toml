@@ -1,0 +1,37 @@
+[package]
+name = "petri-frontend-fabro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The Fabro frontend: Fabro's settings layers around the Attractor language."
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+# The package is `petri-frontend-fabro`; the crate is `frontend_fabro`, so code reads `frontend_fabro::…`.
+name = "frontend_fabro"
+
+[dependencies]
+ir = { workspace = true }
+frontend = { workspace = true }
+frontend-attractor = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+shlex = { workspace = true }
+smol_str = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+attractor-steps = { workspace = true }
+execution = { workspace = true }
+runtime = { workspace = true }
+steps = { workspace = true }
+testkit = { workspace = true }
+lithos-llm = { workspace = true, features = ["runtime", "openai"] }
+pebble-coding-agent = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util"] }

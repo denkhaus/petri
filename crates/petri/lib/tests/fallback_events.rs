@@ -18,14 +18,14 @@ use lithos_llm::types::ErrorKind;
 use pebble_coding_agent::test_support::{
     ScriptedCall, ScriptedFailure, scripted_client, text_response,
 };
+use petri::attractor::fallback::PLAN_EVENT;
+use petri::attractor::pebble::PebbleClient;
+use petri::attractor::register;
 use petri::engine::Event;
 use petri::execution::events::{CollectingSink, EventProjector, RunEvent};
 use petri::execution::host::{self, HostRun};
 use petri::execution::{CoordinatorEvent, ExecutionObserver};
 use petri::executor::Retention;
-use petri::fabro::fallback::PLAN_EVENT;
-use petri::fabro::pebble::PebbleClient;
-use petri::fabro::register;
 use petri::frontend::CompileInputs;
 use petri::frontend::fabro::Fabro;
 use petri::ir::{RunStatus, Value};

@@ -3,7 +3,7 @@
 //! run resolves at spawn; `{{ env.NAME }}` parses but never resolves. An
 //! unknown token body stays literal, as in Fabro.
 
-use crate::template::Context;
+use frontend_attractor::template::Context;
 
 /// What a settings string interpolates to.
 #[derive(Clone, Debug, PartialEq, Eq)]

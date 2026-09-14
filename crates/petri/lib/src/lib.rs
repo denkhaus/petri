@@ -37,6 +37,7 @@ use std::time::{Duration, Instant};
 use std::{env, fs, io, thread};
 
 use attractor_steps::pebble::PebbleClient;
+use attractor_steps::skills::FabroHome;
 pub use execution::{self, host};
 use frontend_gha::exprs::GITHUB_TOKEN_SECRET;
 use lithos_llm::catalog::{Catalog, CatalogError};
@@ -56,14 +57,22 @@ pub mod executor {
 
 /// The frontend interface, with every format this distribution ships.
 pub mod frontend {
-    pub use frontend_attractor as fabro;
+    pub use frontend_attractor as attractor;
+    pub use frontend_fabro as fabro;
     pub use frontend_gha as gha;
     pub use runtime::frontend::*;
 }
 
-/// The Fabro component's run-time half: its step kinds and the stub registry.
-pub mod fabro {
+/// The Attractor component's run-time half: its step kinds and the stub
+/// registry. A Fabro workflow runs on these.
+pub mod attractor {
     pub use attractor_steps::*;
+}
+
+/// The Fabro component: the frontend that wraps the Attractor language in
+/// Fabro's settings layers. Its step kinds are [`attractor`]'s.
+pub mod fabro {
+    pub use frontend_fabro::*;
 }
 
 /// Step kinds, with the standard registry.
@@ -101,15 +110,15 @@ pub fn runtime() -> Runtime {
     assemble(attractor_steps::register)
 }
 
-/// [`runtime`] with the Fabro step kinds simulated — `petri run --dry-run`:
-/// every Fabro stage succeeds and a human gate takes its first choice, as
-/// Fabro's own `--dry-run` does. The GitHub Actions kinds have no simulation
-/// and run for real.
+/// [`runtime`] with the Attractor step kinds simulated — `petri run --dry-run`:
+/// every stage succeeds and a human gate takes its first choice, as Fabro's
+/// own `--dry-run` does. The GitHub Actions kinds have no simulation and run
+/// for real.
 pub fn dry_run_runtime() -> Runtime {
     assemble(attractor_steps::register_stubs)
 }
 
-fn assemble(fabro: fn(Runtime) -> Runtime) -> Runtime {
+fn assemble(attractor: fn(Runtime) -> Runtime) -> Runtime {
     let secrets = GithubSecrets::new();
     // The provisioner registers the results token with this run's mask set, so
     // it is built ahead of the closure that captures its masker.
@@ -137,13 +146,21 @@ fn assemble(fabro: fn(Runtime) -> Runtime) -> Runtime {
             "tool cache directory could not be created"
         );
     }
-    let runtime = Runtime::standard()
-        .frontend(frontend_attractor::Fabro::new().with_settings_toml(fabro_settings_toml()))
+    // The Fabro frontend is the one registered for DOT files: it wraps the
+    // Attractor language in Fabro's settings layers and degrades to the bare
+    // language when no settings file exists. The Fabro home reaches the
+    // skills step as a capability, so the step reads the environment only
+    // when no host named one.
+    let mut runtime = Runtime::standard()
+        .frontend(frontend_fabro::Fabro::new().with_settings_toml(fabro_settings_toml()))
         .frontend(
             frontend_gha::GitHubActions::with_actions(manifests.clone())
                 .with_runners(runners)
                 .with_checkout_substitution(substitute_checkout),
         );
+    if let Some(home) = FabroHome::from_env() {
+        runtime = runtime.capability(home);
+    }
     let runtime = match llm_client() {
         Ok(client) => runtime.capability(PebbleClient(client)),
         Err(error) => {
@@ -151,7 +168,7 @@ fn assemble(fabro: fn(Runtime) -> Runtime) -> Runtime {
             runtime
         }
     };
-    github::register(fabro(runtime))
+    github::register(attractor(runtime))
         .capability(github::ActionSourceCap(trees))
         .capability(github::ActionManifestSourceCap(manifests))
         .capability(github::ToolCacheCap(tool_cache))

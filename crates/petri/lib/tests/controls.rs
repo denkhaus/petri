@@ -10,6 +10,9 @@ use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use petri::attractor::{
+    AGENT_KIND, CommandStep, HumanStep, StageStep, StubStep, WAIT_KIND, WORKFLOW_KIND,
+};
 use petri::engine::{EngineState, Event, EventRecord, RunError};
 use petri::execution::controls::{ControlError, ControlService};
 use petri::execution::events::{
@@ -23,9 +26,6 @@ use petri::execution::{
     InterviewDispatcher, InterviewReply, InterviewRequest, Interviewer,
 };
 use petri::executor::Retention;
-use petri::fabro::{
-    AGENT_KIND, CommandStep, HumanStep, StageStep, StubStep, WAIT_KIND, WORKFLOW_KIND,
-};
 use petri::frontend::fabro::Fabro;
 use petri::frontend::{CompileInputs, Lowered};
 use petri::ir::{FiringId, Graph, RunStatus, Status, Value};

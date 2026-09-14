@@ -57,7 +57,7 @@ under its own `ExecutionHooks` (a pause, a marker note at every point) calls
 `register` first and wraps `Runtime::installed_hooks()`; it never constructs
 the local service itself. Both are exercised: the first by
 `embedding::a_hook_service_runs_each_hook_once_at_its_point` and the two
-`a_replacement_service_*` tests of `petri-attractor-steps::hooks`, the second by
+`a_replacement_service_*` tests of `petri-frontend-fabro::hooks`, the second by
 `embedding_readiness.rs`.
 
 ## Points and decisions
@@ -175,5 +175,5 @@ does this: a timeout cancels the prompt, waits for the running tool to stop
 tasks to join, and only then returns its fail-open report; a dropped hook
 future cancels the same way through a guard, and the owner finishes the same
 cleanup on its own, bounded by the grace plus a fixed margin
-(`petri-attractor-steps::hooks::an_agent_hook_timeout_stops_its_tool_before_failing_open`,
+(`petri-frontend-fabro::hooks::an_agent_hook_timeout_stops_its_tool_before_failing_open`,
 `a_cancelled_run_stops_an_agent_hooks_running_tool`).

@@ -15,14 +15,15 @@
 use frontend::{
     CompileInputs, Diagnostics, FileSource, LAUNCH_MODEL_VAR, LAUNCH_PROVIDER_VAR, Span,
 };
+use frontend_attractor::ModelDefaults;
 use serde_json::Value;
 
-use super::workflow_toml::ModelDefaults;
+use crate::fallbacks;
 use crate::hooks::{PROJECT_FILE, SETTINGS_HOOKS_VAR};
 
 /// Fill `model`'s unset keys from the project layer, then the settings
 /// layer.
-pub(super) fn apply(
+pub(crate) fn apply(
     files: &dyn FileSource,
     inputs: &CompileInputs,
     model: &mut ModelDefaults,
@@ -124,6 +125,6 @@ fn fill(text: &str, path: &str, model: &mut ModelDefaults, diags: &mut Diagnosti
     if model.fallbacks.is_empty()
         && let Some(fallbacks) = section.get("fallbacks")
     {
-        model.fallbacks = super::fallbacks::read(path, diags, fallbacks);
+        model.fallbacks = fallbacks::read(path, diags, fallbacks);
     }
 }

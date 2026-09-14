@@ -4,13 +4,13 @@
 //! sessions run with hardcoded values (`fabro-agent`'s `SessionOptions`):
 //! compaction on, a trigger at 80 percent of the model's context window, and
 //! the six most recent turns kept verbatim. `[run.agent]` refuses a
-//! `compaction` key, and so does Petri (`lower::workflow_toml`). These values
-//! are Fabro's meaning of "compaction", so Petri lowers them onto every agent
-//! node as the `compaction` config object, and the native backend translates
-//! them into Pebble's options. Pebble owns the estimate, the trigger, the
-//! safe cut, the summary call and the history replacement. This is separate
-//! from workflow fidelity (`lower::threads`), whose `compact` mode is a
-//! deterministic preamble and never a model call.
+//! `compaction` key, and so does Petri (`frontend_fabro::workflow_toml`). These
+//! values are Fabro's meaning of "compaction", so Petri lowers them onto every
+//! agent node as the `compaction` config object, and the native backend
+//! translates them into Pebble's options. Pebble owns the estimate, the
+//! trigger, the safe cut, the summary call and the history replacement. This is
+//! separate from workflow fidelity (`lower::threads`), whose `compact` mode is
+//! a deterministic preamble and never a model call.
 
 use serde_json::{Value, json};
 

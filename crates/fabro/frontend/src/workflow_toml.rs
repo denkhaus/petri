@@ -16,7 +16,7 @@
 //!   reads beside `workflow.toml`.
 //! - `[run.model]`: the default `provider`, `name`, `reasoning_effort` and
 //!   `speed` an agent or prompt node gets when neither it nor the graph sets
-//!   one. `[run.model.fallbacks]` is read by [`super::fallbacks`].
+//!   one. `[run.model.fallbacks]` is read by [`crate::fallbacks`].
 //! - `[run.execution]`: `mode = "dry_run"` and `approval = "auto"` become the
 //!   run's launch defaults; `--dry-run` and `--auto-approve` still win.
 //! - `[run.environment]` and `[environments.<id>]`: the `provider` selects the
@@ -32,20 +32,23 @@
 //!   Each step gets the section's `timeout` (default five minutes) and
 //!   `on_failure="exit"`, so a failed step ends the run before the nodes.
 //! - `[[run.hooks]]`: the local hook layer beside the workflow, read by
-//!   `lower::hooks` together with `.fabro/project.toml` and the host's settings
+//!   `crate::hooks` together with `.fabro/project.toml` and the host's settings
 //!   layer.
 
 use std::collections::BTreeMap;
 
 use frontend::{Diagnostics, FileSource, Span};
+use frontend_attractor::model::parse_duration;
+use frontend_attractor::template::Context;
+use frontend_attractor::{
+    DEFAULT_PRESERVE_TURNS, DEFAULT_THRESHOLD_PERCENT, EnvValue, Environment, PrepareStep,
+    RunSettings,
+};
 use serde_json::{Value, json};
 
-use super::compaction::{CompactionSettings, DEFAULT_PRESERVE_TURNS, DEFAULT_THRESHOLD_PERCENT};
-use super::model_layers::LaunchModel;
-use super::secrets::{InterpolationError, interpolate};
-use super::skills;
-use crate::model::{AttrValue, Attrs, EdgeDecl, NodeDecl, Workflow, parse_duration};
-use crate::template::Context;
+use crate::model_layers::LaunchModel;
+use crate::secrets::{InterpolationError, interpolate};
+use crate::skills;
 
 /// The settings schema version this build reads, Fabro's `_version`.
 const WORKFLOW_TOML_VERSION: i64 = 1;
@@ -53,151 +56,55 @@ const WORKFLOW_TOML_VERSION: i64 = 1;
 /// Fabro's default timeout for one `[run.prepare]` step.
 const PREPARE_TIMEOUT_MS: u64 = 300_000;
 
-/// The reserved id prefix of the synthetic nodes `[run.prepare]` steps lower
-/// to: `run_prepare_1`, `run_prepare_2`, and so on.
-pub const PREPARE_NODE_PREFIX: &str = "run_prepare_";
-
 /// The `Graph.params` key the launch settings persist under.
 pub const LAUNCH_PARAM: &str = "fabro.launch";
 
 /// The `Graph.params` key the resolved environment persists under.
 pub const ENVIRONMENT_PARAM: &str = "fabro.environment";
 
-/// What `workflow.toml` asks of the run, as far as lowering applies it.
+/// Everything `workflow.toml` asks of a run: what the lowering applies
+/// ([`RunSettings`]) and what the Fabro launch keeps for itself.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct RunSettings {
-    /// `[run] goal`, rendered.
-    pub goal:               Option<String>,
-    /// `[run.model]` defaults for LLM nodes.
-    pub model:              ModelDefaults,
+pub struct Settings {
+    /// What the Attractor lowering applies.
+    pub run:          RunSettings,
     /// The launch-level model default the host bound, as given; already
-    /// folded into `model` below the file layers.
-    pub launch:             LaunchModel,
+    /// folded into `run.model` below the file layers.
+    pub launch:       LaunchModel,
     /// `[run.execution]`.
-    pub dry_run:            bool,
-    pub auto_approve:       bool,
-    /// The resolved environment, when `[run.environment]` names one.
-    pub environment:        Option<Environment>,
-    /// `[run.prepare]` steps, in order.
-    pub prepare:            Vec<PrepareStep>,
-    pub prepare_timeout_ms: u64,
-    /// The file's path and text, for the hook loader's `[[run.hooks]]` layer.
-    pub hooks_text:         Option<(String, String)>,
-    /// Agent context compaction: Fabro's hardcoded values, since the pinned
-    /// Fabro has no setting for it (`lower::compaction`).
-    pub compaction:         CompactionSettings,
-    /// `[run.agent] skills`, the workflow's own skill directories.
-    pub skills:             skills::SkillSettings,
-    /// `[run.clone]`: whether the run starts from a checkout of the
-    /// repository and how much history it carries.
-    pub clone:              CloneSettings,
+    pub dry_run:      bool,
+    pub auto_approve: bool,
+    /// The file's path and text, for the hook and MCP loaders'
+    /// `workflow.toml` layer.
+    pub hooks_text:   Option<(String, String)>,
 }
 
-/// `[run.clone]`, with Fabro's defaults: enabled, 100 commits of history.
-/// `depth = 0` is the full history.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CloneSettings {
-    pub enabled: bool,
-    pub depth:   i64,
-}
-
-impl Default for CloneSettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            depth:   100,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ModelDefaults {
-    pub provider:         Option<String>,
-    pub name:             Option<String>,
-    pub reasoning_effort: Option<String>,
-    /// `controls.speed`: `standard` or `fast`, the default an LLM node gets
-    /// when it names none.
-    pub speed:            Option<String>,
-    /// `fallbacks`: the model-keyed chains as written, references in their
-    /// canonical spelling ([`super::fallbacks`]).
-    pub fallbacks:        BTreeMap<String, Vec<String>>,
-}
-
-/// One environment value: a literal, or a secret name to resolve at spawn.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EnvValue {
-    Literal(String),
-    Secret(String),
-}
-
-impl EnvValue {
-    /// The JSON form a step config carries: the string, or a `$secret`
-    /// reference.
-    pub fn to_json(&self) -> Value {
-        match self {
-            Self::Literal(text) => Value::String(text.clone()),
-            Self::Secret(name) => json!({ "$secret": name }),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Environment {
-    pub id:        String,
-    /// `local`, `docker` or `daytona`, as written.
-    pub provider:  String,
-    /// `image.docker`, when set.
-    pub image:     Option<String>,
-    pub env:       BTreeMap<String, EnvValue>,
-    /// `resources`, as Daytona runner sizing.
-    pub cpu_cores: Option<u32>,
-    pub memory_mb: Option<u64>,
-    pub disk_mb:   Option<u64>,
-}
-
-impl Environment {
-    /// The sandbox backend this provider maps to, in the host's spelling.
-    pub fn sandbox_backend(&self) -> &'static str {
-        match self.provider.as_str() {
-            "docker" => "docker",
-            "daytona" => "daytona",
-            _ => "host",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PrepareStep {
-    /// The shell text: `script` as written, or the `command` argv joined.
-    pub script: String,
-    pub env:    BTreeMap<String, EnvValue>,
-}
-
-impl RunSettings {
+impl Settings {
     /// The launch settings the persisted graph carries. `repository` is the
     /// absolute root the run checks out when `[run.clone]` is enabled, when
     /// the host bound one.
     pub fn launch_param(&self, repository: Option<&str>) -> Value {
+        let environment = self.run.environment.as_ref();
         json!({
             "dry_run": self.dry_run,
             "auto_approve": self.auto_approve,
             "model": self.launch.model,
             "provider": self.launch.provider,
             "clone": {
-                "enabled": self.clone.enabled,
-                "depth": self.clone.depth,
+                "enabled": self.run.clone.enabled,
+                "depth": self.run.clone.depth,
                 "repository": repository,
             },
-            "sandbox_backend": self.environment.as_ref().map(Environment::sandbox_backend),
-            "cpu_cores": self.environment.as_ref().and_then(|e| e.cpu_cores),
-            "memory_mb": self.environment.as_ref().and_then(|e| e.memory_mb),
-            "disk_mb": self.environment.as_ref().and_then(|e| e.disk_mb),
+            "sandbox_backend": environment.map(Environment::sandbox_backend),
+            "cpu_cores": environment.and_then(|e| e.cpu_cores),
+            "memory_mb": environment.and_then(|e| e.memory_mb),
+            "disk_mb": environment.and_then(|e| e.disk_mb),
         })
     }
 
     /// The environment record the persisted graph carries, for inspection.
     pub fn environment_param(&self) -> Option<Value> {
-        let environment = self.environment.as_ref()?;
+        let environment = self.run.environment.as_ref()?;
         Some(json!({
             "id": environment.id,
             "provider": environment.provider,
@@ -208,13 +115,13 @@ impl RunSettings {
 }
 
 /// Read `workflow.toml` beside `file`. Input defaults land in `template`;
-/// everything else comes back as [`RunSettings`]. Problems are diagnosed.
-pub(super) fn read(
+/// everything else comes back as [`Settings`]. Problems are diagnosed.
+pub fn read(
     file: &str,
     files: &dyn FileSource,
     template: &mut Context,
     diags: &mut Diagnostics,
-) -> RunSettings {
+) -> Settings {
     let dir = file.rfind('/').map_or("", |i| &file[..i]);
     let path = if dir.is_empty() {
         "workflow.toml".to_string()
@@ -222,7 +129,7 @@ pub(super) fn read(
         format!("{dir}/workflow.toml")
     };
     let Some(text) = files.read(&path) else {
-        return RunSettings::default();
+        return Settings::default();
     };
     let value: toml::Table = match text.parse() {
         Ok(value) => value,
@@ -234,9 +141,9 @@ pub(super) fn read(
             );
             // The hook loader still sees the text: a configured hook in an
             // unparseable file is an error there, never a silent skip.
-            return RunSettings {
+            return Settings {
                 hooks_text: Some((path, text)),
-                ..RunSettings::default()
+                ..Settings::default()
             };
         }
     };
@@ -247,9 +154,12 @@ pub(super) fn read(
         files,
         template,
         diags,
-        settings: RunSettings {
-            prepare_timeout_ms: PREPARE_TIMEOUT_MS,
-            ..RunSettings::default()
+        settings: Settings {
+            run: RunSettings {
+                prepare_timeout_ms: PREPARE_TIMEOUT_MS,
+                ..RunSettings::default()
+            },
+            ..Settings::default()
         },
     };
     reader.top_level(&value);
@@ -265,7 +175,7 @@ struct Reader<'a> {
     files:    &'a dyn FileSource,
     template: &'a mut Context,
     diags:    &'a mut Diagnostics,
-    settings: RunSettings,
+    settings: Settings,
 }
 
 impl Reader<'_> {
@@ -432,7 +342,7 @@ impl Reader<'_> {
             }
         };
         if let Some(rendered) = self.render(&text, "`[run] goal`") {
-            self.settings.goal = Some(rendered);
+            self.settings.run.goal = Some(rendered);
         }
     }
 
@@ -543,11 +453,11 @@ impl Reader<'_> {
         for (key, value) in model {
             match key.as_str() {
                 "fallbacks" => {
-                    self.settings.model.fallbacks =
+                    self.settings.run.model.fallbacks =
                         super::fallbacks::read(self.path, self.diags, value);
                 }
-                "provider" => self.settings.model.provider = value.as_str().map(str::to_owned),
-                "name" => self.settings.model.name = value.as_str().map(str::to_owned),
+                "provider" => self.settings.run.model.provider = value.as_str().map(str::to_owned),
+                "name" => self.settings.run.model.name = value.as_str().map(str::to_owned),
                 "controls" => {
                     let Some(controls) = value.as_table() else {
                         continue;
@@ -556,10 +466,10 @@ impl Reader<'_> {
                         .get("reasoning_effort")
                         .and_then(toml::Value::as_str)
                     {
-                        self.settings.model.reasoning_effort = Some(effort.to_owned());
+                        self.settings.run.model.reasoning_effort = Some(effort.to_owned());
                     }
                     if let Some(speed) = controls.get("speed").and_then(toml::Value::as_str) {
-                        self.settings.model.speed = Some(speed.to_owned());
+                        self.settings.run.model.speed = Some(speed.to_owned());
                     }
                 }
                 other => {
@@ -583,10 +493,10 @@ impl Reader<'_> {
         for (key, value) in clone {
             match (key.as_str(), value) {
                 ("enabled", toml::Value::Boolean(enabled)) => {
-                    self.settings.clone.enabled = *enabled;
+                    self.settings.run.clone.enabled = *enabled;
                 }
                 ("depth", toml::Value::Integer(depth)) => {
-                    self.settings.clone.depth = (*depth).max(0);
+                    self.settings.run.clone.depth = (*depth).max(0);
                 }
                 ("enabled" | "depth", _) => {
                     let path = self.path;
@@ -694,7 +604,7 @@ impl Reader<'_> {
             }
         }
         if let Some(value) = agent.get("skills") {
-            self.settings.skills = skills::read(value, self.path, &self.span, self.diags);
+            self.settings.run.skills = skills::read(value, self.path, &self.span, self.diags);
         }
         if agent.get("fabro_tools").and_then(toml::Value::as_bool) == Some(true) {
             let path = self.path;
@@ -845,7 +755,7 @@ impl Reader<'_> {
                 environment.env.insert(key, value);
             }
         }
-        self.settings.environment = Some(environment);
+        self.settings.run.environment = Some(environment);
     }
 
     fn prepare(&mut self, item: &toml::Value) {
@@ -855,7 +765,7 @@ impl Reader<'_> {
         if let Some(timeout) = prepare.get("timeout") {
             match timeout.as_str().and_then(parse_duration) {
                 Some(duration) => {
-                    self.settings.prepare_timeout_ms =
+                    self.settings.run.prepare_timeout_ms =
                         u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
                 }
                 None => self.unsupported(
@@ -961,6 +871,7 @@ impl Reader<'_> {
                 }
             }
             self.settings
+                .run
                 .prepare
                 .push(PrepareStep { script: text, env });
         }
@@ -991,87 +902,6 @@ fn size_mb(value: &toml::Value) -> Option<u64> {
         _ => return None,
     };
     Some(bytes / (1024 * 1024))
-}
-
-/// Insert the `[run.prepare]` steps as command nodes between `start` and
-/// its successors. Returns the env each synthetic node carries, keyed by
-/// node id, for the command config.
-pub(super) fn insert_prepare_nodes(
-    workflow: &mut Workflow,
-    start: &str,
-    settings: &RunSettings,
-    span: &Span,
-    diags: &mut Diagnostics,
-) -> BTreeMap<String, BTreeMap<String, EnvValue>> {
-    let mut envs = BTreeMap::new();
-    if settings.prepare.is_empty() {
-        return envs;
-    }
-    for node in &workflow.nodes {
-        if node.id.starts_with(PREPARE_NODE_PREFIX) {
-            diags.error(
-                "fabro.reserved_node_id",
-                node.span.clone(),
-                format!("`{}` is reserved for `[run.prepare]` lowering", node.id),
-            );
-            return envs;
-        }
-    }
-    let mut nodes = workflow.nodes.clone();
-    let mut edges: Vec<EdgeDecl> = Vec::new();
-    let mut previous = start.to_string();
-    let timeout = format!("{}ms", settings.prepare_timeout_ms);
-    for (index, step) in settings.prepare.iter().enumerate() {
-        let id = format!("{PREPARE_NODE_PREFIX}{}", index + 1);
-        let mut attrs = Attrs::default();
-        attrs.insert(
-            "shape",
-            AttrValue::Str("parallelogram".into()),
-            span.clone(),
-        );
-        attrs.insert(
-            "label",
-            AttrValue::Str(format!("Prepare {}", index + 1)),
-            span.clone(),
-        );
-        attrs.insert("script", AttrValue::Str(step.script.clone()), span.clone());
-        attrs.insert("timeout", AttrValue::Str(timeout.clone()), span.clone());
-        attrs.insert("on_failure", AttrValue::Str("exit".into()), span.clone());
-        nodes.push(NodeDecl {
-            id: id.clone(),
-            attrs,
-            classes: vec!["run-prepare".to_string()],
-            span: span.clone(),
-            declared: true,
-        });
-        edges.push(EdgeDecl {
-            from:    previous.clone(),
-            to:      id.clone(),
-            attrs:   Attrs::default(),
-            span:    span.clone(),
-            to_span: span.clone(),
-        });
-        envs.insert(id.clone(), step.env.clone());
-        previous = id;
-    }
-    for edge in &workflow.edges {
-        if edge.from == start {
-            edges.push(EdgeDecl {
-                from: previous.clone(),
-                ..edge.clone()
-            });
-        } else {
-            edges.push(edge.clone());
-        }
-    }
-    *workflow = Workflow::from_parts(
-        workflow.name.clone(),
-        workflow.attrs.clone(),
-        nodes,
-        edges,
-        workflow.span.clone(),
-    );
-    envs
 }
 
 /// The top-level keys Fabro's settings parser accepts; anything else is a
