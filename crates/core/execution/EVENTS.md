@@ -271,7 +271,7 @@ sub-agents are on the same stream: the lifecycle (`SubAgentSpawned`,
 `SubAgentTurnStarted`, `SubAgentCompleted`, `SubAgentFailed`,
 `SubAgentClosed`) under the parent's session, a child's own events under the
 child's session with `parent_session_id` naming its immediate parent, all
-attributed to the parent stage (`crates/fabro/FORMAT.md`, "Native Pebble").
+attributed to the parent stage (`crates/attractor/FORMAT.md`, "Native Pebble").
 A hook's agent is never on the stage's stream: it is a `hook_activity`
 reading, so a consumer summing a stage's backend events never counts a
 hook's model requests as the stage's.
@@ -290,7 +290,7 @@ lithos-llm's `Usage`: `{ tokens: { input, output, reasoning, cache_read,
 cache_write }, cost: { usd_micros, source } }`, with `cost` absent when the
 value is not fully priced (a sum has a cost only when every part that used
 tokens was priced; `source` is `catalog`, `provider` or `application`). See
-`crates/fabro/FORMAT.md`, "Usage". Before 2026-09-14 the five buckets were
+`crates/attractor/FORMAT.md`, "Usage". Before 2026-09-14 the five buckets were
 the top level of `usage` and the cost a separate `cost_usd_micros` number
 beside it: `pebble.cost_usd_micros`, `pebble.compaction_cost_usd_micros`
 and `prompt.cost_usd_micros` under `custom`, and `cost_usd_micros` on
@@ -513,7 +513,7 @@ backend payloads survive the round trip exactly because the workspace's
   completions from that stream as they arrive and adds, after each, one
   custom payload with `kind = "attractor.compaction"` attributing it to the node
   and attempt; the payload carries no `summary_truncated`, which Pebble puts
-  on no event; see `crates/fabro/FORMAT.md`, "Compaction".
+  on no event; see `crates/attractor/FORMAT.md`, "Compaction".
 - The ACP backend records what the external agent sends over ACP; tool calls
   the agent does not report are not observable.
 - Agent facts are Pebble's; Petri adds run, invocation, node and attempt

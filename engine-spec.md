@@ -968,7 +968,8 @@ and cross-run semantics stay with the driver layer (D2); BuildKite
 Native format: `next:` → one group; `parallel:` → multiple
 groups; `for_each` + `parallel: true|false` → `ForEach` vs cycle desugar.
 
-**Fabro** (`crates/fabro/FORMAT.md`; exercises the whole engine): every node's
+**Attractor** (`crates/attractor/FORMAT.md`; Fabro's settings layer is
+`crates/fabro/FORMAT.md`; exercises the whole engine): every node's
 edges → one `Tiered` routing group with Fabro's four tiers (conditions;
 preferred label; suggested targets ranked by index; the fallback guarded by the
 `on_failure` / `on_retries_exhausted` policy), `Fallthrough::NoEmit`; start →
@@ -994,8 +995,8 @@ invocation ceiling, checked at create, resume and every declaration; `house`
 nodes; `[run.prepare]` → command nodes between start and its successors.
 Conditions lower onto the expression language with Fabro's text comparison,
 truthiness and numeric rules spelled out; `outcome=X` names only the four
-Fabro outcomes. The Attractor dialect and unknown outcome values are specific
-`unsupported.*` rejections. Failure promotion is Fabro's: the step checks the
+Fabro outcomes. The legacy dialect's attributes and unknown outcome values are
+specific `unsupported.*` rejections. Failure promotion is Fabro's: the step checks the
 node's explicit routes (carried in its config) against the failed outcome and
 the prospective context before it classifies, so an `outcome=failed` edge on a
 `succeed` node is taken and only an unmatched failure becomes a

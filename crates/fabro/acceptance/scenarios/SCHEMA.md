@@ -237,7 +237,7 @@ matcher; `errors`; `consumed` per script entry id; `no_plaintext` lists
 values that may appear nowhere in the receipt, stderr, or final context.
 An `invocation_path` is `/` for the root and `/<slot>` per nested call; a
 parallel branch's slot is `branch:<fork>@<firing>:<index>:<target>`, the
-firing being the fork occurrence that opened the group (`crates/fabro/FORMAT.md`,
+firing being the fork occurrence that opened the group (`crates/attractor/FORMAT.md`,
 "Parallel"), and the same form matches a question in an interview script entry.
 
 `lifecycle`: `no_leaked_processes`, `retained_workspace`,

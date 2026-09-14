@@ -31,7 +31,7 @@
 //! | `loop_restart`                | `EdgeTransition::Restart`                        |
 //!
 //! Everything else is refused with a specific `unsupported.*` code. See
-//! `FORMAT.md` for the language as lowered.
+//! `crates/attractor/FORMAT.md` for the language as lowered.
 
 pub mod condition;
 pub mod dot;

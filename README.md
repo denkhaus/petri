@@ -169,6 +169,19 @@ crates/petri/lib/tests/fabro_dependencies.rs  readiness item 1: no Fabro crate a
 crates/petri/cli/tests/standalone.rs          readiness item 1: the binary runs a Fabro workflow with no `fabro` on PATH
 ```
 
+### The Attractor language and the Fabro layer
+
+`crates/attractor/FORMAT.md` is the language as lowered: every construct in a
+DOT file, what it becomes in the IR, what is refused, and the step kinds a
+graph runs on. `crates/fabro/FORMAT.md` is the Fabro layer around it: how
+`workflow.toml`, `.fabro/project.toml` and the user settings resolve into the
+run settings the lowering applies, and the launch record Fabro adds to the
+graph. Fabro is one implementation of the Attractor specification, and the
+next revision of that specification follows Fabro's dialect, so a Fabro
+workflow is an Attractor workflow with Fabro's files beside it. The split, and
+the `attractor` prefix on the step kinds, diagnostics and event kinds the
+language emits, are recorded in `.ai/plans/attractor-split.md`.
+
 ### The Fabro compatibility contract
 
 `crates/fabro/acceptance/CONTRACT.md` freezes the Fabro reference revision
@@ -286,7 +299,7 @@ preview-URL operation for servers inside containers. The later
 prompt nodes now load through, and the tool-round budget agent hooks enforce.
 Pebble `c91810f` and lithos-llm `55add45` carry token usage and cost as one
 lithos-llm `Usage`; every `usage` Petri records takes that shape
-(`crates/fabro/FORMAT.md`, "Usage").
+(`crates/attractor/FORMAT.md`, "Usage").
 
 Host and container scopes use the `sandbox-driver-host` and
 `sandbox-driver-docker` plugins. Petri launches them and communicates over
@@ -348,7 +361,7 @@ Fabro agent nodes can use Pebble directly as a Rust library. Set
 `backend="api"` and `model="provider/model"` on the node, or set graph
 `backend` and `default_model`. The `petri` distribution reads provider
 credentials from its environment. ACP remains the default. See
-[native Pebble configuration](crates/fabro/FORMAT.md#native-pebble) for scope
+[native Pebble configuration](crates/attractor/FORMAT.md#native-pebble) for scope
 requirements, client injection, project memory, skills, context compaction,
 tool hooks, retained threads, sub-agents, events, and accounting. Fabro's `fidelity` modes, threads and
 `[[run.hooks]]` are described under "Steps at run time" on the same page.
@@ -1140,7 +1153,7 @@ run that emits no execution event for that long; a pending question parks the
 clock, and the terminal prints `stall watchdog: no execution activity for N
 s`. Its `loop_restart_signature_limit` (default 3) fails a run whose node
 repeats one deterministic failure that many times and blocks a `loop_restart`
-edge taken by anything but a transient failure. See `crates/fabro/FORMAT.md`,
+edge taken by anything but a transient failure. See `crates/attractor/FORMAT.md`,
 "Watchdog and circuit breaker".
 
 **The receipt.** Every run with an interviewer writes
@@ -1208,7 +1221,7 @@ retries included. Pebble replays a model turn whose response stream broke, on
 its default policy. Both report on the agent's event stream as Pebble's
 `LlmRetry`. Fabro's `[run.model.fallbacks]` chain is planned by Petri and run
 by Pebble, and starts only once both are spent; see "Model fallback" in
-`crates/fabro/FORMAT.md`. A workflow retry (`retries` on a node) is a new
+`crates/attractor/FORMAT.md`. A workflow retry (`retries` on a node) is a new
 attempt with a new plan and is none of these.
 
 **Workflow secrets.** A Fabro `workflow.toml` environment value written as
@@ -1257,7 +1270,7 @@ no platform vocabulary in them:
   installs it unless the host installed a service first, and it serves the
   per-firing points, the native agent's tool boundary, the ACP client's
   permission requests and the run-level events from one place
-  (`crates/fabro/FORMAT.md`, "Hooks").
+  (`crates/attractor/FORMAT.md`, "Hooks").
 - **Questions.** `execution::Interviewer` and the `InterviewDispatcher`, as
   on the terminal path.
 

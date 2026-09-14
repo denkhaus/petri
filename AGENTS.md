@@ -3,14 +3,17 @@
 ## Project purpose
 
 Petri is a Rust workflow engine. It runs a token-flow graph with explicit
-routing and supports native workflows and GitHub Actions workflows.
+routing and supports native workflows, GitHub Actions workflows, and
+Attractor workflows, with Fabro's settings layer as a frontend over the
+Attractor one.
 
 Use these documents as the authoritative design sources:
 
 - `engine-spec.md` defines the engine and intermediate representation.
 - `frontend-handoff.md` defines the frontend contract.
 - `crates/core/frontend-native/FORMAT.md` defines the native workflow format.
-- `crates/fabro/FORMAT.md` defines the Fabro dialect as lowered.
+- `crates/attractor/FORMAT.md` defines the Attractor language as lowered.
+- `crates/fabro/FORMAT.md` defines the Fabro layer around it: the settings files and the launch.
 - `README.md` maps the design to the workspace and test suites.
 
 ## Rust style
