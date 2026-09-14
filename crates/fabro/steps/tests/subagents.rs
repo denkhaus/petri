@@ -294,6 +294,10 @@ async fn a_child_changes_the_parents_workspace_and_the_stage_accounts_for_it() {
         subagents["sessions"][child_session]["parent"],
         parent_session
     );
+    // The child's route, as its own `SessionStarted` reported it: the
+    // parent's model, which it inherits.
+    assert_eq!(subagents["sessions"][child_session]["provider"], "test");
+    assert_eq!(subagents["sessions"][child_session]["model"], "model");
     assert_eq!(subagents["sessions"][child_session]["messages"], 2);
     let mut from_events: BTreeMap<String, u64> = BTreeMap::new();
     for e in &events {
