@@ -664,6 +664,31 @@ type View = (Option<Subject>, ViewEvent);
 
 /// The stateless-by-record derivation, with the little state it needs across
 /// records. One per run; fed both logs.
+///
+/// The fold is pure: it reads records and the post-apply engine state, does
+/// no I/O, and hands back owned events. A record's own event carries the
+/// record unchanged under `record`:
+///
+/// ```
+/// use engine::{EngineState, Event, EventOrigin, EventRecord};
+/// use execution::ExecutionId;
+/// use execution::events::{Projection, Record};
+/// use ir::{CancelScopeId, Graph};
+///
+/// let record = EventRecord {
+///     seq:    0,
+///     origin: EventOrigin::External,
+///     event:  Event::cancel_scope(CancelScopeId::ROOT),
+/// };
+/// let state = EngineState::new(Graph::new());
+/// let events = Projection::new().engine(ExecutionId::new(0), &record, 1_000, &state);
+/// let Some(Record::Engine(stored)) = &events[0].record else {
+///     panic!("a record's own event carries the record");
+/// };
+/// assert_eq!(stored.seq, 0);
+/// assert_eq!(stored.recorded_at, 1_000);
+/// assert_eq!(stored.body, record.event);
+/// ```
 #[derive(Default)]
 pub struct Projection {
     executions:  BTreeMap<ExecutionId, ExecutionTrack>,
@@ -1839,6 +1864,34 @@ pub enum ReplayError {
 pub fn replay_run(run_dir: &Path) -> Result<Vec<RunEvent>, ReplayError> {
     let mut projection = Projection::new();
     project_run(run_dir, &mut projection)
+}
+
+/// The events after a set of per-log positions: the incremental form of
+/// [`replay_run`], for a consumer that already holds a prefix of the stream
+/// and asks for the rest. `held` names the last [`EventId`] the consumer
+/// has from each log; a log it names nothing for is replayed whole. The
+/// fold still runs over the whole run, since a suffix cannot be derived
+/// without the state the prefix built; only the delivery is trimmed.
+pub fn replay_since(
+    run_dir: &Path,
+    held: &BTreeMap<EventSource, EventId>,
+) -> Result<Vec<RunEvent>, ReplayError> {
+    let events = replay_run(run_dir)?;
+    Ok(events_after(events, held))
+}
+
+/// Keep the events past each log's held position.
+pub(crate) fn events_after(
+    events: Vec<RunEvent>,
+    held: &BTreeMap<EventSource, EventId>,
+) -> Vec<RunEvent> {
+    events
+        .into_iter()
+        .filter(|event| {
+            held.get(&event.id.source)
+                .is_none_or(|last| event.id > *last)
+        })
+        .collect()
 }
 
 /// [`replay_run`] through a caller's projection state.

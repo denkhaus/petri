@@ -39,6 +39,23 @@ pub trait ExecutionObserver: Send + Sync {
     fn on_resumed(&self, state: &CoordinatorState) {
         let _ = state;
     }
+
+    /// Resolve once every record of `execution` this observer has been
+    /// handed through `seq` is in its durable storage: the per-execution
+    /// form of [`EventObserver::durable`], awaited by the driver for a
+    /// step's acknowledged progress send. The default answers at once.
+    async fn durable(&self, execution: ExecutionId, seq: u64) -> Result<(), ObserveError> {
+        let _ = (execution, seq);
+        Ok(())
+    }
+
+    /// Awaited after an execution's last record, before its report: the
+    /// per-execution form of [`EventObserver::finish`]. A failure lands in
+    /// the execution report's observer errors.
+    async fn finish(&self, execution: ExecutionId) -> Result<(), ObserveError> {
+        let _ = execution;
+        Ok(())
+    }
 }
 
 pub struct AddressedObserver {
@@ -60,6 +77,14 @@ impl EventObserver for AddressedObserver {
     fn on_record(&self, record: &EventRecord, recorded_at: u64, state: &EngineState) {
         self.observer
             .on_engine_record(self.execution, record, recorded_at, state);
+    }
+
+    async fn durable(&self, seq: u64) -> Result<(), ObserveError> {
+        self.observer.durable(self.execution, seq).await
+    }
+
+    async fn finish(&self) -> Result<(), ObserveError> {
+        self.observer.finish(self.execution).await
     }
 }
 
