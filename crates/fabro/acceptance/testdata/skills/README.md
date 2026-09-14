@@ -13,7 +13,7 @@ Fabro skill directories, precedence, loading, prompt and tool behavior.
   and `cleanup` exist only here. Three files are not skills: `no-frontmatter`
   (no `---` block), `no-name` (a block with no `name:`), `unterminated` (a
   block that never closes). Fabro and Pebble skip them; Petri records a
-  `fabro.skills.warning` for each.
+  `attractor.skills.warning` for each.
 - `workflow/skills`: a directory a workflow names with `[run.agent] skills`
   (a Petri extension). Its `greet` beats the repository's.
 - `expected/`: the reference prompt section and skill tool definition for
@@ -21,7 +21,7 @@ Fabro skill directories, precedence, loading, prompt and tool behavior.
   (Claude 5, Kimi Code), for a run that sees `home` and `repo`.
 
 Tests copy `repo` into a Git repository and point `FABRO_HOME` (or the
-`fabro_steps::skills::FabroHome` capability) at `home`.
+`attractor_steps::skills::FabroHome` capability) at `home`.
 
 ## Where the expectations come from
 

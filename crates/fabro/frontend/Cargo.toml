@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Fabro Graphviz DOT workflows to HIR."
+description = "The Fabro frontend: Fabro's settings layers around the Attractor language."
 publish = false
 
 [lints]
@@ -17,14 +17,21 @@ name = "frontend_fabro"
 [dependencies]
 ir = { workspace = true }
 frontend = { workspace = true }
-minijinja = { workspace = true }
+frontend-attractor = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 shlex = { workspace = true }
 smol_str = { workspace = true }
-thiserror = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
-proptest = { workspace = true }
+async-trait = { workspace = true }
+attractor-steps = { workspace = true }
+execution = { workspace = true }
+runtime = { workspace = true }
+steps = { workspace = true }
+testkit = { workspace = true }
+lithos-llm = { workspace = true, features = ["runtime", "openai"] }
+pebble-coding-agent = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util"] }

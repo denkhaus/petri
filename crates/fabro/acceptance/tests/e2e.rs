@@ -13,14 +13,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
+use attractor_steps::blobs::{holds_ref, hydrate};
+use attractor_steps::{AGENT_KIND, HUMAN_KIND, STAGE_KIND, StubStep, WAIT_KIND, WORKFLOW_KIND};
 use execution::host::{self, HostRun};
 use execution::inspect::inspect_run_dir;
 use fabro_acceptance::runs::fresh_run_dir;
 use fabro_acceptance::{corpus_root, has_corpus, lower_one};
-use fabro_steps::blobs::{holds_ref, hydrate};
-use fabro_steps::{AGENT_KIND, HUMAN_KIND, STAGE_KIND, StubStep, WAIT_KIND, WORKFLOW_KIND};
 use frontend::{CompileInputs, NoFiles};
-use frontend_fabro::load;
+use frontend_attractor::load;
 use ir::{ExprOrValue, Graph, RunStatus, Value};
 use runtime::driver::ExecutionReport;
 use runtime::executor::Retention;
@@ -54,21 +54,21 @@ fn options(dir: &Path) -> RunOptions {
 
 /// The real steps.
 fn real(dir: &Path) -> Runtime {
-    fabro_steps::register(Runtime::standard()).options(options(dir))
+    attractor_steps::register(Runtime::standard()).options(options(dir))
 }
 
 /// Real commands, stubbed agents: what a fan-out over items needs without a
 /// model.
 fn commands_and_stubs(dir: &Path) -> Runtime {
-    let runtime = Runtime::standard().step(fabro_steps::CommandStep);
+    let runtime = Runtime::standard().step(attractor_steps::CommandStep);
     let mut registry = runtime.registry().clone();
     for kind in [AGENT_KIND, HUMAN_KIND, WAIT_KIND, WORKFLOW_KIND, STAGE_KIND] {
         registry.register_runner(Arc::new(StubStep::new(kind)));
     }
-    registry.register(fabro_steps::ForkStep);
-    registry.register(fabro_steps::BranchStep);
-    registry.register(fabro_steps::FanInStep);
-    fabro_steps::services(runtime.steps(registry).options(options(dir)))
+    registry.register(attractor_steps::ForkStep);
+    registry.register(attractor_steps::BranchStep);
+    registry.register(attractor_steps::FanInStep);
+    attractor_steps::services(runtime.steps(registry).options(options(dir)))
 }
 
 fn set_env(graph: &mut Graph, pairs: &[(&str, String)]) {
@@ -371,7 +371,7 @@ async fn two_successive_thousand_item_forks_stay_under_the_ceiling() {
         holds_ref(&stored),
         "1,000 envelopes are above the fan-out offload threshold: {stored}"
     );
-    let store = fabro_steps::LocalBlobStore::new(dir.join(fabro_steps::BLOBS_DIR));
+    let store = attractor_steps::LocalBlobStore::new(dir.join(attractor_steps::BLOBS_DIR));
     let results = hydrate(stored, &store).await;
     let results = results.as_array().expect("the hydrated list");
     assert_eq!(results.len(), 1000);

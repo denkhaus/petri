@@ -671,7 +671,7 @@ fn assert_common_phases(setup: &Setup, finished: &Finished) {
     // The fallback: the `docs` thread's plan, its failover, and the reused
     // route on the second node.
     let records = failures::records(&finished.run_dir);
-    let plan = failures::of_node(&records, "draft_docs", "fabro.fallback.plan");
+    let plan = failures::of_node(&records, "draft_docs", "attractor.fallback.plan");
     assert_eq!(plan.len(), 1, "{records:?}");
     // The move is Pebble's own event, attributed to the node.
     let failover = failures::pebble_events(&finished.run_dir, "draft_docs", "RouteFailover");
@@ -681,7 +681,7 @@ fn assert_common_phases(setup: &Setup, finished: &Finished) {
     // The notes thread has one plan, on its first node; every later node
     // reuses the thread on the primary and none fails over.
     assert_eq!(
-        failures::of_node(&records, "plan", "fabro.fallback.plan").len(),
+        failures::of_node(&records, "plan", "attractor.fallback.plan").len(),
         1,
         "{records:?}"
     );
@@ -691,11 +691,11 @@ fn assert_common_phases(setup: &Setup, finished: &Finished) {
             "the notes thread never left its primary: {records:?}"
         );
         assert_eq!(
-            failures::of_node(&records, node, "fabro.fallback.plan").len(),
+            failures::of_node(&records, node, "attractor.fallback.plan").len(),
             usize::from(node == "plan"),
             "a reused thread has no plan of its own: {node}: {records:?}"
         );
-        let thread = failures::of_node(&records, node, "fabro.thread");
+        let thread = failures::of_node(&records, node, "attractor.thread");
         assert_eq!(thread.len(), 1, "{node}: {records:?}");
         assert_eq!(
             thread[0]["reused"],
@@ -871,7 +871,7 @@ fn assert_public_projection(events: &[RunEvent]) {
     let projected = project(events);
     // C3: one resolution per native session; the plan's names the dirs.
     assert!(
-        count(&projected, "plan", "fabro.skills") >= 1,
+        count(&projected, "plan", "attractor.skills") >= 1,
         "{projected:#?}"
     );
     // C2: the write's server was ready and one proxied call completed, on
@@ -893,7 +893,7 @@ fn assert_public_projection(events: &[RunEvent]) {
         "{projected:#?}"
     );
     assert_eq!(
-        count(&projected, "review", "fabro.hook"),
+        count(&projected, "review", "attractor.hook"),
         2,
         "{projected:#?}"
     );
@@ -925,14 +925,14 @@ fn assert_public_projection(events: &[RunEvent]) {
     );
     // C5: the polish compacted once, with the summary call's usage.
     assert_eq!(
-        count(&projected, "polish", "fabro.compaction"),
+        count(&projected, "polish", "attractor.compaction"),
         1,
         "{projected:#?}"
     );
     let compaction = events
         .iter()
         .find_map(|e| match e.custom() {
-            Some(value) if value["kind"] == "fabro.compaction" => Some(value.clone()),
+            Some(value) if value["kind"] == "attractor.compaction" => Some(value.clone()),
             _ => None,
         })
         .expect("the compaction event");
@@ -940,7 +940,7 @@ fn assert_public_projection(events: &[RunEvent]) {
     // C1: the docs thread's plan (Petri's) and its failover (Pebble's); the
     // second docs node reuses the thread with no plan of its own.
     assert_eq!(
-        count(&projected, "draft_docs", "fabro.fallback.plan"),
+        count(&projected, "draft_docs", "attractor.fallback.plan"),
         1,
         "{projected:#?}"
     );
@@ -950,34 +950,38 @@ fn assert_public_projection(events: &[RunEvent]) {
         "{projected:#?}"
     );
     assert_eq!(
-        count(&projected, "finish_docs", "fabro.fallback.plan"),
+        count(&projected, "finish_docs", "attractor.fallback.plan"),
         0,
         "{projected:#?}"
     );
     assert_eq!(
-        count(&projected, "finish_docs", "fabro.thread"),
+        count(&projected, "finish_docs", "attractor.thread"),
         1,
         "{projected:#?}"
     );
-    // Hooks: every tool hook that ran is a `fabro.hook` report on its stage
+    // Hooks: every tool hook that ran is an `attractor.hook` report on its stage
     // (a child's under the parent stage). An allowed call with a matching
     // pre hook reports twice (pre, post), a blocked call once, a call no pre
     // hook matches once (post): the plan's skill load and shell append (3),
     // the write's blocked and allowed MCP calls (3), the child's blocked and
     // allowed shell calls (3), the polish's five shell rounds (10).
-    assert_eq!(count(&projected, "plan", "fabro.hook"), 3, "{projected:#?}");
     assert_eq!(
-        count(&projected, "write", "fabro.hook"),
+        count(&projected, "plan", "attractor.hook"),
         3,
         "{projected:#?}"
     );
     assert_eq!(
-        count(&projected, "delegate", "fabro.hook"),
+        count(&projected, "write", "attractor.hook"),
         3,
         "{projected:#?}"
     );
     assert_eq!(
-        count(&projected, "polish", "fabro.hook"),
+        count(&projected, "delegate", "attractor.hook"),
+        3,
+        "{projected:#?}"
+    );
+    assert_eq!(
+        count(&projected, "polish", "attractor.hook"),
         10,
         "{projected:#?}"
     );
@@ -985,7 +989,8 @@ fn assert_public_projection(events: &[RunEvent]) {
         .iter()
         .filter(|e| {
             e.custom().is_some_and(|value| {
-                value["kind"] == "fabro.hook" && value["report"]["decision"]["decision"] == "block"
+                value["kind"] == "attractor.hook"
+                    && value["report"]["decision"]["decision"] == "block"
             })
         })
         .count();
@@ -1048,7 +1053,7 @@ async fn the_combined_workflow_runs_end_to_end_through_the_binary() {
         "the docs thread continues on the fallback route: {second}"
     );
     let records = failures::records(&finished.run_dir);
-    let reused = &failures::of_node(&records, "finish_docs", "fabro.thread")[0];
+    let reused = &failures::of_node(&records, "finish_docs", "attractor.thread")[0];
     assert_eq!(reused["reused"], json!(true), "{reused}");
     // The reused thread's session starts on the route the thread reached.
     let sessions = failures::pebble_events(&finished.run_dir, "finish_docs", "SessionStarted");
@@ -1120,7 +1125,7 @@ async fn the_combined_workflow_reports_an_exhausted_chain_and_keeps_its_work() {
     assert_eq!(stop.len(), 1, "{records:?}");
     assert_eq!(stop[0]["reason"], json!("exhausted"), "{}", stop[0]);
     assert!(
-        failures::of_node(&records, "finish_docs", "fabro.thread").is_empty(),
+        failures::of_node(&records, "finish_docs", "attractor.thread").is_empty(),
         "the second docs node never ran"
     );
     let nodes = finished.finished_nodes();
@@ -1151,7 +1156,7 @@ async fn the_combined_workflow_reports_an_exhausted_chain_and_keeps_its_work() {
         "{projected:#?}"
     );
     assert_eq!(
-        count(&projected, "polish", "fabro.compaction"),
+        count(&projected, "polish", "attractor.compaction"),
         1,
         "{projected:#?}"
     );
@@ -1252,7 +1257,7 @@ async fn the_combined_workflow_is_cancelled_during_a_childs_tool_and_leaks_nothi
     );
     assert_eq!(projected.run_status.as_deref(), Some("Cancelled"));
     assert!(
-        count(&projected, "plan", "fabro.skills") >= 1,
+        count(&projected, "plan", "attractor.skills") >= 1,
         "{projected:#?}"
     );
     assert_eq!(

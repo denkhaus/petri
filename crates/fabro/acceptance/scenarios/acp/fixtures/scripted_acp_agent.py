@@ -11,7 +11,7 @@ does comes from the script and every trace it leaves is a file under the
 workspace, which the scenario's `expect.files` reads back.
 
 Protocol subset (ACP over JSON-RPC lines on stdin and stdout, the subset
-Petri's client in `crates/fabro/steps/src/acp.rs` speaks):
+Petri's client in `crates/attractor/steps/src/acp.rs` speaks):
 
 * `initialize` is answered with protocol version 1 and no capabilities.
 * `session/new` is answered with a fixed session id.

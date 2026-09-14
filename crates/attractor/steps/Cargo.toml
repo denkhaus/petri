@@ -1,0 +1,51 @@
+[package]
+name = "petri-attractor-steps"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Fabro step kinds: command, wait, human, agent over ACP or native Pebble, nested workflow, and the stub registry that simulates them all."
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+# The package is `petri-attractor-steps`; the crate is `attractor_steps`, so code reads `attractor_steps::…`.
+name = "attractor_steps"
+
+[dependencies]
+# `mcp`: the run's `[run.agent.mcps]` servers are Pebble's tool sources.
+pebble-coding-agent = { workspace = true, features = ["mcp"] }
+pebble-agent = { workspace = true }
+# HTTP hooks post the event context from the host.
+reqwest = { workspace = true }
+regex = { workspace = true }
+lithos-llm = { workspace = true, features = ["runtime"] }
+tokio-util = { workspace = true }
+globset = { workspace = true }
+ir = { workspace = true }
+executor = { workspace = true }
+execution = { workspace = true }
+steps = { workspace = true }
+runtime = { workspace = true }
+frontend = { workspace = true }
+frontend-attractor = { workspace = true }
+async-trait = { workspace = true }
+jsonschema = { workspace = true }
+shlex = { workspace = true }
+tar = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+smol_str = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pebble-coding-agent = { workspace = true, features = ["test-util"] }
+# The fallback unit tests resolve chains against a catalog whose providers use
+# the OpenAI adapter; the library itself needs no adapter.
+lithos-llm = { workspace = true, features = ["runtime", "openai"] }
+testkit = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

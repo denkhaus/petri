@@ -38,8 +38,8 @@ such a caller then warns about nothing and still asks the service at every
 boundary it does have.
 
 Exactly one service is installed per run: `NoHooks` by default, the local
-executor in the standalone runner (`fabro_steps::hooks::LocalHooks`, installed
-by `fabro_steps::register` when no `Runtime::hooks` is installed yet), the
+executor in the standalone runner (`attractor_steps::hooks::LocalHooks`, installed
+by `attractor_steps::register` when no `Runtime::hooks` is installed yet), the
 host's own when embedded. The service owns configuration, matching, placement
 (host or sandbox), timeouts, and how an executor's result becomes a decision
 (a command's exit code, HTTP, prompt and agent hooks). Every caller reaches
@@ -51,13 +51,13 @@ every point.
 
 A host replaces the service by installing its own `Runtime::hooks` (normally
 `HookAdapter::new(service)`, or a wrapper around it) and registering
-`HookServiceHandle(service)` before `fabro_steps::register` runs; the local
+`HookServiceHandle(service)` before `attractor_steps::register` runs; the local
 service is then not installed at all. A host that wants the local service
 under its own `ExecutionHooks` (a pause, a marker note at every point) calls
 `register` first and wraps `Runtime::installed_hooks()`; it never constructs
 the local service itself. Both are exercised: the first by
 `embedding::a_hook_service_runs_each_hook_once_at_its_point` and the two
-`a_replacement_service_*` tests of `petri-fabro-steps::hooks`, the second by
+`a_replacement_service_*` tests of `petri-frontend-fabro::hooks`, the second by
 `embedding_readiness.rs`.
 
 ## Points and decisions
@@ -70,9 +70,9 @@ the local service itself. Both are exercised: the first by
 | `AfterAttempt` | `HookAdapter::prepare_result` | `Adjust` |
 | `AfterVisit` | `HookAdapter::after_record` | none |
 | `RouteSelected` | `HookAdapter::transition` | `Override`, `Block` |
-| `ForkStarted` | the fork node's step (`fabro/fork`), through the `HookServiceHandle`, once per fork visit before any branch; the view is the fork node's | none |
+| `ForkStarted` | the fork node's step (`attractor/fork`), through the `HookServiceHandle`, once per fork visit before any branch; the view is the fork node's | none |
 | `ForkCompleted` | the fan-in step (plain, synthetic, or prompted), through the `HookServiceHandle`, once every branch is in and before the results are published; the view is the fan-in's, the payload `ForkCompletedPayload { fork }` names the fork node | none |
-| `ScopeReady` | the first step to run in a scope's environment (`fabro/stage` at the root workflow's `start`), through the `HookServiceHandle`, once per run, after the checkout seeded the workspace; the view is the step's, the payload `ScopeReadyPayload { scope, workspace }` | `Block` |
+| `ScopeReady` | the first step to run in a scope's environment (`attractor/stage` at the root workflow's `start`), through the `HookServiceHandle`, once per run, after the checkout seeded the workspace; the view is the step's, the payload `ScopeReadyPayload { scope, workspace }` | `Block` |
 | `RunStarted` | the same step, right after `ScopeReady`, once per run; the view is the step's, no payload | `Block` |
 | `RunFinished` | `HookAdapter::run_finished`, from the driver that owns the run (a bare driver, or the coordinator's root invocation) at a terminal exit, before any environment is released; no firing view, payload `RunFinishedPayload { status, failure }`; the report comes back as a note the coordinator records at run level | none |
 | `ScopeReleased` | `HookAdapter::scope_released`, from the driver just before a scope's own environment is released (an inherited sandbox's release reports nothing); a release that is part of the run's end waits for `RunFinished`; no firing view, payload `ScopeReleasedPayload { scope, outcome }`; the report comes back as a note the coordinator records at run level | none |
@@ -110,7 +110,7 @@ delivers `ScopeReady` and `RunStarted` once. A host whose own pipeline
 already ran the `sandbox_ready` and `run_start` phases answers `Proceed` at
 these two points without running hooks: Petri asks once, the service decides
 whether anything runs, and nothing runs twice. The reports of every
-step-asked point ride the public stream as `fabro.hook` events on the
+step-asked point ride the public stream as `attractor.hook` events on the
 asking firing (`EVENTS.md`), where the adapter's ride as `hook` notes.
 
 The two run-level end points carry no firing, so the driver records nothing
@@ -145,7 +145,7 @@ identity, never as the stage's: `HookReport::notes` yields one
 `hook.activity` note per agent event (`HookActivity { hook: { point, hook },
 backend, envelope }`), then the `hook` note; the adapter records them at the
 driver's points, and a step that asks a point itself records the same
-activity notes before its `fabro.hook` event (`fabro_steps::hooks::record_report`).
+activity notes before its `attractor.hook` event (`attractor_steps::hooks::record_report`).
 The projector reads each note as `parsed.hook_activity`, apart from the
 stage's own backend events, so a consumer summing a stage's agent activity
 or its `pebble.usage` never counts a hook's work, and `HookRun::usage` sums
@@ -175,5 +175,5 @@ does this: a timeout cancels the prompt, waits for the running tool to stop
 tasks to join, and only then returns its fail-open report; a dropped hook
 future cancels the same way through a guard, and the owner finishes the same
 cleanup on its own, bounded by the grace plus a fixed margin
-(`petri-fabro-steps::hooks::an_agent_hook_timeout_stops_its_tool_before_failing_open`,
+(`petri-frontend-fabro::hooks::an_agent_hook_timeout_stops_its_tool_before_failing_open`,
 `a_cancelled_run_stops_an_agent_hooks_running_tool`).

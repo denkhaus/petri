@@ -16,6 +16,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use petri::attractor::{
+    AGENT_KIND, BranchStep, CommandStep, FanInStep, ForkStep, HumanStep, StageStep, StubStep,
+    WAIT_KIND, WORKFLOW_KIND,
+};
 use petri::driver::lifecycle::{
     AdmitAttempt, AttemptDecision, ExecutionHooks, Note, PrepareError, PrepareResult, Prepared,
     RESULT_PREPARED_KIND, Recorded, ResultAdjustment, RouteOverride, TRANSITION_KIND, Transition,
@@ -37,10 +41,6 @@ use petri::execution::{
     Interviewer,
 };
 use petri::executor::Retention;
-use petri::fabro::{
-    AGENT_KIND, BranchStep, CommandStep, FanInStep, ForkStep, HumanStep, StageStep, StubStep,
-    WAIT_KIND, WORKFLOW_KIND,
-};
 use petri::frontend::fabro::Fabro;
 use petri::frontend::{CompileInputs, Lowered};
 use petri::ir::{Attempt, EdgeId, Exhaustion, Graph, Outcome, RunStatus, Status, Value};

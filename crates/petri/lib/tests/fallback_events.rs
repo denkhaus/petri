@@ -2,7 +2,7 @@
 //! `RunEvent`s alone can rebuild a stage's fallback plan, the routes it ran
 //! on, the failover decision with its typed error, the accounting per route,
 //! and the terminal outcome. The plan is Petri's own event
-//! (`fabro.fallback.plan`); every other fact is Pebble's, on the
+//! (`attractor.fallback.plan`); every other fact is Pebble's, on the
 //! `agent_activity` stream: `SessionStarted` names each route, `RouteFailover`
 //! the move with the failed route's usage and the typed error,
 //! `RouteFailoverStopped` the stop and its reason, `AssistantMessage` each
@@ -18,14 +18,14 @@ use lithos_llm::types::ErrorKind;
 use pebble_coding_agent::test_support::{
     ScriptedCall, ScriptedFailure, scripted_client, text_response,
 };
+use petri::attractor::fallback::PLAN_EVENT;
+use petri::attractor::pebble::PebbleClient;
+use petri::attractor::register;
 use petri::engine::Event;
 use petri::execution::events::{CollectingSink, EventProjector, RunEvent};
 use petri::execution::host::{self, HostRun};
 use petri::execution::{CoordinatorEvent, ExecutionObserver};
 use petri::executor::Retention;
-use petri::fabro::fallback::PLAN_EVENT;
-use petri::fabro::pebble::PebbleClient;
-use petri::fabro::register;
 use petri::frontend::CompileInputs;
 use petri::frontend::fabro::Fabro;
 use petri::ir::{RunStatus, Value};

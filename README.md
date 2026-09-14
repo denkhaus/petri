@@ -20,15 +20,17 @@ crates/github/frontend   the GitHub Actions frontend: lowers workflow files to t
 crates/github/actions    the GitHub Actions step kinds: run, action, checkout
 crates/github/objects    the ObjectService: cache, artifacts, and tool-cache storage
 crates/github/acceptance the acceptance battery: corpus harness and end-to-end runs
-crates/fabro/frontend    the Fabro frontend: lowers Graphviz DOT workflows to the IR
-crates/fabro/steps       the Fabro step kinds: command, wait, human, agent over ACP or native Pebble, prompt, nested workflow, the stage step, the local hook service, MCP servers as Pebble tool sources (`pebble::mcp`), fidelity preambles, retained threads, project memory, Fabro's skill directories, context compaction, the output store, and the stub registry
+crates/attractor/frontend    the Attractor frontend: lowers Graphviz DOT workflows to the IR; reads no settings file
+crates/attractor/steps       the Attractor step kinds: command, wait, human, agent over ACP or native Pebble, prompt, nested workflow, the stage step, the local hook service, MCP servers as Pebble tool sources (`pebble::mcp`), fidelity preambles, retained threads, project memory, Fabro's skill directories, context compaction, the output store, and the stub registry
+crates/fabro/frontend    the Fabro frontend: Fabro's settings layers (`workflow.toml`, `.fabro/project.toml`, the user settings) and launch precedence around the Attractor frontend
 crates/fabro/acceptance  the Fabro battery: corpus harness, runs under stubs, the Fabro oracle, real steps, the compatibility contract and bundle manifest
 crates/petri/lib       the distribution: core plus every component
 crates/petri/cli       the shipped `petri` binary: the distribution handed to core's CLI
 ```
 
 Packages are named `petri-*` and arrows point down. Core never depends on a component; components
-depend on core and never on each other; only the distribution names them all.
+depend on core and never on each other, with one declared layer: `fabro` sits on `attractor`, since
+the Fabro frontend wraps the Attractor frontend; only the distribution names them all.
 `crates/petri/lib/tests/layering.rs` enforces this from `cargo metadata`. The next
 format (CircleCI, RWX) is a `crates/<component>/` directory and one
 registration in the distribution, as `crates/fabro/` is.
@@ -116,18 +118,19 @@ crates/core/runtime/tests/native_e2e.rs      frontend §7 7: the cycle, run end 
 crates/github/acceptance/tests/harness.rs    frontend §7 8: every corpus workflow lowers or is rejected specifically
 crates/github/acceptance/tests/e2e.rs        frontend §7 9: two real corpus workflows run on the executor
 
-crates/fabro/frontend/tests/lowering.rs      Fabro plan §7 3: tiers, failure policies, goal gates, parallel, budgets, rejections
-crates/fabro/frontend/tests/conditions.rs    Fabro plan §7 4: the condition grammar against Fabro's semantics
-crates/fabro/frontend/tests/fuzz.rs          Fabro plan §7 1: arbitrary text never panics the parser
+crates/attractor/frontend/tests/lowering.rs      Fabro plan §7 3 (the language): tiers, failure policies, goal gates, parallel, budgets, rejections
+crates/fabro/frontend/tests/lowering.rs        the settings layers: `workflow.toml` sections, `.fabro/project.toml`, the user settings, `[run.inputs]` defaults, hooks and MCP layering, the launch record, the bundle root
+crates/attractor/frontend/tests/conditions.rs    Fabro plan §7 4: the condition grammar against Fabro's semantics
+crates/attractor/frontend/tests/fuzz.rs          Fabro plan §7 1: arbitrary text never panics the parser
 crates/fabro/acceptance/tests/harness.rs     Fabro plan §7 2: every corpus file lowers or is rejected specifically; REPORT.md
 crates/fabro/acceptance/tests/runs.rs        Fabro plan §7 5: every lowered corpus file runs under stubs; RUNS.md
 crates/fabro/acceptance/tests/routing.rs     Fabro plan §7 3, 5, 7: the scripted battery, checked against the Fabro oracle
 crates/fabro/acceptance/tests/exhaustion.rs  readiness item 4: the failure policy after retries in Fabro's order (explicit routes first under `succeed`, `allow_partial` before any route, an expired human gate), expectations from the pinned source
 crates/fabro/acceptance/tests/workflow.rs    Fabro plan §5.2: nested workflows through the coordinator; one child per manager attempt
-crates/fabro/steps/tests/manager.rs          readiness item 4: the manager loop under a controlled clock (polls, stop condition, exhaustion, defaults, reattach, cancel)
-crates/fabro/steps/tests/parallel.rs         readiness item 3: branches as child invocations; static, mixed and all-failed forks, promotion, duplicate targets, empty `for_each`, item labels, repeated forks, nested forks, cancellation, resume; the fork snapshot offloaded (a 50-item fork's children, resume through the store, two forks in sequence)
+crates/attractor/steps/tests/manager.rs          readiness item 4: the manager loop under a controlled clock (polls, stop condition, exhaustion, defaults, reattach, cancel)
+crates/attractor/steps/tests/parallel.rs         readiness item 3: branches as child invocations; static, mixed and all-failed forks, promotion, duplicate targets, empty `for_each`, item labels, repeated forks, nested forks, cancellation, resume; the fork snapshot offloaded (a 50-item fork's children, resume through the store, two forks in sequence)
 crates/core/execution/tests/admission.rs      readiness item 3: `max_parallel` as a bound on a fork's live children (dispatch in declaration order, a branch in backoff holds none, cancel while queued, redispatch on resume) and the run-wide 10,000 invocation ceiling (boundary, nested, finished children, lower limits, refusals, resume)
-crates/fabro/steps/tests/prompt.rs           readiness item 4: `fabro/prompt` against a scripted model client, contracts and repair turns, the prompted fan-in, prompt events
+crates/attractor/steps/tests/prompt.rs           readiness item 4: `attractor/prompt` against a scripted model client, contracts and repair turns, the prompted fan-in, prompt events
 crates/fabro/acceptance/tests/e2e.rs         Fabro plan §7 6: gh-list, hello, a for_each fan-out, random selection, two 1,000-item forks in one run, end to end
 crates/petri/cli/tests/fabro_cli.rs          Fabro plan §6: `petri run --auto-approve` answers a human gate
 crates/petri/cli/tests/inspect_cli.rs        black box phase 2: `petri inspect` over finished, restarted, failed, cancelled and damaged run dirs
@@ -141,21 +144,21 @@ crates/petri/lib/tests/interview.rs          the interview dispatcher on the sta
 crates/petri/lib/tests/controls.rs           readiness item 6: the circuit breaker across restarts and resume, node visit totals across `loop_restart`, the stall watchdog, pause, cancel while paused, steering; the durable pause (a pause survives a dropped coordinator and holds admission on resume until an unpause; a paused resumed run can be cancelled)
 crates/core/driver/tests/interview_budget.rs readiness item 6 on a controlled clock: own-stage and sibling waits, overlapping questions, active work after a wait, handler-managed nodes, cancellation during a wait, a fresh budget on redispatch
 crates/petri/lib/tests/embedding.rs          readiness item 7: a Fabro workflow without adapters, then with fake adapters (pause, skip, block, prepared results, route override, fatal and best-effort transitions, a hook service); the timeline reconstructed from public events; slow, failing and recovering consumers
-crates/fabro/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wait, human answered through deliver; Fabro's failure promotion; output references above 100 KiB
-crates/fabro/steps/tests/agent.rs            Fabro plan §7 6: the agent step against Fabro's fake ACP agent
-crates/fabro/steps/tests/hooks.rs            readiness item 5: `[[run.hooks]]` at every phase with Fabro's payload and order, decisions, placement, timeouts, HTTP, prompt and agent hooks, native tool hooks, threads and fidelity, project memory, `speed` and `max_tokens`, ACP best effort
-crates/fabro/steps/tests/mcp.rs              readiness item 9b: `[run.agent.mcps]` against the scripted `mcp_server.py`: a stdio server's tool writes into the workspace, hooks block MCP tools, error results, timeouts, a crashed server, cancellation, a retained thread, start failures, the http and sandbox transports over streamable HTTP and SSE, every fact read from Pebble's own events
+crates/attractor/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wait, human answered through deliver; Fabro's failure promotion; output references above 100 KiB
+crates/attractor/steps/tests/agent.rs            Fabro plan §7 6: the agent step against Fabro's fake ACP agent
+crates/fabro/frontend/tests/hooks.rs         readiness item 5: `[[run.hooks]]` at every phase with Fabro's payload and order, decisions, placement, timeouts, HTTP, prompt and agent hooks, native tool hooks, threads and fidelity, project memory, `speed` and `max_tokens`, ACP best effort
+crates/fabro/frontend/tests/mcp.rs           readiness item 9b: `[run.agent.mcps]` against the scripted `mcp_server.py`: a stdio server's tool writes into the workspace, hooks block MCP tools, error results, timeouts, a crashed server, cancellation, a retained thread, start failures, the http and sandbox transports over streamable HTTP and SSE, every fact read from Pebble's own events
 crates/petri/cli/tests/fabro_mcp_blackbox.rs  readiness item 9b (milestone C2) through the binary: a configured MCP server's tool called by the twin's model under its qualified name, the effect in the workspace and the result in the next request, a hook block, failures, Ctrl-C, a retained thread, a start failure on the terminal, a masked secret, refused settings
 crates/petri/cli/tests/fabro_fallback_blackbox.rs  readiness item 9a (milestone C1) through the binary: `[run.model.fallbacks]` with the twins injecting failures: a successful primary, qualifying and non-qualifying failures, a third provider after two failures, chain exhaustion, a tool effect not repeated across a failover, cancellation during fallback, refusal versus other content filters, a request timeout, client retries spent before the chain advances, a workflow retry that is not a failover, reasoning effort mapping with `NoNearbyReasoningLevel` and `ChainEmpty`, repair turns on the plan with a target's chain inert, a retained thread on the fallback route, a prompt node
 crates/petri/cli/tests/llm_client.rs         the client `petri::llm_client` builds, against a twin: its same-route retries and its call budget
 crates/petri/lib/tests/fallback_events.rs    readiness item 9a: a stage's fallback plan, routes, failover decision, per-route usage and outcome rebuilt from public `RunEvent`s alone
 crates/petri/cli/tests/fabro_hooks_blackbox.rs  readiness item 5 through the binary: a configured hook blocks a real tool effect of a native agent (`a_configured_hook_blocks_a_real_tool_effect_in_the_native_backend`); two `full` nodes share one conversation
-crates/fabro/steps/src/fallback.rs (unit)     readiness item 9a: chain resolution keyed by the canonical model, refused keys, skipped candidates with Fabro's notices, per-target reasoning effort with `NoNearbyReasoningLevel` and `ChainEmpty`, the plan's positions, the typed failure's eligibility (`lithos-llm`'s `failover_eligible`) for every `lithos-llm` kind, and every Pebble error's class
-crates/fabro/steps/tests/skills.rs           readiness item 9c: Fabro's skill directories in order on real scopes, precedence across the three, the reference prompt section and tool definition, `/name` expansion, `[run.agent] skills`, malformed and missing skills diagnosed (fixtures `crates/fabro/acceptance/testdata/skills`)
+crates/attractor/steps/src/fallback.rs (unit)     readiness item 9a: chain resolution keyed by the canonical model, refused keys, skipped candidates with Fabro's notices, per-target reasoning effort with `NoNearbyReasoningLevel` and `ChainEmpty`, the plan's positions, the typed failure's eligibility (`lithos-llm`'s `failover_eligible`) for every `lithos-llm` kind, and every Pebble error's class
+crates/fabro/frontend/tests/skills.rs        readiness item 9c: Fabro's skill directories in order on real scopes, precedence across the three, the reference prompt section and tool definition, `/name` expansion, `[run.agent] skills`, malformed and missing skills diagnosed (fixtures `crates/fabro/acceptance/testdata/skills`)
 crates/petri/cli/tests/fabro_skills_blackbox.rs  readiness item 9c through the binary: precedence and the reference prompt and tool on both vocabularies, a hook blocking a skill-driven tool call, a `for_each` branch keeping its loaded skill, the warnings on the terminal and in the event log
-crates/fabro/steps/tests/compaction.rs         readiness item 9e: Fabro's compaction on the native backend against a scripted model: the trigger below, at and above the 80 percent threshold, continuation and thread reuse across the boundary, tool pairing, a host `CompactionPolicy`, a failed summary, cancellation, the lost-thread fallback, and the public events and usage
+crates/attractor/steps/tests/compaction.rs         readiness item 9e: Fabro's compaction on the native backend against a scripted model: the trigger below, at and above the 80 percent threshold, continuation and thread reuse across the boundary, tool pairing, a host `CompactionPolicy`, a failed summary, cancellation, the lost-thread fallback, and the public events and usage
 crates/petri/cli/tests/fabro_compaction_blackbox.rs  readiness item 9e through the binary: a native agent compacts and finishes correct work, a later `full` node reuses the compacted thread, a failed summary call is non-fatal, a lost thread starts at `summary:high`, and a run cancelled during the summary call stops
-crates/fabro/steps/tests/subagents.rs        readiness item 9d: a native agent delegates to Pebble-built children on real scopes; hooks and the question rule inside a child; the invocation ceiling never counts a child; the open-session bound; child failure, nesting, cancellation, thread reuse, resume; a child re-reads the parent's project memory and re-discovers its skills
+crates/attractor/steps/tests/subagents.rs        readiness item 9d: a native agent delegates to Pebble-built children on real scopes; hooks and the question rule inside a child; the invocation ceiling never counts a child; the open-session bound; child failure, nesting, cancellation, thread reuse, resume; a child re-reads the parent's project memory and re-discovers its skills
 crates/petri/cli/tests/fabro_subagents_blackbox.rs  readiness item 9d through the binary: a parent delegates a workspace change; a hook blocks a child's effect; a child's failure is the parent's tool result; concurrent children and one invocation; a grandchild; an interrupt closes the child; a retained thread carries a child's result; accounting reconstructed from `execution::replay_run`
 crates/petri/cli/tests/fabro_terminal_blackbox.rs  readiness item 2 through the binary: retry notices, branch attribution with masked secrets, the bounded echo, `--interactive` for every question type with invalid and missing input, Docker retention after success, failure and cancellation with `petri sandbox prune`
 crates/petri/cli/tests/fabro_milestone_blackbox.rs  readiness item 8 through the binary: one workflow with `run.prepare`, commands, a native agent editing a file under a tool hook, a retained thread, project memory, a scripted decision, a bounded fan-out consumed downstream, run-end hooks and file checks; success, failure and cancellation
@@ -165,6 +168,19 @@ crates/petri/cli/tests/fabro_evidence_blackbox.rs  the readiness gate's evidence
 crates/petri/lib/tests/fabro_dependencies.rs  readiness item 1: no Fabro crate anywhere in Petri's dependency graph
 crates/petri/cli/tests/standalone.rs          readiness item 1: the binary runs a Fabro workflow with no `fabro` on PATH
 ```
+
+### The Attractor language and the Fabro layer
+
+`crates/attractor/FORMAT.md` is the language as lowered: every construct in a
+DOT file, what it becomes in the IR, what is refused, and the step kinds a
+graph runs on. `crates/fabro/FORMAT.md` is the Fabro layer around it: how
+`workflow.toml`, `.fabro/project.toml` and the user settings resolve into the
+run settings the lowering applies, and the launch record Fabro adds to the
+graph. Fabro is one implementation of the Attractor specification, and the
+next revision of that specification follows Fabro's dialect, so a Fabro
+workflow is an Attractor workflow with Fabro's files beside it. The split, and
+the `attractor` prefix on the step kinds, diagnostics and event kinds the
+language emits, are recorded in `.ai/plans/attractor-split.md`.
 
 ### The Fabro compatibility contract
 
@@ -283,7 +299,7 @@ preview-URL operation for servers inside containers. The later
 prompt nodes now load through, and the tool-round budget agent hooks enforce.
 Pebble `c91810f` and lithos-llm `55add45` carry token usage and cost as one
 lithos-llm `Usage`; every `usage` Petri records takes that shape
-(`crates/fabro/FORMAT.md`, "Usage").
+(`crates/attractor/FORMAT.md`, "Usage").
 
 Host and container scopes use the `sandbox-driver-host` and
 `sandbox-driver-docker` plugins. Petri launches them and communicates over
@@ -345,7 +361,7 @@ Fabro agent nodes can use Pebble directly as a Rust library. Set
 `backend="api"` and `model="provider/model"` on the node, or set graph
 `backend` and `default_model`. The `petri` distribution reads provider
 credentials from its environment. ACP remains the default. See
-[native Pebble configuration](crates/fabro/FORMAT.md#native-pebble) for scope
+[native Pebble configuration](crates/attractor/FORMAT.md#native-pebble) for scope
 requirements, client injection, project memory, skills, context compaction,
 tool hooks, retained threads, sub-agents, events, and accounting. Fabro's `fidelity` modes, threads and
 `[[run.hooks]]` are described under "Steps at run time" on the same page.
@@ -1046,7 +1062,7 @@ paths, and `run: <status>`. The exit code is 0 for success, 1 for a failed or
 cancelled run, 2 for a usage error, 3 for a host error, and 4 when the run
 finished but its interview did not go as scripted.
 
-**Answering questions.** A `fabro/human` gate, and a native agent's question
+**Answering questions.** A `attractor/human` gate, and a native agent's question
 tool, ask through the core `Question` event; the host's `Interviewer` answers
 (`execution::Interviewer`, an open trait a product host implements too). The
 CLI ships three, one per option, and they exclude one another:
@@ -1137,7 +1153,7 @@ run that emits no execution event for that long; a pending question parks the
 clock, and the terminal prints `stall watchdog: no execution activity for N
 s`. Its `loop_restart_signature_limit` (default 3) fails a run whose node
 repeats one deterministic failure that many times and blocks a `loop_restart`
-edge taken by anything but a transient failure. See `crates/fabro/FORMAT.md`,
+edge taken by anything but a transient failure. See `crates/attractor/FORMAT.md`,
 "Watchdog and circuit breaker".
 
 **The receipt.** Every run with an interviewer writes
@@ -1205,7 +1221,7 @@ retries included. Pebble replays a model turn whose response stream broke, on
 its default policy. Both report on the agent's event stream as Pebble's
 `LlmRetry`. Fabro's `[run.model.fallbacks]` chain is planned by Petri and run
 by Pebble, and starts only once both are spent; see "Model fallback" in
-`crates/fabro/FORMAT.md`. A workflow retry (`retries` on a node) is a new
+`crates/attractor/FORMAT.md`. A workflow retry (`retries` on a node) is a new
 attempt with a new plan and is none of these.
 
 **Workflow secrets.** A Fabro `workflow.toml` environment value written as
@@ -1250,11 +1266,11 @@ no platform vocabulary in them:
   hook executor implements (`crates/core/execution/HOOKS.md`); the
   `HookAdapter` is its one caller from workflow points, so the local hook
   executor and a platform's hook service both run each configured hook once.
-  `fabro_steps::hooks::LocalHooks` is the local one: `fabro_steps::register`
+  `attractor_steps::hooks::LocalHooks` is the local one: `attractor_steps::register`
   installs it unless the host installed a service first, and it serves the
   per-firing points, the native agent's tool boundary, the ACP client's
   permission requests and the run-level events from one place
-  (`crates/fabro/FORMAT.md`, "Hooks").
+  (`crates/attractor/FORMAT.md`, "Hooks").
 - **Questions.** `execution::Interviewer` and the `InterviewDispatcher`, as
   on the terminal path.
 

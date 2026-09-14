@@ -40,6 +40,13 @@ checkouts; commit a pushed revision in `Cargo.toml` and regenerate `Cargo.lock`
 before sharing the integration. The twins (`lithoscomputer/twins`) are pinned
 the same way in the two test crates that serve them.
 
+## Attractor and Fabro
+
+The Attractor crates (`crates/attractor/`) lower and run the language; the
+Fabro crates (`crates/fabro/`) read Fabro's settings files around it and prove
+compatibility with the pinned Fabro. `fabro` may depend on `attractor`, never
+the other way; `crates/petri/lib/tests/layering.rs` enforces the direction.
+
 ## Fabro bundles
 
 The Fabro workflow bundles the black box battery runs are vendored under
@@ -53,7 +60,7 @@ against the lock and fails on a missing, changed, or extra file. To update a
 bundle, follow "Updating a bundle" in `PROVENANCE.md`.
 
 Native Pebble tests use a scripted model and real execution scopes. They need
-no provider credentials. `crates/fabro/steps/tests/pebble.rs` covers tool
+no provider credentials. `crates/attractor/steps/tests/pebble.rs` covers tool
 execution, output repair, model selection, accounting, steering, cancellation,
 bounded output capture, and the Pebble environment contract on Host and Docker.
 

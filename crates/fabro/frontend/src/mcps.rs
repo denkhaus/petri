@@ -1,6 +1,7 @@
 //! Fabro's `[run.agent.mcps.<name>]` entries: the MCP servers a native agent
 //! node connects to, read from the settings layers the way Fabro reads them
-//! and carried on every agent node's step config.
+//! into the resolved definitions the agent step carries
+//! ([`frontend_attractor::mcps`]).
 //!
 //! The layers, lowest first: `~/.fabro/settings.toml` (the host's
 //! [`SETTINGS_HOOKS_VAR`] variable), `.fabro/project.toml`, `workflow.toml`.
@@ -15,169 +16,41 @@
 //! `{{ secrets.NAME }}` may stand alone as an `env` or `headers` value and
 //! becomes a [`McpValue::Secret`] the step resolves when it launches the
 //! server. `{{ env.* }}` is refused, as Fabro refuses it before launch.
-//!
-//! Tool names: a server's tool `t` is exposed to the model as
-//! `mcp__<server>__<t>` ([`qualified_tool_name`]), with every character that
-//! is not alphanumeric or `_` replaced by `_`, as Fabro names them.
 
 use std::collections::BTreeMap;
 
-use frontend::{Diagnostics, Span};
-use serde::{Deserialize, Serialize};
+use frontend::{CompileInputs, Diagnostics, FileSource, Span};
+pub use frontend_attractor::mcps::{
+    DEFAULT_STARTUP_TIMEOUT_MS, DEFAULT_TOOL_TIMEOUT_MS, McpHttpProtocol, McpServer, McpTransport,
+    McpValue,
+};
+use frontend_attractor::model::parse_duration;
+use frontend_attractor::template::Context;
+use ir::Value;
 
-use crate::lower::{InterpolationError, interpolate};
-use crate::model::parse_duration;
-use crate::template::Context;
+use crate::hooks::{PROJECT_FILE, SETTINGS_HOOKS_VAR};
+use crate::secrets::{InterpolationError, interpolate};
 
-/// The default handshake timeout, Fabro's `startup_timeout`.
-pub const DEFAULT_STARTUP_TIMEOUT_MS: u64 = 10_000;
-/// The default per-call timeout, Fabro's `tool_timeout`.
-pub const DEFAULT_TOOL_TIMEOUT_MS: u64 = 60_000;
-
-/// The separator in a qualified tool name.
-const TOOL_NAME_DELIMITER: &str = "__";
-/// The prefix of every MCP tool name.
-const TOOL_NAME_PREFIX: &str = "mcp";
-
-/// A transport string: literal text, or a secret the run resolves when it
-/// launches the server. Serialized as the string or as `{"$secret": name}`,
-/// so a secret never appears in a persisted graph.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum McpValue {
-    Secret {
-        #[serde(rename = "$secret")]
-        name: String,
-    },
-    Literal(String),
-}
-
-/// Which HTTP transport an `http` or `sandbox` server speaks: Fabro's
-/// `protocol` field, `streamable_http` unless the entry says `sse`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum McpHttpProtocol {
-    /// The current transport: JSON-RPC over POST, with optional server
-    /// streams.
-    #[default]
-    StreamableHttp,
-    /// The older transport: one server-sent event stream that names the
-    /// endpoint messages are posted to.
-    Sse,
-}
-
-impl McpHttpProtocol {
-    /// The protocol's name in the entry and in messages.
-    pub fn kind(self) -> &'static str {
-        match self {
-            Self::StreamableHttp => "streamable_http",
-            Self::Sse => "sse",
-        }
+/// Read and merge every layer. `workflow_toml` is the already-read
+/// `(path, text)` of the workflow's own `workflow.toml`, when it exists.
+pub fn load(
+    files: &dyn FileSource,
+    inputs: &CompileInputs,
+    workflow_toml: Option<&(String, String)>,
+    template: &Context,
+    diags: &mut Diagnostics,
+) -> Vec<McpServer> {
+    let mut layers = Vec::with_capacity(3);
+    if let Some(Value::String(text)) = inputs.vars.get(SETTINGS_HOOKS_VAR) {
+        layers.push(read_layer(text, "settings.toml", template, diags));
     }
-}
-
-/// How the runner reaches a server: Fabro's three transports.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum McpTransport {
-    /// A child process on Petri's host, spoken to over stdin and stdout.
-    /// `command` is the argv; a `script` entry is `["sh", "-c", script]`.
-    Stdio {
-        command: Vec<String>,
-        #[serde(default)]
-        env:     BTreeMap<String, McpValue>,
-    },
-    /// An HTTP endpoint the host connects to, over `protocol`.
-    Http {
-        #[serde(default)]
-        protocol: McpHttpProtocol,
-        url:      String,
-        #[serde(default)]
-        headers:  BTreeMap<String, McpValue>,
-    },
-    /// A command launched inside the scope's execution environment that
-    /// listens on `port`; the host connects to it over `protocol` through
-    /// the environment's route to the port. A `script` entry is
-    /// `["bash", "-c", script]`.
-    Sandbox {
-        #[serde(default)]
-        protocol: McpHttpProtocol,
-        command:  Vec<String>,
-        port:     u16,
-        #[serde(default)]
-        env:      BTreeMap<String, McpValue>,
-    },
-}
-
-impl McpTransport {
-    /// The transport's name in events and messages.
-    pub fn kind(&self) -> &'static str {
-        match self {
-            Self::Stdio { .. } => "stdio",
-            Self::Http { .. } => "http",
-            Self::Sandbox { .. } => "sandbox",
-        }
+    if let Some(text) = files.read(PROJECT_FILE) {
+        layers.push(read_layer(&text, PROJECT_FILE, template, diags));
     }
-}
-
-/// One configured server, as the agent step receives it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct McpServer {
-    /// The table key, and the `<server>` part of every qualified tool name.
-    pub name:               String,
-    pub transport:          McpTransport,
-    #[serde(default = "default_startup_timeout")]
-    pub startup_timeout_ms: u64,
-    #[serde(default = "default_tool_timeout")]
-    pub tool_timeout_ms:    u64,
-    /// The settings file the entry came from, for messages.
-    #[serde(default)]
-    pub source:             String,
-}
-
-fn default_startup_timeout() -> u64 {
-    DEFAULT_STARTUP_TIMEOUT_MS
-}
-
-fn default_tool_timeout() -> u64 {
-    DEFAULT_TOOL_TIMEOUT_MS
-}
-
-/// The name the model sees for `tool` on `server`: `mcp__<server>__<tool>`,
-/// each part sanitized as Fabro sanitizes it.
-pub fn qualified_tool_name(server: &str, tool: &str) -> String {
-    format!(
-        "{TOOL_NAME_PREFIX}{TOOL_NAME_DELIMITER}{}{TOOL_NAME_DELIMITER}{}",
-        sanitize_name(server),
-        sanitize_name(tool)
-    )
-}
-
-/// The `(server, tool)` parts of a qualified name, or `None` when the name is
-/// not one. Both parts come back sanitized, as they were written.
-pub fn parse_qualified_name(qualified: &str) -> Option<(String, String)> {
-    let rest = qualified
-        .strip_prefix(TOOL_NAME_PREFIX)?
-        .strip_prefix(TOOL_NAME_DELIMITER)?;
-    let index = rest.find(TOOL_NAME_DELIMITER)?;
-    let server = &rest[..index];
-    let tool = &rest[index + TOOL_NAME_DELIMITER.len()..];
-    if server.is_empty() || tool.is_empty() {
-        return None;
+    if let Some((path, text)) = workflow_toml {
+        layers.push(read_layer(text, path, template, diags));
     }
-    Some((server.to_owned(), tool.to_owned()))
-}
-
-fn sanitize_name(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    merge(layers)
 }
 
 /// One layer's entries: the name and the server, or `None` for an entry the
@@ -772,25 +645,6 @@ mod tests {
         let entries = read_layer(text, "workflow.toml", &context(), &mut diags);
         let codes = diags.iter().map(|d| d.code.to_string()).collect();
         (entries, codes)
-    }
-
-    #[test]
-    fn qualified_names_follow_fabro() {
-        assert_eq!(
-            qualified_tool_name("filesystem", "read_file"),
-            "mcp__filesystem__read_file"
-        );
-        assert_eq!(
-            qualified_tool_name("my-server", "read.file"),
-            "mcp__my_server__read_file"
-        );
-        assert_eq!(
-            parse_qualified_name("mcp__my_server__read_file"),
-            Some(("my_server".into(), "read_file".into()))
-        );
-        assert_eq!(parse_qualified_name("not_mcp__server__tool"), None);
-        assert_eq!(parse_qualified_name("mcp__serveronly"), None);
-        assert_eq!(parse_qualified_name("mcp____tool"), None);
     }
 
     #[test]

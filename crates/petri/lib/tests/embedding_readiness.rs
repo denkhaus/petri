@@ -23,6 +23,9 @@ use std::time::Duration;
 use std::{env, fs};
 
 use lithos_llm::credentials::{CredentialHeader, Credentials, SecretValue, StaticCredentials};
+use petri::attractor::pebble::PebbleClient;
+use petri::attractor::register;
+use petri::attractor::skills::FabroHome;
 use petri::driver::lifecycle::{
     AdmitAttempt, AttemptDecision, ExecutionHooks, Note, PrepareError, PrepareResult, Prepared,
     Recorded, RunFinished, ScopeReleased, Transition, TransitionError, TransitionReport,
@@ -37,9 +40,6 @@ use petri::execution::{
     Interviewer,
 };
 use petri::executor::Retention;
-use petri::fabro::pebble::PebbleClient;
-use petri::fabro::register;
-use petri::fabro::skills::FabroHome;
 use petri::frontend::CompileInputs;
 use petri::frontend::fabro::Fabro;
 use petri::ir::RunStatus;
@@ -1019,23 +1019,23 @@ async fn the_combined_workflow_runs_through_the_embedding_boundary() {
     assert_eq!(projected.expansions, 1);
     assert_eq!(projected.branch_children, 2);
     assert_eq!(
-        kind_total(&projected, "fabro.parallel.branch.started"),
+        kind_total(&projected, "attractor.parallel.branch.started"),
         2,
         "{projected:#?}"
     );
     assert_eq!(
-        kind_total(&projected, "fabro.parallel.branch.completed"),
+        kind_total(&projected, "attractor.parallel.branch.completed"),
         2,
         "{projected:#?}"
     );
     assert_eq!(
-        count(&projected, "join", "fabro.parallel.completed"),
+        count(&projected, "join", "attractor.parallel.completed"),
         1,
         "{projected:#?}"
     );
     // Every item 9 family, attributed to its stage, as through the binary.
     assert!(
-        count(&projected, "plan", "fabro.skills") >= 1,
+        count(&projected, "plan", "attractor.skills") >= 1,
         "{projected:#?}"
     );
     // C2 on Pebble's own events: the write's server was ready and one
@@ -1057,34 +1057,44 @@ async fn the_combined_workflow_runs_through_the_embedding_boundary() {
         "{projected:#?}"
     );
     assert_eq!(
-        count(&projected, "review", "fabro.hook"),
+        count(&projected, "review", "attractor.hook"),
         2,
         "{projected:#?}"
     );
     assert_eq!(
-        count(&projected, "polish", "fabro.compaction"),
+        count(&projected, "polish", "attractor.compaction"),
         1,
         "{projected:#?}"
     );
     // C1: the docs thread's plan (Petri's) and its failover (Pebble's); the
     // second docs node reuses the thread with no plan of its own.
-    assert_eq!(count(&projected, "draft_docs", "fabro.fallback.plan"), 1);
+    assert_eq!(
+        count(&projected, "draft_docs", "attractor.fallback.plan"),
+        1
+    );
     assert_eq!(count(&projected, "draft_docs", "pebble:RouteFailover"), 1);
-    assert_eq!(count(&projected, "finish_docs", "fabro.fallback.plan"), 0);
-    assert_eq!(count(&projected, "finish_docs", "fabro.thread"), 1);
-    assert_eq!(count(&projected, "plan", "fabro.hook"), 3, "{projected:#?}");
     assert_eq!(
-        count(&projected, "write", "fabro.hook"),
+        count(&projected, "finish_docs", "attractor.fallback.plan"),
+        0
+    );
+    assert_eq!(count(&projected, "finish_docs", "attractor.thread"), 1);
+    assert_eq!(
+        count(&projected, "plan", "attractor.hook"),
         3,
         "{projected:#?}"
     );
     assert_eq!(
-        count(&projected, "delegate", "fabro.hook"),
+        count(&projected, "write", "attractor.hook"),
         3,
         "{projected:#?}"
     );
     assert_eq!(
-        count(&projected, "polish", "fabro.hook"),
+        count(&projected, "delegate", "attractor.hook"),
+        3,
+        "{projected:#?}"
+    );
+    assert_eq!(
+        count(&projected, "polish", "attractor.hook"),
         10,
         "{projected:#?}"
     );

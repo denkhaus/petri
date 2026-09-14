@@ -1,78 +1,104 @@
-//! The Fabro frontend: Graphviz DOT workflows → HIR.
+//! The Fabro frontend: Fabro's workflow bundle on top of the Attractor
+//! language.
 //!
-//! Text in, `Graph` and diagnostics out, exactly as the GitHub Actions
-//! frontend. Fabro renders templates, resolves `@file` references and applies
-//! its model stylesheet once at run creation and persists the literal graph;
-//! this frontend does the same at load, so what the engine sees is literal.
+//! Fabro runs Attractor graphs (`*.fabro`, `*.dot`) with a settings layer
+//! around them: `workflow.toml` beside the workflow, `.fabro/project.toml` at
+//! the bundle root, and the operator's `~/.fabro/settings.toml`. This crate
+//! reads those files the way Fabro reads them, resolves them into the
+//! [`RunSettings`] the Attractor lowering applies, and lowers through
+//! [`frontend_attractor::lower`]. The graph it returns carries Fabro's launch
+//! record (`fabro.launch`, `fabro.environment`) beside the language's own
+//! parameters.
 //!
-//! What lowers where:
-//!
-//! | Fabro                         | Petri                                            |
-//! |-------------------------------|--------------------------------------------------|
-//! | `Mdiamond` start              | `noop`, the graph entry                          |
-//! | `Msquare` exit                | `noop`; `Completion::TerminalNode`               |
-//! | `diamond` conditional         | `noop`                                           |
-//! | `box` agent, `tab` prompt     | `fabro/agent`                                    |
-//! | `parallelogram` command       | `fabro/command`                                  |
-//! | `hexagon` human               | `fabro/human`                                    |
-//! | `component` parallel          | fan-out groups, or `Expansion::ForEach`          |
-//! | `tripleoctagon` fan-in        | `noop`, `join: all`, output = branch results     |
-//! | `insulator` wait              | `fabro/wait`                                     |
-//! | `house` manager loop          | `fabro/workflow`                                 |
-//! | edge selection                | one `Tiered` group per node, four tiers          |
-//! | `goal_gate`                   | a `goal_check` noop before exit with back arms   |
-//! | `max_visits`, unlimited       | `Budget.max_firings`, capped at 500              |
-//! | `loop_restart`                | `EdgeTransition::Restart`                        |
-//!
-//! Everything else is refused with a specific `unsupported.*` code. See
-//! `FORMAT.md` for the dialect as lowered.
+//! What is Fabro's here: the files and their layering, `[run.inputs]`
+//! defaults under the host's `--input`, `[run] goal`, `[run.model]` with its
+//! fallback chains, `[run.execution]`, `[run.environment]`, `[run.prepare]`,
+//! `[run.clone]`, `[[run.hooks]]`, `[run.agent.mcps]`, the launch precedence
+//! (`petri run --model`, `--provider`, `--dry-run`, `--auto-approve`,
+//! `--backend`), and the `.fabro` bundle root. What the graph runs, the step
+//! kinds, and every construct in the DOT file are the language's
+//! (`crates/attractor/FORMAT.md`). `crates/fabro/FORMAT.md` says how each
+//! file section lowers.
 
-pub mod condition;
-pub mod dot;
-pub mod fidelity;
+pub mod fallbacks;
 pub mod hooks;
-pub mod kinds;
-pub mod labels;
-mod lower;
-pub use lower::fallbacks;
 pub mod mcps;
-pub mod model;
-pub mod stylesheet;
-pub mod template;
+mod model_layers;
+mod secrets;
+mod skills;
+pub mod workflow_toml;
 
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use frontend::{
     CompileInputs, Diagnostics, FileSource, Frontend, LaunchSettings, Lowered, NoFiles,
     WorkspaceRetention,
 };
-pub use lower::policy::{DEFAULT_SIGNATURE_LIMIT, DEFAULT_STALL_TIMEOUT};
-pub use lower::{
-    BRANCH_META_KIND, CompactionSettings, DEFAULT_MAX_PARALLEL, DEFAULT_PRESERVE_TURNS,
-    DEFAULT_THRESHOLD_PERCENT, ENVIRONMENT_PARAM, EnvValue, Environment, FailurePolicy,
-    IMPORT_ERROR, Kind, LAUNCH_PARAM, MAX_CALL_DEPTH, MAX_FIRINGS, MAX_FOR_EACH_ITEMS,
-    MAX_INVOCATIONS, ModelDefaults, PREPARE_NODE_PREFIX, Policy, PrepareStep, ROUTES_KEY,
-    RunSettings, shape_of, subagents,
-};
+pub use frontend_attractor::RunSettings;
+use frontend_attractor::template::Context;
+pub use hooks::{PROJECT_FILE, SETTINGS_HOOKS_VAR};
+pub use model_layers::LaunchModel;
 use serde_json::Value;
 use smol_str::SmolStr;
+pub use workflow_toml::{ENVIRONMENT_PARAM, LAUNCH_PARAM, Settings};
 
-/// Parse and lower one workflow. `file` is the repository-relative path the
-/// spans carry and `@file` references resolve beside; `files` reads them.
+/// Read the settings layers beside `file` and lower the workflow under them.
+/// `file` is the repository-relative path the spans carry and `@file`
+/// references resolve beside; `files` reads them and the settings files;
+/// `inputs` is what the host supplied, which `[run.inputs]` defaults fill in
+/// under.
 pub fn load(file: &str, text: &str, files: &dyn FileSource, inputs: &CompileInputs) -> Lowered {
     let mut diags = Diagnostics::new();
-    let dot = match dot::parse(file, text) {
-        Ok(dot) => dot,
-        Err(diagnostic) => {
-            diags.push(diagnostic);
-            return Lowered::rejected(diags);
-        }
+    let mut template = Context::new(inputs);
+    let mut settings = workflow_toml::read(file, files, &mut template, &mut diags);
+    model_layers::apply(files, inputs, &mut settings.run.model, &mut diags);
+    // The launch itself, below every file layer: a node that names no model,
+    // in a graph with no default, in a run whose configuration names none,
+    // runs on what `petri run --model`/`--provider` gave.
+    settings.launch = LaunchModel::from_inputs(inputs);
+    settings.launch.fill(&mut settings.run.model);
+    settings.run.hooks = hooks::load(files, inputs, settings.hooks_text.as_ref(), &mut diags);
+    settings.run.mcps = mcps::load(
+        files,
+        inputs,
+        settings.hooks_text.as_ref(),
+        &template,
+        &mut diags,
+    );
+    // The resolved inputs: the host's over the file defaults, as the template
+    // context now holds them.
+    let to_map = |map: &BTreeMap<String, Value>| {
+        map.iter()
+            .map(|(k, v)| (SmolStr::new(k), v.clone()))
+            .collect()
     };
-    let workflow = model::build(&dot);
-    lower::lower(workflow, file, files, inputs, diags)
+    let resolved = CompileInputs {
+        inputs:             to_map(template.inputs()),
+        vars:               to_map(template.vars()),
+        unbound_is_warning: inputs.unbound_is_warning,
+    };
+    let repository = inputs
+        .vars
+        .get(frontend::REPOSITORY_VAR)
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let launch = settings.launch_param(repository.as_deref());
+    let environment = settings.environment_param();
+    let mut lowered = frontend_attractor::lower(file, text, files, &resolved, settings.run, diags);
+    if let Some(graph) = lowered.graph.as_mut() {
+        graph.params.insert(SmolStr::new(LAUNCH_PARAM), launch);
+        if let Some(environment) = environment {
+            graph
+                .params
+                .insert(SmolStr::new(ENVIRONMENT_PARAM), environment);
+        }
+    }
+    lowered
 }
 
-/// [`load`] with no repository: every `@file` reference is missing.
+/// [`load`] with no repository: no settings files, and every `@file`
+/// reference is missing.
 pub fn load_text(file: &str, text: &str) -> Lowered {
     load(file, text, &NoFiles, &CompileInputs::new())
 }
@@ -126,10 +152,10 @@ impl Frontend for Fabro {
         inputs: &CompileInputs,
     ) -> Lowered {
         match &self.settings_toml {
-            Some(settings) if !inputs.vars.contains_key(hooks::SETTINGS_HOOKS_VAR) => {
+            Some(settings) if !inputs.vars.contains_key(SETTINGS_HOOKS_VAR) => {
                 let mut inputs = inputs.clone();
                 inputs.vars.insert(
-                    SmolStr::new(hooks::SETTINGS_HOOKS_VAR),
+                    SmolStr::new(SETTINGS_HOOKS_VAR),
                     Value::String(settings.clone()),
                 );
                 load(file, text, files, &inputs)
