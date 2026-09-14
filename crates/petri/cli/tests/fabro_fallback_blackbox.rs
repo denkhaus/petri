@@ -280,7 +280,7 @@ async fn a_qualifying_failure_moves_the_prompt_to_the_next_provider() {
     assert_eq!(failover["error"]["status"], json!(500));
     assert_eq!(failover["continuation"], json!("replay_prompt"));
     assert_eq!(
-        failover["usage"]["input"],
+        failover["usage"]["tokens"]["input"],
         json!(0),
         "the failed route accepted nothing: {failover}"
     );
@@ -293,7 +293,9 @@ async fn a_qualifying_failure_moves_the_prompt_to_the_next_provider() {
     assert_eq!(answers.len(), 1, "{answers:?}");
     assert_eq!(answers[0]["model"], json!("claude-sonnet-5"));
     assert!(
-        answers[0]["usage"]["input"].as_u64().is_some_and(|n| n > 0),
+        answers[0]["usage"]["tokens"]["input"]
+            .as_u64()
+            .is_some_and(|n| n > 0),
         "{}",
         answers[0]
     );
@@ -584,7 +586,9 @@ async fn a_tool_effect_is_not_repeated_across_a_failover() {
     assert_eq!(moved[0]["continuation"], json!("continue_turn"));
     assert_eq!(moved[0]["error"]["llm_kind"], json!("server"));
     assert!(
-        moved[0]["usage"]["input"].as_u64().is_some_and(|n| n > 0),
+        moved[0]["usage"]["tokens"]["input"]
+            .as_u64()
+            .is_some_and(|n| n > 0),
         "the tool-call answer the primary gave before it failed is the failed route's spend: {}",
         moved[0]
     );
@@ -658,7 +662,12 @@ async fn cancellation_during_fallback_cancels_the_run() {
     let answers = failures::pebble_events(&finished.run_dir, "agent", "AssistantMessage");
     assert_eq!(answers.len(), 1, "{answers:?}");
     assert_eq!(answers[0]["model"], json!("claude-sonnet-5"));
-    assert_eq!(answers[0]["usage"]["input"], json!(10), "{}", answers[0]);
+    assert_eq!(
+        answers[0]["usage"]["tokens"]["input"],
+        json!(10),
+        "{}",
+        answers[0]
+    );
     finished.assert_no_leaked_processes().await;
     openai.stop();
     anthropic.stop();

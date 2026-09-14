@@ -1025,8 +1025,8 @@ model = "test/model"
     for (node, report) in [("a", &a), ("b", &b), ("c", &c)] {
         let usage = &report["hooks"][0]["usage"];
         assert_eq!(usage["requests"], 1, "{node}: {report}");
-        assert_eq!(usage["tokens"]["input"], 10, "{node}: {report}");
-        assert_eq!(usage["tokens"]["output"], 5, "{node}: {report}");
+        assert_eq!(usage["usage"]["tokens"]["input"], 10, "{node}: {report}");
+        assert_eq!(usage["usage"]["tokens"]["output"], 5, "{node}: {report}");
         assert_eq!(
             usage["tool_calls"], 0,
             "a prompt hook runs no tool: {report}"
@@ -1095,8 +1095,8 @@ timeout = "300ms"
     );
     assert_eq!(a["hooks"][0]["usage"]["requests"], 1, "{a}");
     assert!(
-        a["hooks"][0]["usage"].get("tokens").is_none(),
-        "no answer, no tokens: {a}"
+        a["hooks"][0]["usage"].get("usage").is_none(),
+        "no answer, no usage: {a}"
     );
     let b = of("b");
     assert_eq!(b["hooks"][0]["state"], "failed_open", "{b}");
@@ -1109,7 +1109,7 @@ timeout = "300ms"
         "{b}"
     );
     assert_eq!(b["hooks"][0]["usage"]["requests"], 1, "{b}");
-    assert!(b["hooks"][0]["usage"].get("tokens").is_none(), "{b}");
+    assert!(b["hooks"][0]["usage"].get("usage").is_none(), "{b}");
 }
 
 /// An agent hook runs a Pebble agent with the coding tools in the sandbox:
@@ -1187,8 +1187,8 @@ script = "echo tool-guard-ran >> tool-hooks.log"
     let usage = &b["hooks"][0]["usage"];
     assert_eq!(usage["requests"], 2, "{b}");
     assert_eq!(usage["tool_calls"], 1, "{b}");
-    assert_eq!(usage["tokens"]["input"], 20, "{b}");
-    assert_eq!(usage["tokens"]["output"], 10, "{b}");
+    assert_eq!(usage["usage"]["tokens"]["input"], 20, "{b}");
+    assert_eq!(usage["usage"]["tokens"]["output"], 10, "{b}");
     assert!(
         usage["inference_ms"].is_u64() && usage["tool_ms"].is_u64(),
         "{b}"
@@ -1321,8 +1321,14 @@ model = "test/model"
         })
         .expect("b's attempt");
     assert_eq!(finished.metrics.custom["pebble.prompts"], 1);
-    assert_eq!(finished.metrics.custom["pebble.usage"]["input"], 10);
-    assert_eq!(finished.metrics.custom["pebble.usage"]["output"], 5);
+    assert_eq!(
+        finished.metrics.custom["pebble.usage"]["tokens"]["input"],
+        10
+    );
+    assert_eq!(
+        finished.metrics.custom["pebble.usage"]["tokens"]["output"],
+        5
+    );
     // The hook's accounting, on the hook's record.
     let hook_note = events
         .iter()
@@ -1337,7 +1343,10 @@ model = "test/model"
     assert_eq!(hook_note["hooks"][0]["name"], "verify");
     assert_eq!(hook_note["hooks"][0]["usage"]["requests"], 2);
     assert_eq!(hook_note["hooks"][0]["usage"]["tool_calls"], 1);
-    assert_eq!(hook_note["hooks"][0]["usage"]["tokens"]["input"], 20);
+    assert_eq!(
+        hook_note["hooks"][0]["usage"]["usage"]["tokens"]["input"],
+        20
+    );
     // Two agents, two sessions, two event families: the stage's under
     // `agent_activity`, the hook's under `hook_activity`, never mixed.
     let stage_sessions: BTreeSet<String> = events

@@ -25,9 +25,8 @@ use fabro_steps::pebble::PebbleClient;
 use fabro_steps::register;
 use frontend::{CompileInputs, NoFiles};
 use ir::{CancelScopeId, Graph, RunStatus, StepEvent, Value};
-use lithos_llm::types::{ErrorKind, Role, TokenCounts};
+use lithos_llm::types::{Cost, CostSource, ErrorKind, Role, TokenCounts, Usage};
 use pebble_agent::LifecycleError;
-use pebble_coding_agent::events::TokenUsage;
 use pebble_coding_agent::extensions::{CompactionPolicy, CompactionPreparation, CompactionSummary};
 use pebble_coding_agent::test_support::{
     ScriptedCall, ScriptedCompletion, ScriptedFailure, ScriptedProvider, client_from, message_text,
@@ -342,27 +341,27 @@ async fn the_trigger_is_strictly_above_eighty_percent_of_the_window() {
             assert_eq!(payload["estimated_tokens_before"], json!(total));
             assert_eq!(payload["original_turn_count"], 10);
             assert_eq!(payload["preserved_turn_count"], 7);
-            assert_eq!(payload["usage"]["input"], 70);
-            assert_eq!(payload["usage"]["output"], 7);
+            assert_eq!(payload["usage"]["tokens"]["input"], 70);
+            assert_eq!(payload["usage"]["tokens"]["output"], 7);
             assert_eq!(metrics["pebble.compactions"], 1);
-            assert_eq!(metrics["pebble.compaction_usage"]["input"], 70);
+            assert_eq!(metrics["pebble.compaction_usage"]["tokens"]["input"], 70);
         } else {
             assert!(events.is_empty(), "{label}: {events:?}");
             assert!(warnings.is_empty(), "{label}: {warnings:?}");
             assert!(customs.compactions().is_empty());
             assert_eq!(metrics["pebble.compactions"], 0);
-            assert_eq!(metrics["pebble.compaction_usage"]["input"], 0);
+            assert_eq!(metrics["pebble.compaction_usage"]["tokens"]["input"], 0);
         }
         // The prompt's own usage: five responses, the last one large, plus
         // the summary call, which Pebble bills to the prompt that compacted.
         let summary_input = if compacted { 70 } else { 0 };
         let summary_output = if compacted { 7 } else { 0 };
         assert_eq!(
-            metrics["pebble.usage"]["input"],
+            metrics["pebble.usage"]["tokens"]["input"],
             json!(4 * 10 + total - 5 + summary_input)
         );
         assert_eq!(
-            metrics["pebble.usage"]["output"],
+            metrics["pebble.usage"]["tokens"]["output"],
             json!(25 + summary_output)
         );
     }
@@ -468,8 +467,11 @@ async fn work_continues_after_compaction_and_a_later_node_reuses_the_thread() {
     assert_eq!(compactions[0].1["preserved_turn_count"], 7);
     assert_eq!(metrics(&report, "a")["pebble.compactions"], 1);
     assert_eq!(metrics(&report, "b")["pebble.compactions"], 0);
-    assert_eq!(metrics(&report, "b")["pebble.compaction_usage"]["input"], 0);
-    assert_eq!(metrics(&report, "b")["pebble.usage"]["input"], 10);
+    assert_eq!(
+        metrics(&report, "b")["pebble.compaction_usage"]["tokens"]["input"],
+        0
+    );
+    assert_eq!(metrics(&report, "b")["pebble.usage"]["tokens"]["input"], 10);
 }
 
 /// A host's summary policy, recorded as a capability.
@@ -490,13 +492,18 @@ impl CompactionPolicy for HostSummary {
             context.default_request.messages().len(),
         ));
         Ok(CompactionSummary {
-            text:            "HOST SUMMARY".to_owned(),
-            usage:           TokenUsage {
-                input: 3,
-                output: 1,
-                ..TokenUsage::default()
+            text:  "HOST SUMMARY".to_owned(),
+            usage: Usage {
+                tokens: TokenCounts {
+                    input: 3,
+                    output: 1,
+                    ..TokenCounts::default()
+                },
+                cost:   Some(Cost {
+                    usd_micros: 7,
+                    source:     CostSource::Application,
+                }),
             },
-            cost_usd_micros: Some(7),
         })
     }
 }
@@ -564,15 +571,24 @@ async fn a_host_summary_policy_replaces_the_summary_call() {
     assert!(!after.contains("FIRST_OUTPUT_MARKER"));
     let compactions = customs.compactions();
     assert_eq!(compactions.len(), 1);
-    assert_eq!(compactions[0].1["usage"]["input"], 3);
-    assert_eq!(compactions[0].1["cost_usd_micros"], 7);
+    assert_eq!(compactions[0].1["usage"]["tokens"]["input"], 3);
+    assert_eq!(compactions[0].1["usage"]["cost"]["usd_micros"], 7);
+    assert_eq!(compactions[0].1["usage"]["cost"]["source"], "application");
+    let metrics = metrics(&report, "a");
+    assert_eq!(metrics["pebble.compaction_usage"]["cost"]["usd_micros"], 7);
+    // Pebble bills the host's summary to the prompt as well: its three
+    // input tokens are in the prompt's total beside the six answers'. Its
+    // cost is not: the scripted answers used tokens without a price, so the
+    // total's cost is unknown, not the summary's 7 micros alone.
     assert_eq!(
-        metrics(&report, "a")["pebble.compaction_cost_usd_micros"],
-        7
+        metrics["pebble.usage"]["tokens"]["input"],
+        json!(4 * 10 + THRESHOLD + 10 + 3)
     );
-    // Pebble bills the host's summary to the prompt as well, so the same 7
-    // micros are the prompt's only cost: the scripted responses report none.
-    assert_eq!(metrics(&report, "a")["pebble.cost_usd_micros"], 7);
+    assert!(
+        metrics["pebble.usage"].get("cost").is_none(),
+        "{}",
+        metrics["pebble.usage"]
+    );
 }
 
 /// A summary call that fails leaves the history as it was: the node finishes
@@ -621,7 +637,7 @@ async fn a_failed_summary_leaves_the_agent_working_on_its_full_history() {
     let metrics = metrics(&report, "a");
     assert_eq!(metrics["pebble.compactions"], 0);
     assert_eq!(
-        metrics["pebble.usage"]["input"],
+        metrics["pebble.usage"]["tokens"]["input"],
         json!(4 * 10 + THRESHOLD + 10)
     );
 }
@@ -659,7 +675,7 @@ async fn cancellation_during_the_summary_call_settles_the_session() {
     let metrics = metrics(&report, "a");
     assert_eq!(metrics["pebble.compactions"], 0);
     assert_eq!(
-        metrics["pebble.usage"]["input"],
+        metrics["pebble.usage"]["tokens"]["input"],
         json!(4 * 10 + THRESHOLD - 4)
     );
 }
@@ -818,7 +834,7 @@ async fn public_events_account_for_the_compaction_and_later_activity() {
     );
     assert_eq!(usage_event.1["node"], "a");
     assert_eq!(usage_event.1["session"], json!(session));
-    assert_eq!(usage_event.1["usage"]["input"], 70);
+    assert_eq!(usage_event.1["usage"]["tokens"]["input"], 70);
     assert_eq!(usage_event.1["reason"], "threshold");
     assert_eq!(
         usage_event.1["estimated_tokens_before"],
@@ -836,10 +852,10 @@ async fn public_events_account_for_the_compaction_and_later_activity() {
         })
         .expect("a finished");
     assert_eq!(finished_a["pebble.compactions"], 1);
-    assert_eq!(finished_a["pebble.compaction_usage"]["input"], 70);
+    assert_eq!(finished_a["pebble.compaction_usage"]["tokens"]["input"], 70);
     // The prompt's input includes the summary call's 70 tokens.
     assert_eq!(
-        finished_a["pebble.usage"]["input"],
+        finished_a["pebble.usage"]["tokens"]["input"],
         json!(4 * 10 + THRESHOLD + 10 + 70)
     );
     // The later node reused the thread and reported its own activity.
