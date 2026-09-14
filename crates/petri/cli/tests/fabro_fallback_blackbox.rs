@@ -505,9 +505,9 @@ async fn chain_exhaustion_fails_the_stage_with_the_last_error() {
 /// A provider interruption after a non-idempotent tool effect: the primary
 /// asks for an append, the append runs, the primary's next request fails,
 /// and the fallback continues from the tool result. The append happens once
-/// and the next model sees its output. Fabro rebuilds the session from the
-/// original prompt here, which would run the tool again; Petri keeps the
-/// conversation.
+/// and the next model sees its output. Petri keeps the conversation, as the
+/// reference Fabro does since `05ebd0f` (before that it rebuilt the session
+/// from the original prompt, which ran the tool again).
 #[tokio::test]
 async fn a_tool_effect_is_not_repeated_across_a_failover() {
     let mut case = Case::new("fallback-tool-effect");
