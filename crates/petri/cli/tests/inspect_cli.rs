@@ -136,6 +136,14 @@ fn inspect_reconstructs_a_restarted_run_with_children_after_the_process_exits() 
     assert_eq!(document["inspect_format_version"], Value::from(3));
     assert_eq!(document["complete"], Value::Bool(true));
     assert_eq!(document["status"], Value::from("success"));
+    // The run's key names it in its store and on its sandbox providers.
+    let run_key = document["run_key"].as_str().expect("the run key");
+    assert!(!run_key.is_empty());
+    assert_eq!(
+        document["locator"].as_str().map(Path::new),
+        Some(run_dir.as_path()),
+        "the run directory is the locator"
+    );
 
     // The root restarted once: two executions, the second is final.
     let root_executions = executions_of(&document, 0);
