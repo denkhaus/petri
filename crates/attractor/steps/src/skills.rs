@@ -43,12 +43,12 @@ use crate::agent::AgentConfig;
 /// The `kind` of the `StepEvent::Custom` payload that records the resolved
 /// directories: `{ kind, node, firing, attempt, scope, dirs: [{ path,
 /// source }] }`.
-pub const RESOLVED_EVENT: &str = "fabro.skills";
+pub const RESOLVED_EVENT: &str = "attractor.skills";
 
 /// The `kind` of the `StepEvent::Custom` payload that records a skill file
 /// or directory Pebble will skip: `{ kind, node, firing, attempt, reason,
 /// path, message }`.
-pub const WARNING_EVENT: &str = "fabro.skills.warning";
+pub const WARNING_EVENT: &str = "attractor.skills.warning";
 
 /// The failure class of a prompt that names a skill the session did not
 /// discover (`/name` with no such skill).

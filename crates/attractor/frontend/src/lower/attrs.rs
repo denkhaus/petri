@@ -175,8 +175,10 @@ pub(super) const EDGE: &[&str] = &[
     "freeform",
 ];
 
-/// The older Attractor dialect, refused as `unsupported.attractor`.
-pub(super) const ATTRACTOR: &[&str] = &["llm_prompt", "is_codergen", "node_type"];
+/// The legacy dialect's attributes, refused as `unsupported.legacy_dialect`.
+/// The draft specification follows the reference implementation, which no
+/// longer reads them.
+pub(super) const LEGACY_DIALECT: &[&str] = &["llm_prompt", "is_codergen", "node_type"];
 
 /// The extension namespace. An attribute under it belongs to tooling or a
 /// host, carries no workflow meaning to Petri, and is dropped without a

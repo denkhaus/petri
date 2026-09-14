@@ -40,7 +40,7 @@ pub(super) fn run_policy(workflow: &Workflow, diags: &mut Diagnostics) -> RunPol
             let parsed = u32::try_from(limit).ok().and_then(NonZeroU32::new);
             if parsed.is_none() {
                 diags.error(
-                    "fabro.bad_signature_limit",
+                    "attractor.bad_signature_limit",
                     workflow
                         .attrs
                         .span_of("loop_restart_signature_limit", &workflow.span),

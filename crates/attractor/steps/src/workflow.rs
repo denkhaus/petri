@@ -1,4 +1,4 @@
-//! `fabro/workflow`: Fabro's manager loop as a nested invocation.
+//! `attractor/workflow`: Fabro's manager loop as a nested invocation.
 //!
 //! The child graph was lowered with the parent and registered before the run
 //! started. The step starts the child once per manager attempt through the
@@ -191,7 +191,7 @@ async fn poll(
 
 #[async_trait::async_trait]
 impl Step for WorkflowStep {
-    const NAME: &'static str = "fabro/workflow";
+    const NAME: &'static str = "attractor/workflow";
     type Config = WorkflowConfig;
 
     async fn run(&self, config: WorkflowConfig, mut ctx: StepCtx) -> Outcome {

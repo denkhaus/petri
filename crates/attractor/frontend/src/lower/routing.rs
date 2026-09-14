@@ -110,7 +110,7 @@ impl FailurePolicy {
         let on_retries_exhausted = match (exhausted, allow_partial) {
             (Some(policy), true) if policy != Policy::PartiallySucceed => {
                 diags.error(
-                    "fabro.allow_partial_conflict",
+                    "attractor.allow_partial_conflict",
                     node.attrs.span_of("allow_partial", &node.span),
                     format!(
                         "`allow_partial=true` means `on_retries_exhausted=\"partially_succeed\"`, \
@@ -369,7 +369,7 @@ pub(super) fn retry_policy(
         }),
         Some(other) => {
             diags.error(
-                "fabro.bad_retry_policy",
+                "attractor.bad_retry_policy",
                 node.attrs.span_of("retry_policy", &node.span),
                 format!(
                     "`retry_policy` must be `none`, `standard`, `aggressive`, `linear` or \

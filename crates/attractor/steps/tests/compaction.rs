@@ -101,7 +101,7 @@ impl Customs {
             .collect()
     }
 
-    /// Petri's `fabro.compaction` events, `(node, payload)`.
+    /// Petri's `attractor.compaction` events, `(node, payload)`.
     fn compactions(&self) -> Vec<(String, Value)> {
         self.all()
             .into_iter()
@@ -824,7 +824,7 @@ async fn public_events_account_for_the_compaction_and_later_activity() {
             }) if value["kind"] == EVENT => Some((index, value.clone())),
             _ => None,
         })
-        .expect("fabro.compaction");
+        .expect("attractor.compaction");
     // Emitted as the compaction completed: after Pebble's record of it and
     // before the session's later activity.
     assert!(usage_event.0 > completed.0);

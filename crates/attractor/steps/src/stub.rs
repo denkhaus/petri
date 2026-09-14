@@ -244,7 +244,7 @@ impl StubStep {
 /// config path too.
 #[async_trait::async_trait]
 impl Step for Simulate {
-    const NAME: &'static str = "fabro/simulate";
+    const NAME: &'static str = "attractor/simulate";
     type Config = Value;
 
     async fn run(&self, _config: Value, _ctx: StepCtx) -> Outcome {

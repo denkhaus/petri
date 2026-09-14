@@ -19,9 +19,9 @@ use crate::fidelity::Fidelity;
 use crate::model::{Attrs, EdgeDecl, NodeDecl, Workflow};
 
 /// The validation rule Fabro names, as a warning code.
-const THREAD_RULE: &str = "fabro.thread_id_requires_fidelity_full";
+const THREAD_RULE: &str = "attractor.thread_id_requires_fidelity_full";
 /// Fabro's lint for a `thread_id` on a parallel branch, where it is inert.
-const BRANCH_INERT: &str = "fabro.parallel_branch_inert_attribute";
+const BRANCH_INERT: &str = "attractor.parallel_branch_inert_attribute";
 
 /// Parse a `fidelity` attribute on `attrs`, diagnosing a bad mode as an
 /// error. `None` when absent or bad.
@@ -36,7 +36,7 @@ pub(super) fn fidelity_attr(
     let parsed = value.parse::<Fidelity>().ok();
     if parsed.is_none() {
         diags.error(
-            "fabro.bad_fidelity",
+            "attractor.bad_fidelity",
             attrs.span_of(key, span),
             format!(
                 "`{value}` on {what} is not a fidelity mode ({})",
@@ -123,7 +123,7 @@ impl ThreadAttrs {
             && !matches!(speed.as_str(), "standard" | "fast")
         {
             diags.error(
-                "fabro.bad_speed",
+                "attractor.bad_speed",
                 node.attrs.span_of("speed", &node.span),
                 format!(
                     "Invalid speed \"{speed}\" for node \"{}\"; expected one of: standard, fast",

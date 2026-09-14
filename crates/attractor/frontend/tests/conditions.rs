@@ -59,7 +59,7 @@ fn outcome_comparisons_cover_the_four_values_and_fold_engine_statuses() {
 #[test]
 fn unknown_outcome_values_are_rejected_and_custom_signals_ride_context() {
     assert!(rejected("outcome=error").contains(&"unsupported.outcome_value".to_string()));
-    assert!(rejected("outcome > 1").contains(&"fabro.condition.outcome_op".to_string()));
+    assert!(rejected("outcome > 1").contains(&"attractor.condition.outcome_op".to_string()));
     assert!(holds("context.verdict=error", "success", json!({}), &[(
         "verdict",
         json!("error")
@@ -202,7 +202,7 @@ fn contains_and_matches() {
         json!({}),
         &[("version", json!("beta"))]
     ));
-    assert!(rejected("x matches [bad").contains(&"fabro.condition.regex".to_string()));
+    assert!(rejected("x matches [bad").contains(&"attractor.condition.regex".to_string()));
 }
 
 #[test]
@@ -212,7 +212,7 @@ fn boolean_operators_and_precedence() {
     assert!(!holds("a=1 || b=2 && c=0", "success", json!({}), &kv));
     assert!(holds("outcome=succeeded && b=2", "success", json!({}), &kv));
     assert!(holds("!outcome=failed && c=3", "success", json!({}), &kv));
-    assert!(rejected("a=1 b=2").contains(&"fabro.condition.syntax".to_string()));
+    assert!(rejected("a=1 b=2").contains(&"attractor.condition.syntax".to_string()));
 }
 
 /// REMOVE AFTER 2026-10-04 with the alias itself.

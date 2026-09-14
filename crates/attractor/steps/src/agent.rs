@@ -1,4 +1,4 @@
-//! `fabro/agent`: ACP or native Pebble, with shared prompt assembly,
+//! `attractor/agent`: ACP or native Pebble, with shared prompt assembly,
 //! output validation, repair turns, and routing.
 //!
 //! The prompt is Fabro's: the fidelity preamble for the mode the incoming
@@ -155,7 +155,7 @@ fn default_true() -> bool {
 /// The `kind` of the `StepEvent::Custom` payload an agent node emits when
 /// its fidelity and thread resolve: `{ kind, node, firing, attempt, fidelity,
 /// fidelity_source, thread, thread_source, reused, backend }`.
-pub const THREAD_EVENT: &str = "fabro.thread";
+pub const THREAD_EVENT: &str = "attractor.thread";
 
 pub struct AgentStep;
 
@@ -242,7 +242,7 @@ impl AgentConfig {
 
 #[async_trait::async_trait]
 impl Step for AgentStep {
-    const NAME: &'static str = "fabro/agent";
+    const NAME: &'static str = "attractor/agent";
     type Config = AgentConfig;
 
     async fn run(&self, mut config: AgentConfig, mut ctx: StepCtx) -> Outcome {

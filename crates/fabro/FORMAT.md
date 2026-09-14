@@ -27,18 +27,18 @@ a run will execute.
 
 | Fabro | At load |
 |---|---|
-| `{{ inputs.* }}`, `{{ vars.* }}`, `{{ goal }}` in the goal and prompts | rendered with MiniJinja, strict: an unbound name is `unsupported.template.unbound_input` with the `--input KEY=VALUE` hint. `petri check` given no inputs at all downgrades it to the warning `fabro.unbound_input` and leaves the text unrendered, so a file validates before its inputs exist; a run is always strict |
+| `{{ inputs.* }}`, `{{ vars.* }}`, `{{ goal }}` in the goal and prompts | rendered with MiniJinja, strict: an unbound name is `unsupported.template.unbound_input` with the `--input KEY=VALUE` hint. `petri check` given no inputs at all downgrades it to the warning `attractor.unbound_input` and leaves the text unrendered, so a file validates before its inputs exist; a run is always strict |
 | the same tokens in a `script` | Fabro's token interpolation: each token is one shell-quoted word |
 | `[run.inputs]` in `workflow.toml` beside the file | input defaults, under the host's `--input` / `--inputs-file` |
 | `[run] goal` (text or `{ file }`) | the run goal when the graph sets no `goal` (the graph attribute wins, as in Fabro) |
 | `[run.model]` `provider`, `name`, `controls.reasoning_effort`, `controls.speed` | the model, provider, reasoning effort and speed an agent or prompt node gets when neither it nor the graph (`default_model`, `default_provider`) names one. Below every file layer sits the launch: `petri run --model`, `--provider` (bound as the `petri.launch_model` and `petri.launch_provider` compile variables) fill the name and provider nothing else set, and a provider alone runs its default model from the runner's catalog, as `fabro run --provider` does. The pinned Fabro puts its launch layer above `workflow.toml`; Petri keeps the file layers in charge and uses the launch only as the last default |
 | `[run.model.fallbacks]` `"<model>" = ["provider:model", ...]` | Fabro's model-keyed fallback chains ("Model fallback" under "Native Pebble" below). The frontend checks the shape (a table keyed by a requested model; each entry a bare token, `provider:selector`, or the legacy `provider/selector`; a provider-qualified key is refused as Fabro refuses it, `fabro.model_fallbacks`) and puts the chains on every agent and prompt node config under `fallbacks`; the runner resolves them against its catalog at the first LLM stage |
 | `[run.execution]` `mode`, `approval` | launch defaults in `Graph.params["fabro.launch"]`: `mode = "dry_run"` runs the stub registry, `approval = "auto"` answers every question with its first choice. `--dry-run`, `--auto-approve`, `--interactive` and `--interview-script` win |
-| `[run.clone]` `enabled`, `depth` | the server clones the repository into the sandbox before the first stage | the root `start` stage checks the repository out into its workspace before anything runs there: a clone of the repository the run was loaded from (`--repo`, else the bundle root above the workflow file; the runtime binds it as the `petri.repository` compile variable, absolute) at `depth` commits (Fabro's default 100; `0` is the full history), packed on the host and delivered through the scope's executor to the environment's own `tar`, so a Docker workspace receives the same files as a host one. The clone's `origin` is the repository's own `origin` when it has one; nothing is fetched. `enabled = false` starts from an empty workspace. A file outside a Git work tree, or a host that lowers in memory without binding the variable, also starts empty, with a `checkout:` log line saying so. The launch parameter carries `clone` (`enabled`, `depth`, `repository`); a delivered checkout logs `checkout: <root> at <commit> (depth N)` and emits a `fabro.checkout` `StepEvent::Custom` (`repository`, `commit`, `depth`, `files`) |
+| `[run.clone]` `enabled`, `depth` | the server clones the repository into the sandbox before the first stage | the root `start` stage checks the repository out into its workspace before anything runs there: a clone of the repository the run was loaded from (`--repo`, else the bundle root above the workflow file; the runtime binds it as the `petri.repository` compile variable, absolute) at `depth` commits (Fabro's default 100; `0` is the full history), packed on the host and delivered through the scope's executor to the environment's own `tar`, so a Docker workspace receives the same files as a host one. The clone's `origin` is the repository's own `origin` when it has one; nothing is fetched. `enabled = false` starts from an empty workspace. A file outside a Git work tree, or a host that lowers in memory without binding the variable, also starts empty, with a `checkout:` log line saying so. The launch parameter carries `clone` (`enabled`, `depth`, `repository`); a delivered checkout logs `checkout: <root> at <commit> (depth N)` and emits an `attractor.checkout` `StepEvent::Custom` (`repository`, `commit`, `depth`, `files`) |
 | `[run.model]` in `.fabro/project.toml` and the host's user settings layer | the three layers combine, settings under project under workflow | the same order: a `[run.model]` key `workflow.toml` leaves unset is filled from `.fabro/project.toml`, then from the settings layer (`fabro.settings_toml`, which `petri` binds from `$FABRO_HOME/settings.toml`, else `~/.fabro/settings.toml`). This is how a workflow that names no model, such as the pinned interview workflow, gets the operator's default |
 | `[run.environment]` `id` over `[environments.<id>]` | `provider` selects the sandbox backend when `--backend` is not given: `local` is the host, `docker` the Docker plugin, `daytona` the Daytona plugin. `image.docker` becomes the scope's container image under `docker` and `daytona`. `env` is the scope environment; a value that is exactly `{{ secrets.NAME }}` is a `$secret` reference every command resolves at spawn (the standalone runner reads `PETRI_SECRET_NAME`; a missing secret fails the command with `secret_unavailable`) and masks in every log. `resources` size a Daytona runner. `cwd`, `network`, `lifecycle`, `labels` and `image.dockerfile` are platform-only and warn `ignored.workflow_toml.environments.<id>.<key>`; an `id` with no table, or a provider outside the three, is an error |
 | `[run.prepare]` `steps`, `timeout` | setup steps lowered as command nodes `run_prepare_1`, `run_prepare_2`, ... between `start` and its successors, so they run in the selected environment before any node, in order, each with the section's `timeout` (default `5m`), its `env`, and `on_failure="exit"`: a failed step ends the run before the first node. `command` argv is joined with shell quoting; `script` runs as written; `{{ inputs.* }}`, `{{ vars.* }}` and `{{ goal }}` render at load. The whole file is validated before any step runs |
-| `[[run.hooks]]` in `workflow.toml`, `.fabro/project.toml` at the repository root, and the host's user settings layer | local hooks ("Hooks" below). Each layer is read on its own and the three merge as Fabro's `combine_hooks` does: settings, then project, then workflow, a higher layer's entry replacing a lower one with the same `id` in place and the rest appending. Every field is validated at load (`fabro.hooks.toml`, `.entry`, `.event`, `.transport`, `.timeout`, `.matcher`); a hooks layer that cannot be read is an error, so a configured hook is never skipped silently. A `checkpoint_saved` hook warns `fabro.hooks.checkpoint_saved` and never runs. The merged list lands in `Graph.params["fabro_hooks"]` and on the `start` and `exit` stages. The user layer (`~/.fabro/settings.toml`) is outside the repository, so the host passes its text as the `fabro.settings_toml` compile variable when it wants one |
+| `[[run.hooks]]` in `workflow.toml`, `.fabro/project.toml` at the repository root, and the host's user settings layer | local hooks ("Hooks" below). Each layer is read on its own and the three merge as Fabro's `combine_hooks` does: settings, then project, then workflow, a higher layer's entry replacing a lower one with the same `id` in place and the rest appending. Every field is validated at load (`fabro.hooks.toml`, `.entry`, `.event`, `.transport`, `.timeout`, `.matcher`); a hooks layer that cannot be read is an error, so a configured hook is never skipped silently. A `checkpoint_saved` hook warns `fabro.hooks.checkpoint_saved` and never runs. The merged list lands in `Graph.params["attractor.hooks"]` and on the `start` and `exit` stages. The user layer (`~/.fabro/settings.toml`) is outside the repository, so the host passes its text as the `fabro.settings_toml` compile variable when it wants one |
 | `[run.agent.mcps.<name>]` in `workflow.toml`, `.fabro/project.toml` and the host's user settings layer | MCP servers for native agent nodes ("MCP servers" under "Native Pebble" below). Each layer is read on its own with Fabro's field rules (`type` is `stdio`, `http` or `sandbox`; exactly one of `script` and `command`; `url`; `port`; `protocol` on `http` and `sandbox`, `streamable_http` by default or `sse`; `env`, `headers`; `startup_timeout` default `10s`, `tool_timeout` default `60s`; `enabled`), the three merge by name with the higher layer replacing the lower one whole (Fabro's sticky map) and `enabled = false` removing the name, and the merged list is carried on every agent node's config (`mcps`) and into nested workflows. `{{ inputs.* }}`, `{{ vars.* }}` and `{{ goal }}` substitute at load; a value under `env` or `headers` that is exactly `{{ secrets.NAME }}` is a `$secret` reference resolved when the server launches. Errors: `fabro.mcps.entry`, `fabro.mcps.type`, `fabro.mcps.shape`, `fabro.mcps.toml` (a layer that names servers and does not parse), `fabro.mcps.unbound`, `fabro.mcps.env_token` (`{{ env.* }}`, refused as Fabro refuses it); `unsupported.workflow_toml.run.agent.mcps.reference` (`id = ...` names a server-managed catalog the standalone runner does not have), `unsupported.workflow_toml.run.agent.mcps.secret` (a secret token anywhere but a whole `env` or `headers` value) |
 | other sections in `workflow.toml` | every section is diagnosed, none is dropped silently. Platform-only sections warn `ignored.workflow_toml.<section>` with why (`[run.working_dir]`, `[run.metadata]`, `[run.run_branch]`, `[run.meta_branch]`, `[run.pull_request]`, `[run.git]`, `[run.integrations]`, `[run.checkpoint]`, `[run.artifacts]`, `[run.notifications]`, `[run.interviews]`, `[run.scm]`, `[run.agent] fabro_tools`, and the top-level `[project]`, `[cli]`, `[server]`, `[llm]`). A requirement the standalone runner cannot meet is a specific `unsupported.workflow_toml.*` error (the MCP row above lists its three). A key Fabro's parser refuses (a legacy top-level key, an unknown `[run]` key, `_version` other than 1) is `unsupported.workflow_toml.key` / `unsupported.workflow_toml.version` with Fabro's rename hint. See `crates/fabro/acceptance/CONTRACT.md` for the per-option table |
 | `prompt="@prompts/x.md"`, `output_schema="@schemas/x.json"` | read beside the workflow file; `{% include %}` resolves beside the included file |
@@ -72,7 +72,7 @@ node. `retry_target` and `fallback_retry_target` inside the import are rewritten
 to the prefixed ids; `@file` references inside it resolve beside the imported
 file. Imports nest, each relative to its own file; a cycle is refused.
 
-Fabro's boundary rules apply and every failure is `fabro.import` on the
+Fabro's boundary rules apply and every failure is `attractor.import` on the
 placeholder with Fabro's message: exactly one start and one exit; no edge into
 start or out of exit; exactly one successor of start and one predecessor of
 exit, neither edge carrying `condition`, `label`, `weight`, `fidelity`,
@@ -86,20 +86,20 @@ a warning; the importing workflow's stylesheet governs.
 
 | Shape / type | Petri node | Step config |
 |---|---|---|
-| `Mdiamond` start | `fabro/stage`, the entry | `kind = "start"`, the workflow name, the merged hooks |
-| `Msquare` exit | `fabro/stage`; `Completion::TerminalNode(exit)` | `kind = "exit"`, the workflow name, the merged hooks |
+| `Mdiamond` start | `attractor/stage`, the entry | `kind = "start"`, the workflow name, the merged hooks |
+| `Msquare` exit | `attractor/stage`; `Completion::TerminalNode(exit)` | `kind = "exit"`, the workflow name, the merged hooks |
 | `diamond` conditional | `noop` | |
-| `box` agent | `fabro/agent` | prompt, goal, `fidelity` and `default_fidelity`, `thread_id`, `default_thread` and the node's classes, `project_memory`, `backend`, model settings (`model`, `provider`, `reasoning_effort`, `speed`, `max_tokens`), `output_schema`, `output_retries`, `acp`, `mcps` (the run's MCP servers), the workflow's stage list for the preamble |
-| `tab` prompt | `fabro/prompt` | prompt, goal, `fidelity` and the thread attributes (accepted; a prompt node never continues a conversation), `project_memory`, model settings (`model`, `provider`, `reasoning_effort`, `speed`, `max_tokens`), `output_schema`, `output_retries`; API-only: `backend="acp"` on the node is `fabro.prompt_backend`, and the graph's ACP settings never reach it |
-| `parallelogram` command, or any node with `script` | `fabro/command` | script, language, `stdin` (an expression over `kv`), `output_schema`, `env` (`[run.prepare]` step env and the environment's `$secret` values) |
-| `hexagon` human | `fabro/human` | the choices (from the edges), `question_type`, `freeform_target`, `sensitive`, `review_target`, `default_choice` (from `human.default_choice`), `timeout_ms` |
-| `component` parallel | `fabro/fork`: takes the fork snapshot of `kv` (and of the stage records for agent or prompt targets) once per visit, offloads the `for_each` source list and every other value above 4 KiB to the output store, and outputs `{ snapshot, nodes }`; each branch target becomes a synthetic `fabro/branch` delegate (`kind = "parallel.branch"`) that runs a copy of the target in a child invocation from that snapshot; `for_each` marks the delegate `Expansion::ForEach` (below) | fork: `label`, `node`, `kv`, `nodes`, `source`, `inline`; branch: `label`, `node`, `fork`, `index`, `item`, `for_each`, `max_parallel`, `child_digest`, `target_kind`, `kv`, `nodes`, `generation` |
-| `tripleoctagon` fan-in | `fabro/fan_in`, `join: all`; publishes `parallel.results` and `parallel.branch_count`; its output is the ordered branch results | |
-| `tripleoctagon` fan-in with a `prompt` | `fabro/prompt`, `join: all`: the ordered barrier, the same `parallel.results` publication, then one model call over the branch results (`sources`, `branch_results`) | |
-| a `component` whose branches share a plain successor | a synthetic `<fork>.fan_in` (`fabro/fan_in`, `synthetic: true`) before that successor | |
-| `insulator` wait | `fabro/wait` | `duration_ms` |
-| `house` manager loop | `fabro/workflow` | the child graph's digest, `manager.*` |
-| `circle`, `doublecircle`, other shapes | `fabro/agent`, with a `fabro.unknown_shape` warning | |
+| `box` agent | `attractor/agent` | prompt, goal, `fidelity` and `default_fidelity`, `thread_id`, `default_thread` and the node's classes, `project_memory`, `backend`, model settings (`model`, `provider`, `reasoning_effort`, `speed`, `max_tokens`), `output_schema`, `output_retries`, `acp`, `mcps` (the run's MCP servers), the workflow's stage list for the preamble |
+| `tab` prompt | `attractor/prompt` | prompt, goal, `fidelity` and the thread attributes (accepted; a prompt node never continues a conversation), `project_memory`, model settings (`model`, `provider`, `reasoning_effort`, `speed`, `max_tokens`), `output_schema`, `output_retries`; API-only: `backend="acp"` on the node is `attractor.prompt_backend`, and the graph's ACP settings never reach it |
+| `parallelogram` command, or any node with `script` | `attractor/command` | script, language, `stdin` (an expression over `kv`), `output_schema`, `env` (`[run.prepare]` step env and the environment's `$secret` values) |
+| `hexagon` human | `attractor/human` | the choices (from the edges), `question_type`, `freeform_target`, `sensitive`, `review_target`, `default_choice` (from `human.default_choice`), `timeout_ms` |
+| `component` parallel | `attractor/fork`: takes the fork snapshot of `kv` (and of the stage records for agent or prompt targets) once per visit, offloads the `for_each` source list and every other value above 4 KiB to the output store, and outputs `{ snapshot, nodes }`; each branch target becomes a synthetic `attractor/branch` delegate (`kind = "parallel.branch"`) that runs a copy of the target in a child invocation from that snapshot; `for_each` marks the delegate `Expansion::ForEach` (below) | fork: `label`, `node`, `kv`, `nodes`, `source`, `inline`; branch: `label`, `node`, `fork`, `index`, `item`, `for_each`, `max_parallel`, `child_digest`, `target_kind`, `kv`, `nodes`, `generation` |
+| `tripleoctagon` fan-in | `attractor/fan_in`, `join: all`; publishes `parallel.results` and `parallel.branch_count`; its output is the ordered branch results | |
+| `tripleoctagon` fan-in with a `prompt` | `attractor/prompt`, `join: all`: the ordered barrier, the same `parallel.results` publication, then one model call over the branch results (`sources`, `branch_results`) | |
+| a `component` whose branches share a plain successor | a synthetic `<fork>.fan_in` (`attractor/fan_in`, `synthetic: true`) before that successor | |
+| `insulator` wait | `attractor/wait` | `duration_ms` |
+| `house` manager loop | `attractor/workflow` | the child graph's digest, `manager.*` |
+| `circle`, `doublecircle`, other shapes | `attractor/agent`, with an `attractor.unknown_shape` warning | |
 
 Every node's `meta` carries `label`, `shape`, `kind`, `classes`, `span`, and
 `model` / `provider` / `reasoning_effort` when set. Every step config carries
@@ -164,7 +164,7 @@ zero counts as one, as Fabro counts it.
 
 Labels: the accelerator prefix (`[Y] Yes`, `Y) Yes`, `Y - Yes`) is stripped on
 both sides before the engine's `normalize_label`. `selection="random"` with a
-conditional edge is `fabro.random_with_conditions`, as in Fabro. `loop_restart=true`
+conditional edge is `attractor.random_with_conditions`, as in Fabro. `loop_restart=true`
 is `EdgeTransition::Restart`: the execution ends and a successor starts at the
 target with empty context.
 
@@ -254,7 +254,7 @@ the parent context at the fork and never merged back. Parallel workflows
 therefore need the coordinator path (`host::run_configured`, the CLI, an
 embedding host); `Runtime::run` alone has no child invocations.
 
-The parallel node itself is the `fabro/fork` step. It runs once per visit,
+The parallel node itself is the `attractor/fork` step. It runs once per visit,
 before any branch, and takes the fork snapshot: the parent's `kv` and, when
 a branch target is an agent or prompt node, the parent's stage records. It
 offloads the `for_each` source list at any size and every other snapshot
@@ -272,7 +272,7 @@ snapshot key a branch's own graph reads by expression (the source list of a
 list and stays inline. With no output store the fork keeps every value
 inline.
 
-Lowering replaces every branch target with a synthetic `fabro/branch`
+Lowering replaces every branch target with a synthetic `attractor/branch`
 delegate in the parent graph (`meta.kind = "parallel.branch"`,
 `meta.branch = { fork, target, index }`, `synthetic: true`, one attempt, no
 retry). The delegate's config names the child graph digest, the fork, the
@@ -284,17 +284,17 @@ pushed with the parent's graph. An agent or prompt target reads the branch's
 `nodes` and item data from the snapshot (`internal.parallel_nodes`,
 `internal.parallel_item`) and runs with `branch: true` (the branch fidelity
 rule). A branch target that is the start, the exit, or a fan-in is
-`fabro.parallel.bad_branch_target`. The same target named by two edges runs
+`attractor.parallel.bad_branch_target`. The same target named by two edges runs
 twice, as `<target>` and `<target>.branch<index>`. A nested `component`
 inside a branch is lowered first, innermost out, so an outer branch's child
 graph carries the inner fork whole.
 
 Branch edges never route. The delegates route to the fork's collector: the
 common direct successor of every branch (an inner fork counts as its own
-join). A `tripleoctagon` there is the `fabro/fan_in` step. A plain successor
+join). A `tripleoctagon` there is the `attractor/fan_in` step. A plain successor
 gets a synthetic `<fork>.fan_in` in front of it. No common successor is
-`fabro.parallel.no_join`; an edge that leaves a branch elsewhere is
-`fabro.parallel.branch_edge_ignored`. Every delegate's edge into the collector
+`attractor.parallel.no_join`; an edge that leaves a branch elsewhere is
+`attractor.parallel.branch_edge_ignored`. Every delegate's edge into the collector
 carries `{ index, value }`, so the `All` join sees the results in branch order.
 The collector publishes a result list above 4 KiB as a reference, before it
 reaches the parent's `kv`, so a later fork snapshots the reference and not
@@ -312,7 +312,7 @@ follows Fabro's aggregation: all succeeded (or no branches) is `succeeded`,
 all failed is `failed`, anything else is `partially_succeeded`. An empty
 array of results is the failure `No parallel results to join`
 (`no_parallel_results`); a fan-in that receives no branch at all is
-`fabro.parallel.no_branches` at load. `stdin_source="context.parallel.results"`
+`attractor.parallel.no_branches` at load. `stdin_source="context.parallel.results"`
 on a later command reads `get(kv, 'parallel.results')`; a command placed
 before any fan-in warns `upstream_fan_in`. The same publication and stripping
 happen in a prompted fan-in before its model call.
@@ -330,10 +330,10 @@ list fires the template once with the IR's placeholder item
 fan-in strips placeholders and joins zero results, so no model call happens,
 and the placeholder clone is no branch in the public event stream (the fork
 starts and closes with zero branches). `for_each` inside a `for_each` branch
-is `fabro.for_each.nested`.
+is `attractor.for_each.nested`.
 
 `max_parallel` bounds the fork's live children per fork occurrence: a
-missing, non-integer or negative value is 4 (`fabro.max_parallel.normalized`),
+missing, non-integer or negative value is 4 (`attractor.max_parallel.normalized`),
 zero is 1. Every branch child is declared at once, so its call site, its
 durable `InvocationDeclared` record and its place in the invocation count are
 fixed at the fork. The child's engine starts only when the fork has a free
@@ -348,11 +348,11 @@ unfinished branch queues again under the same bound. The fork step's output
 names the fork occurrence (`occurrence = { fork, firing }`, this visit of the
 parallel node); every branch child's call slot is
 `branch:<fork>@<firing>:<index>:<target>`. Branch steps report
-`fabro.parallel.branch.started` once the child's engine has started and
-`fabro.parallel.branch.completed` on every path a branch ends (with the
+`attractor.parallel.branch.started` once the child's engine has started and
+`attractor.parallel.branch.completed` on every path a branch ends (with the
 envelope's `status`, a `disposition` of `completed`, `cancelled`, `killed` or
 `failed_to_start`, and whether the child ever `started`); the fan-in reports
-`fabro.parallel.completed` when it runs. All three carry the occurrence and
+`attractor.parallel.completed` when it runs. All three carry the occurrence and
 are `StepEvent::Custom`; `crates/core/execution/EVENTS.md` ("Fork closure")
 maps them to Fabro's `parallel.*` events beside the typed `fork.completed`
 that closes a cancelled or killed fork.
@@ -370,7 +370,7 @@ a resume. Other dialects keep the coordinator's 1,024 default.
 `stack.child_workflow` (a path; `fabro/…` stands for `.fabro/…`) or
 `stack.child_dot_source` (inline DOT) is lowered with the parent, to at most
 three levels, with cycles refused. The child graph is registered before the
-run starts. The `fabro/workflow` step follows Fabro's manager loop: it starts
+run starts. The `attractor/workflow` step follows Fabro's manager loop: it starts
 the child once per manager attempt, at one durable call site (the node id), so
 a re-dispatch of the same attempt after a crash reattaches to the child it
 declared instead of starting another; a later attempt starts a fresh child.
@@ -390,7 +390,7 @@ the coordinator registers `attractor_steps::workflow::ChildInvoker`.
 
 ## Steps at run time
 
-- **`fabro/command`** runs the script in bash (`language="python"`: `python3 -c`)
+- **`attractor/command`** runs the script in bash (`language="python"`: `python3 -c`)
   with stderr merged, with the config's `env` (secret references resolved at
   spawn), feeds `stdin_source` through the process's stdin (an output
   reference is read back through the store first), records the output in
@@ -399,7 +399,7 @@ the coordinator registers `attractor_steps::workflow::ChildInvoker`.
   (`outcome`, `preferred_next_label`, `suggested_next_ids`, `context_updates`,
   `failure_reason`). Output above 100 KiB leaves the record for the output
   store (below); the in-memory cap is 8 MiB.
-- **`fabro/prompt`** is one model call through the application's `lithos-llm`
+- **`attractor/prompt`** is one model call through the application's `lithos-llm`
   client (the `PebbleClient` capability), with no tools and no coding-agent
   loop: the goal, the preamble of earlier stages at the node's resolved
   fidelity ("Fidelity and threads" below; `full` has no preamble and a prompt
@@ -419,13 +419,13 @@ the coordinator registers `attractor_steps::workflow::ChildInvoker`.
   fails `bad_output`. The result writes `response.<node>`, `last_response`
   (the first 200 characters), `last_stage`, then the routing fields or
   `output.<node>`. Two `StepEvent::Custom` payloads carry what a host maps
-  onto Fabro's `stage.prompt` and `prompt.completed`: `kind = "fabro.prompt"`
+  onto Fabro's `stage.prompt` and `prompt.completed`: `kind = "attractor.prompt"`
   (`node`, `firing`, `attempt`, `model`, `prompt`, `sources`) before the first
-  call, and `kind = "fabro.prompt.completed"` (`node`, `firing`, `attempt`,
+  call, and `kind = "attractor.prompt.completed"` (`node`, `firing`, `attempt`,
   `model`, `outcome`, `response`, `calls`, `repairs`, `usage`,
   `duration_ms`) after the last. Metrics: `prompt.calls`, `prompt.usage`.
   `usage` is the calls' sum as a lithos-llm `Usage` ("Usage" below).
-- **`fabro/agent`** assembles the prompt from the goal, the preamble of
+- **`attractor/agent`** assembles the prompt from the goal, the preamble of
   earlier stages at the node's resolved fidelity, and the node's prompt
   ("Fidelity and threads" below). Both backends share routing, `output_schema`
   validation, `output_retries` repair turns, and steering deliveries. Each
@@ -452,7 +452,7 @@ the coordinator registers `attractor_steps::workflow::ChildInvoker`.
   `retry_requested`, as Fabro's retryable handler error
   is, so `max_retries` and `retry_policy` apply to it; a node with no attempts
   left fails and routes on `outcome=failed` as before.
-- **`fabro/human`** asks through the core `Question` event and routes on the
+- **`attractor/human`** asks through the core `Question` event and routes on the
   delivered answer. The host's interviewer answers: `petri run --interactive`
   from the terminal, `--auto-approve` with the first choice,
   `--interview-script <file>` from a script (see the README's terminal path
@@ -485,9 +485,9 @@ the coordinator registers `attractor_steps::workflow::ChildInvoker`.
     missing or invalid target fails the gate before anyone is asked, with
     Fabro's message and class `review_target`; the refused URL is never
     repeated.
-- **`fabro/wait`** sleeps, cancel-aware.
-- **`fabro/workflow`** is the nested invocation above.
-- **`fabro/stage`** is `start`, `exit` and a conditional: it returns its
+- **`attractor/wait`** sleeps, cancel-aware.
+- **`attractor/workflow`** is the nested invocation above.
+- **`attractor/stage`** is `start`, `exit` and a conditional: it returns its
   config as its output, as `noop` did, and records the scope's environment so
   sandbox-placed hooks can run. The root `start` also checks the repository
   out (`[run.clone]` above) and writes `internal.run_id`, the run's identity
@@ -533,7 +533,7 @@ the coordinator registers `attractor_steps::workflow::ChildInvoker`.
 
 Fabro's `fidelity` decides how much of the run so far an LLM node hears:
 `full`, `truncate`, `compact`, `summary:low`, `summary:medium`,
-`summary:high`. Any other value is `fabro.bad_fidelity` at load. The node's
+`summary:high`. Any other value is `attractor.bad_fidelity` at load. The node's
 mode is resolved when it fires: the incoming edge's `fidelity`, else the
 node's, else the graph's `default_fidelity`, else `compact`. The preambles
 are deterministic text built from the run context with no model call, as
@@ -547,7 +547,7 @@ preamble: the node continues its thread's conversation.
 A thread is resolved the same way: the edge's `thread_id`, else the node's,
 else the graph's `default_thread`, else the node's first class, else the
 previous node's id. `thread_id` on a node or edge without effective `full`
-fidelity is `fabro.thread_id_requires_fidelity_full` at load. The first
+fidelity is `attractor.thread_id_requires_fidelity_full` at load. The first
 node of a parallel branch has no thread and an explicit `full` reads as
 `summary:high` (Fabro's branch rule); a node whose thread's conversation was
 discarded (its predecessor on the thread failed, or the run resumed) also
@@ -564,7 +564,7 @@ export with its own event sink, question handler, tool hooks and metrics
 bound; a node that names another model than the retained conversation's warns
 and continues it on the retained route. A failed node discards its session,
 as Fabro does. ACP never reuses a session. Each resolution is a
-`StepEvent::Custom` with `kind = "fabro.thread"` (`node`, `firing`,
+`StepEvent::Custom` with `kind = "attractor.thread"` (`node`, `firing`,
 `attempt`, `fidelity`, `fidelity_source`, `thread`, `thread_source`,
 `reused`, `backend`).
 
@@ -576,7 +576,7 @@ Fabro component installs (`crates/core/execution/HOOKS.md`). One service
 serves every point, and every caller reaches it as the `HookServiceHandle`
 capability, so a hook runs once whoever drives it and a replacement service
 receives every point: the engine's `HookAdapter` at the per-firing points,
-the `fabro/stage` step at the root `start` for `sandbox_ready`, `run_start`
+the `attractor/stage` step at the root `start` for `sandbox_ready`, `run_start`
 and the start stage's own `stage_start` (the driver admits `start` before
 its sandbox exists, so the step asks once the sandbox is there), the fork
 and fan-in steps for `parallel_start` and `parallel_complete`, the native
@@ -644,7 +644,7 @@ hook's tool and agent are stopped and joined the same way, even though the
 cancelled firing no longer waits for them. Hook output reaches the run log
 through the same event pipeline as every other step output, so Petri's
 secret masking applies to it. What a prompt or agent hook spent is on its
-record (`usage` on the hook's entry of the `hook` note or `fabro.hook`
+record (`usage` on the hook's entry of the `hook` note or `attractor.hook`
 event: requests, tool calls, tokens, cost, timings), and every event an
 agent hook's agent produced is recorded under the hook's identity as a
 `hook.activity` note (`parsed.hook_activity` in the public stream), apart
@@ -659,8 +659,8 @@ model sees the reason); every other event's decision is recorded and
 ignored. Per-firing reports are `hook` notes on the firing
 (point, decision, each hook's name, state, duration, message, and fail-open
 warnings). Tool and run-level reports are `StepEvent::Custom` with
-`kind = "fabro.hook"` (`node`, `firing`, `attempt`, `event`, `report`), and
-an enforcement gap is `kind = "fabro.hook.warning"` (`backend`, `hook`,
+`kind = "attractor.hook"` (`node`, `firing`, `attempt`, `event`, `report`), and
+an enforcement gap is `kind = "attractor.hook.warning"` (`backend`, `hook`,
 `event`, `boundary`, `message`).
 
 Tool hooks on the ACP backend are best effort: the client answers
@@ -668,7 +668,7 @@ Tool hooks on the ACP backend are best effort: the client answers
 when a `pre_tool_use` hook blocks, and reports `post_tool_use` from the tool
 call updates it observes. A tool call the agent runs without asking (a
 permission mode that never asks, a tool the agent treats as safe) is
-warned once per hook and tool as `fabro.hook.warning`, naming the backend
+warned once per hook and tool as `attractor.hook.warning`, naming the backend
 (`acp`), the hook, the event and the boundary the agent did not offer.
 Fabro ignores ACP tool hooks silently; the warning is an accepted
 difference.
@@ -920,7 +920,7 @@ existing at-least-once limit for external effects applies to fallback as to
 every other stage.
 
 Events. Petri emits one `StepEvent::Custom` kind, for the fact Pebble cannot
-know: `fabro.fallback.plan`, once per stage that builds a plan (`node`,
+know: `attractor.fallback.plan`, once per stage that builds a plan (`node`,
 `firing`, `attempt`, `requested`, `routes[]` with `position`, `provider`,
 `model`, `reasoning_effort`, `speed`, and `notices[]` with `code`, `level`,
 `message`); a node that reuses a retained thread emits none. Every route fact
@@ -1007,7 +1007,7 @@ error output; Petri writes the reason as a line on the node's stderr (`mcp
 server \`<name>\` failed to start: ...`), and the session proceeds with the
 tools of the servers that started. A server whose `env` or `headers` secret
 the run cannot supply is never named to Pebble: Petri writes the same stderr
-line and emits `fabro.mcp.unavailable` (below). A result the server marks
+line and emits `attractor.mcp.unavailable` (below). A result the server marks
 `isError` reaches the model as the tool's error text. A call with no answer
 within `tool_timeout`, a call the agent cancelled, and a call to a server
 whose connection closed each reach the model as a failed call with a reason;
@@ -1046,7 +1046,7 @@ kind, for the one fact Pebble cannot know:
 
 | `kind` | Fields | When |
 |---|---|---|
-| `fabro.mcp.unavailable` | `node`, `firing`, `attempt`, `server`, `error` | once per configured server Petri never named to Pebble because a secret its `env` or `headers` needs is unavailable, before the agent is built; the same reason is a `mcp server \`<name>\` failed to start: ...` line on the node's stderr |
+| `attractor.mcp.unavailable` | `node`, `firing`, `attempt`, `server`, `error` | once per configured server Petri never named to Pebble because a secret its `env` or `headers` needs is unavailable, before the agent is built; the same reason is a `mcp server \`<name>\` failed to start: ...` line on the node's stderr |
 
 Petri emitted `fabro.mcp.server` (`starting`, `ready`, `failed`,
 `disconnected`, `stopped`) and `fabro.mcp.tool` until 2026-09-12; decision
@@ -1091,11 +1091,11 @@ thread carries it on as part of the conversation.
 
 Events, all `StepEvent::Custom`:
 
-- `kind = "fabro.skills"`: `{ kind, node, firing, attempt, scope, dirs }`
+- `kind = "attractor.skills"`: `{ kind, node, firing, attempt, scope, dirs }`
   once per native session, `dirs` the ordered list of
   `{ path, source }` with `source` one of `configured`, `project_fabro`,
   `project`, `workflow`.
-- `kind = "fabro.skills.warning"`: `{ kind, node, firing, attempt, reason,
+- `kind = "attractor.skills.warning"`: `{ kind, node, firing, attempt, reason,
   path, message }` for each file or directory Pebble will skip:
   `malformed` (Pebble's parser rejects the file; the message says why in
   the parser's words), `unreadable` (the file was found but could not be
@@ -1152,7 +1152,7 @@ and `CompactionCancelled` through the `pebble` envelope, and a
 summary call's `usage` (tokens and cost, "Usage" above), so the node's sink
 folds the session's own compactions as they arrive and emits, right after
 each `CompactionCompleted` it records, a `StepEvent::Custom` with
-`kind = "fabro.compaction"`: `{ kind, node, firing, attempt, session, reason,
+`kind = "attractor.compaction"`: `{ kind, node, firing, attempt, session, reason,
 original_turn_count, preserved_turn_count, estimated_tokens_before,
 summary_token_estimate, tracked_file_count, usage }`.
 `estimated_tokens_before` is the estimate the compaction's
@@ -1170,13 +1170,13 @@ call to the prompt that compacted, so these two are a breakdown of
 | Construct | Code |
 |---|---|
 | `outcome=X` for X outside the four outcomes (and, after 2026-10-04, `success`) | `unsupported.outcome_value` |
-| `llm_prompt`, `is_codergen`, `node_type`, bare-number timeouts | `unsupported.attractor` |
-| an `import` Fabro's transform would refuse (missing file, bad boundary, cycle, extra placeholder attribute) | `fabro.import` |
-| `backend="acp"` on a `tab` prompt node | `fabro.prompt_backend` |
+| `llm_prompt`, `is_codergen`, `node_type`, bare-number timeouts | `unsupported.legacy_dialect` |
+| an `import` Fabro's transform would refuse (missing file, bad boundary, cycle, extra placeholder attribute) | `attractor.import` |
+| `backend="acp"` on a `tab` prompt node | `attractor.prompt_backend` |
 | `acp_command` (legacy) | `unsupported.acp_command` |
-| an unbound `{{ inputs.* }}` (a warning, `fabro.unbound_input`, under `petri check` with no inputs) | `unsupported.template.unbound_input` |
+| an unbound `{{ inputs.* }}` (a warning, `attractor.unbound_input`, under `petri check` with no inputs) | `unsupported.template.unbound_input` |
 | ports, HTML strings, undirected graphs, `strict`, anonymous subgraphs | `unsupported.dot.*` |
-| any graph, node or edge attribute Fabro does not define (`tool_hooks.*` included), outside the `x.` namespace | `fabro.unknown_attribute` |
+| any graph, node or edge attribute Fabro does not define (`tool_hooks.*` included), outside the `x.` namespace | `attractor.unknown_attribute` |
 
 **Accepted until 2026-10-04.** One spelling is a dated shim, with a warning
 that names the date and a `REMOVE AFTER 2026-10-04` comment at every site
@@ -1189,7 +1189,7 @@ plan. `.ai/plans/done/fabro-local-workflows.md` lists the workflows that
 depend on the alias and what to do at the sunset.
 
 **Unknown attributes are refused.** An attribute Fabro does not define on a
-graph, a node or an edge is an error (`fabro.unknown_attribute`), because a
+graph, a node or an edge is an error (`attractor.unknown_attribute`), because a
 misspelt attribute that silently did nothing is the failure the attribute
 tables exist to prevent. The hint names the Fabro attribute within two
 character edits when there is one (`max_retrys` suggests `max_retries`);
@@ -1255,20 +1255,20 @@ file, and a run directory that does not decode, at exit 2 before any work.
 
 ## Syntax both runners reject, and Petri's stricter diagnostics
 
-Rejected by both: Attractor attributes (`unsupported.attractor`), a bare-number
+Rejected by both: Attractor attributes (`unsupported.legacy_dialect`), a bare-number
 `timeout`, an `outcome=` value outside the four outcomes
 (`unsupported.outcome_value`), the legacy `acp_command`, an import Fabro's
-transform refuses (`fabro.import`), `backend="acp"` on a prompt node, a human
+transform refuses (`attractor.import`), `backend="acp"` on a prompt node, a human
 gate with no edges, a `for_each` template that is not an LLM node, structural
 mistakes (no start, no exit, unreachable nodes), and the `workflow.toml` keys
 Fabro's parser refuses (`unsupported.workflow_toml.key`).
 
 Petri-stricter, tested as differences and listed in
 `crates/fabro/acceptance/CONTRACT.md`: the 500-firing cap and its
-`fabro.max_visits_too_large` / `info.budget.default` diagnostics (Fabro is
+`attractor.max_visits_too_large` / `info.budget.default` diagnostics (Fabro is
 unlimited), `outcome=success` after its sunset, the 10,000-invocation maximum,
 `image.dockerfile` and the other platform-only `workflow.toml` warnings,
 unknown graph, node and edge attributes outside the `x.` namespace
-(`fabro.unknown_attribute`; Fabro has no rule for attribute names), and
+(`attractor.unknown_attribute`; Fabro has no rule for attribute names), and
 `on_failure="partially_succeed"` in the other direction: Petri accepts a
 spelling Fabro refuses.

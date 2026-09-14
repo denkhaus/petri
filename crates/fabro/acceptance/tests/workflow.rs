@@ -1,4 +1,4 @@
-//! Acceptance for `fabro/workflow`: a `house` node's child workflow is
+//! Acceptance for `attractor/workflow`: a `house` node's child workflow is
 //! lowered with the parent, registered before the run, invoked through the
 //! coordinator once per cycle, and stopped by its condition.
 
@@ -173,7 +173,7 @@ fn a_missing_child_and_a_cycle_are_specific_rejections() {
         missing
             .diagnostics
             .iter()
-            .any(|d| d.code == "fabro.child_workflow_not_found")
+            .any(|d| d.code == "attractor.child_workflow_not_found")
     );
     let cyclic = r#"digraph P { start [shape=Mdiamond] exit [shape=Msquare] m [shape=house, stack.child_workflow="self.fabro"] start -> m -> exit }"#;
     let files = MapFiles(
@@ -186,7 +186,7 @@ fn a_missing_child_and_a_cycle_are_specific_rejections() {
         cycle
             .diagnostics
             .iter()
-            .any(|d| d.code == "fabro.workflow_cycle"),
+            .any(|d| d.code == "attractor.workflow_cycle"),
         "{:?}",
         cycle.diagnostics
     );

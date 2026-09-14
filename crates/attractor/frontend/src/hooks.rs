@@ -1,6 +1,6 @@
 //! The resolved hook definitions a run carries in
-//! `Graph.params["fabro_hooks"]` and on its stage steps, and the events they
-//! fire on.
+//! `Graph.params["attractor.hooks"]` and on its stage steps, and the events
+//! they fire on.
 //!
 //! Every hook names one transport: a command (`sh -c` on the host or
 //! `bash -c` in the sandbox), an HTTP POST, a one-turn model call, or an
@@ -17,7 +17,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 /// Where the resolved list lives in `Graph.params`.
-pub const PARAM: &str = "fabro_hooks";
+pub const PARAM: &str = "attractor.hooks";
 
 /// The default timeout for command, HTTP and agent hooks.
 pub const DEFAULT_TIMEOUT_MS: u64 = 60_000;

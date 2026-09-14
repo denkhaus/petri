@@ -5,7 +5,7 @@
 //! [`Question`] a workflow human gate emits, sends it on the step's progress
 //! channel, and waits for the [`Answer`] the host's interview dispatcher
 //! delivers on the step's control channel. The same interviewer that answers
-//! `fabro/human` gates answers agent questions; Pebble never sees Petri's
+//! `attractor/human` gates answers agent questions; Pebble never sees Petri's
 //! control types, and Petri never reads a terminal inside Pebble.
 //!
 //! Identity: a question's id is `<node>#<firing>/agent/<session>/<tool

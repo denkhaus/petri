@@ -159,7 +159,7 @@ pub(super) fn insert_prepare_nodes(
     for node in &workflow.nodes {
         if node.id.starts_with(PREPARE_NODE_PREFIX) {
             diags.error(
-                "fabro.reserved_node_id",
+                "attractor.reserved_node_id",
                 node.span.clone(),
                 format!("`{}` is reserved for `[run.prepare]` lowering", node.id),
             );

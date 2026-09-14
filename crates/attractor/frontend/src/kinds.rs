@@ -8,30 +8,30 @@ use ir::StepKindId;
 use serde::{Deserialize, Serialize};
 
 /// An agent node (`box`): one turn of an agent over ACP or native Pebble.
-pub const AGENT_KIND: StepKindId = StepKindId::new_static("fabro/agent");
+pub const AGENT_KIND: StepKindId = StepKindId::new_static("attractor/agent");
 /// A prompt node (`tab`, or a `tripleoctagon` with a `prompt`): one model
 /// call through the application's model client, with no agent tools.
-pub const PROMPT_KIND: StepKindId = StepKindId::new_static("fabro/prompt");
+pub const PROMPT_KIND: StepKindId = StepKindId::new_static("attractor/prompt");
 /// A command node (`parallelogram`, or any node with a `script`).
-pub const COMMAND_KIND: StepKindId = StepKindId::new_static("fabro/command");
+pub const COMMAND_KIND: StepKindId = StepKindId::new_static("attractor/command");
 /// A human gate (`hexagon`).
-pub const HUMAN_KIND: StepKindId = StepKindId::new_static("fabro/human");
+pub const HUMAN_KIND: StepKindId = StepKindId::new_static("attractor/human");
 /// A wait node (`insulator`).
-pub const WAIT_KIND: StepKindId = StepKindId::new_static("fabro/wait");
+pub const WAIT_KIND: StepKindId = StepKindId::new_static("attractor/wait");
 /// A manager loop (`house`): a nested workflow.
-pub const WORKFLOW_KIND: StepKindId = StepKindId::new_static("fabro/workflow");
+pub const WORKFLOW_KIND: StepKindId = StepKindId::new_static("attractor/workflow");
 /// A parallel node (`component`) itself: the fork. It runs once per visit,
 /// takes the fork-time snapshot of the parent's context and stage records,
 /// offloads what a fan-out would otherwise copy into every branch child, and
 /// hands the snapshot to the branches as its output.
-pub const FORK_KIND: StepKindId = StepKindId::new_static("fabro/fork");
+pub const FORK_KIND: StepKindId = StepKindId::new_static("attractor/fork");
 /// One branch of a parallel node (`component`): the branch target runs in
 /// a child invocation with its own context and the parent's sandbox, and
 /// the step returns the branch's result envelope.
-pub const BRANCH_KIND: StepKindId = StepKindId::new_static("fabro/branch");
+pub const BRANCH_KIND: StepKindId = StepKindId::new_static("attractor/branch");
 /// A plain fan-in (`tripleoctagon`): the barrier that collects the branch
 /// envelopes in branch order and publishes `parallel.results`.
-pub const FAN_IN_KIND: StepKindId = StepKindId::new_static("fabro/fan_in");
+pub const FAN_IN_KIND: StepKindId = StepKindId::new_static("attractor/fan_in");
 /// The field of a fork's output that carries the fork snapshot of `kv`; the
 /// branch delegates read it as their `kv`.
 pub const FORK_SNAPSHOT_FIELD: &str = "snapshot";
@@ -53,7 +53,7 @@ pub const BRANCH_NODES_KEY: &str = "internal.parallel_nodes";
 pub const BRANCH_ITEM_KEY: &str = "internal.parallel_item";
 /// A structural stage (`start`, `exit`): runs nothing, records where its scope
 /// runs so hooks placed in the sandbox find it, and fires the run-level hooks.
-pub const STAGE_KIND: StepKindId = StepKindId::new_static("fabro/stage");
+pub const STAGE_KIND: StepKindId = StepKindId::new_static("attractor/stage");
 /// Reserved name of the synthetic node that enforces goal gates.
 pub const GOAL_CHECK_NODE: &str = "goal_check";
 /// The most repair turns one agent step accepts from configuration.

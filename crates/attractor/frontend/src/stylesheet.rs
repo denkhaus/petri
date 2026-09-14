@@ -191,7 +191,7 @@ pub fn apply(
     }
     for property in unknown {
         diags.warning(
-            "fabro.stylesheet.unknown_property",
+            "attractor.stylesheet.unknown_property",
             span.clone(),
             format!(
                 "the stylesheet sets `{property}`, which is not a model property ({}); it is ignored",

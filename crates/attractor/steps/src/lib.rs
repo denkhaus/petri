@@ -1,12 +1,12 @@
 //! Fabro step kinds: what a lowered Fabro graph runs.
 //!
 //! The frontend names six kinds (`frontend_attractor::kinds`); this crate
-//! registers them. [`register`] installs the real steps — `fabro/command`,
-//! `fabro/wait`, `fabro/human`, `fabro/agent` over ACP or native Pebble,
-//! `fabro/prompt` and `fabro/workflow` — and [`register_stubs`] installs one
-//! simulated step per name (Fabro's `--dry-run` handlers) so a graph lowers,
-//! validates and runs end to end with no model, shell or person. Which
-//! registry a run uses is the distribution's choice.
+//! registers them. [`register`] installs the real steps — `attractor/command`,
+//! `attractor/wait`, `attractor/human`, `attractor/agent` over ACP or native
+//! Pebble, `attractor/prompt` and `attractor/workflow` — and [`register_stubs`]
+//! installs one simulated step per name (Fabro's `--dry-run` handlers) so a
+//! graph lowers, validates and runs end to end with no model, shell or person.
+//! Which registry a run uses is the distribution's choice.
 //!
 //! [`register`] also installs the run's output-reference store
 //! ([`blobs::OutputStore`], a [`blobs::LocalBlobStore`] under
@@ -95,7 +95,7 @@ pub fn register(runtime: Runtime) -> Runtime {
 ///
 /// The local service reaches the steps only as the `HookServiceHandle`
 /// capability, the same handle a host's replacement would be: every point a
-/// step asks itself (`fabro/stage` at `start`, the fork and fan-in steps,
+/// step asks itself (`attractor/stage` at `start`, the fork and fan-in steps,
 /// the agent backends' tool boundaries) goes through it. What the local
 /// service needs from the runtime — the scope environments steps record
 /// ([`stage::ScopeEnvironments`]), the run identity, the model client — is

@@ -285,7 +285,7 @@ fn a_direct_path_dependency_on_a_corpus_crate_is_caught() {
         ],
         "resolve": { "nodes": [
             node(&petri_id("petri-fabro-acceptance"), &json!([
-                edge("fabro_workflow", &format!("path+file://{corpus}#fabro-workflow@0.347.0"), None)
+                edge("attractor.workflow", &format!("path+file://{corpus}#fabro-workflow@0.347.0"), None)
             ])),
         ] },
     });

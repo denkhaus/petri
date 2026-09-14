@@ -1,5 +1,5 @@
-//! `fabro/fork`, `fabro/branch` and `fabro/fan_in`: a parallel node, its
-//! branches as child invocations, and the barrier that collects their
+//! `attractor/fork`, `attractor/branch` and `attractor/fan_in`: a parallel
+//! node, its branches as child invocations, and the barrier that collects their
 //! envelopes.
 //!
 //! The fork step is the parallel node itself. It runs once per visit, before
@@ -83,17 +83,17 @@ pub const BRANCH_COUNT_KEY: &str = "parallel.branch_count";
 /// invocation }`. `occurrence` is `{ fork, firing }`, the fork visit this
 /// branch belongs to (the fork step's firing in the event's execution), the
 /// same one the typed `fork_started` names.
-pub const BRANCH_STARTED_EVENT: &str = "fabro.parallel.branch.started";
+pub const BRANCH_STARTED_EVENT: &str = "attractor.parallel.branch.started";
 /// The `kind` of the payload a branch emits when it reached its end, whether
 /// its child finished, was cancelled or killed, or never started: `{ kind,
 /// fork, occurrence, branch, index, item_label, invocation, status,
 /// disposition, started, duration_ms }`. `status` is the envelope's Fabro
 /// status; `disposition` is one of [`BranchDisposition`]'s names; `started`
 /// says whether the child's engine ever started.
-pub const BRANCH_COMPLETED_EVENT: &str = "fabro.parallel.branch.completed";
+pub const BRANCH_COMPLETED_EVENT: &str = "attractor.parallel.branch.completed";
 /// The `kind` of the payload the fan-in emits: `{ kind, node, fork,
 /// occurrence, branch_count, success_count, failure_count, status }`.
-pub const FORK_COMPLETED_EVENT: &str = "fabro.parallel.completed";
+pub const FORK_COMPLETED_EVENT: &str = "attractor.parallel.completed";
 
 /// The failure class when a fan-in received no branch envelopes.
 pub const NO_RESULTS_CLASS: FailureClass = FailureClass::new_static("no_parallel_results");
@@ -138,7 +138,7 @@ pub struct ForkStep;
 
 #[async_trait::async_trait]
 impl Step for ForkStep {
-    const NAME: &'static str = "fabro/fork";
+    const NAME: &'static str = "attractor/fork";
     type Config = ForkConfig;
 
     async fn run(&self, config: ForkConfig, ctx: StepCtx) -> Outcome {
@@ -447,7 +447,7 @@ fn snapshot_of(kv: &Value) -> BTreeMap<SmolStr, Value> {
 
 #[async_trait::async_trait]
 impl Step for BranchStep {
-    const NAME: &'static str = "fabro/branch";
+    const NAME: &'static str = "attractor/branch";
     type Config = BranchConfig;
 
     async fn run(&self, config: BranchConfig, mut ctx: StepCtx) -> Outcome {
@@ -745,7 +745,7 @@ fn aggregate(results: &[Value]) -> StageOutcome {
 
 #[async_trait::async_trait]
 impl Step for FanInStep {
-    const NAME: &'static str = "fabro/fan_in";
+    const NAME: &'static str = "attractor/fan_in";
     type Config = FanInConfig;
 
     async fn run(&self, config: FanInConfig, ctx: StepCtx) -> Outcome {

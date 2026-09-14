@@ -399,7 +399,7 @@ impl Ctx<'_> {
         );
         params.insert(SmolStr::new("goal"), Value::String(self.goal.clone()));
         params.insert(
-            SmolStr::new("fabro_workflow"),
+            SmolStr::new("attractor.workflow"),
             Value::String(self.workflow_name.clone()),
         );
         params
@@ -413,14 +413,15 @@ impl Ctx<'_> {
         what: &str,
     ) {
         for (key, attr) in attrs.iter() {
-            if attrs::ATTRACTOR.contains(&key) {
+            if attrs::LEGACY_DIALECT.contains(&key) {
                 self.diags.unsupported(
-                    "attractor",
+                    "legacy_dialect",
                     attr.span.clone(),
                     format!(
-                        "`{key}` is an Attractor-dialect attribute, which Fabro no longer reads"
+                        "`{key}` is a legacy-dialect attribute, which the reference implementation \
+                         no longer reads"
                     ),
-                    "use the Fabro spelling: `prompt` on a `box` node, `shape` for the kind",
+                    "use the current spelling: `prompt` on a `box` node, `shape` for the kind",
                 );
                 continue;
             }
@@ -481,7 +482,7 @@ impl Ctx<'_> {
             };
             self.diags.push(
                 Diagnostic::error(
-                    "fabro.unknown_attribute",
+                    "attractor.unknown_attribute",
                     attr.span.clone(),
                     format!("`{key}` on {what} is not a Fabro attribute"),
                 )
@@ -552,7 +553,7 @@ impl Ctx<'_> {
     fn template_error(&mut self, error: &TemplateError, span: &Span, what: &str) {
         match error {
             TemplateError::Unbound { name } if self.lenient_unbound => self.diags.warning(
-                "fabro.unbound_input",
+                "attractor.unbound_input",
                 span.clone(),
                 format!(
                     "{what} reads `{{{{ {name} }}}}`, which no input binds; it is left unrendered \
@@ -570,9 +571,11 @@ impl Ctx<'_> {
                     name.strip_prefix("inputs.").unwrap_or(name)
                 ),
             ),
-            other => self
-                .diags
-                .error("fabro.template", span.clone(), format!("{what}: {other}")),
+            other => self.diags.error(
+                "attractor.template",
+                span.clone(),
+                format!("{what}: {other}"),
+            ),
         }
     }
 
@@ -606,7 +609,7 @@ impl Ctx<'_> {
                 }
                 let Some(content) = self.files.read(&path) else {
                     self.diags.error(
-                        "fabro.file_not_found",
+                        "attractor.file_not_found",
                         span.clone(),
                         format!("{what} refers to `@{reference}`, and `{path}` cannot be read"),
                     );
@@ -652,7 +655,7 @@ impl Ctx<'_> {
             None | Some("deterministic") => {}
             Some("random") => self.random = true,
             Some(other) => self.diags.error(
-                "fabro.bad_selection",
+                "attractor.bad_selection",
                 attrs.span_of("selection", &span),
                 format!("`selection` must be `deterministic` or `random`, not `{other}`"),
             ),
@@ -665,7 +668,7 @@ impl Ctx<'_> {
                 match stylesheet::parse(&rendered) {
                     Ok(sheet) => stylesheet::apply(&sheet, workflow, &sheet_span, &mut self.diags),
                     Err(error) => self.diags.error(
-                        "fabro.stylesheet.syntax",
+                        "attractor.stylesheet.syntax",
                         sheet_span,
                         format!("`model_stylesheet`: {error}"),
                     ),
@@ -686,7 +689,7 @@ impl Ctx<'_> {
         };
         match Policy::parse(&value) {
             Some(Policy::PartiallySucceed) => self.diags.warning(
-                "fabro.petri_extension",
+                "attractor.petri_extension",
                 attrs.span_of(key, span),
                 format!(
                     "`{key}=\"partially_succeed\"` is a Petri extension: Fabro's validator \
@@ -695,7 +698,7 @@ impl Ctx<'_> {
             ),
             Some(_) => {}
             None => self.diags.error(
-                "fabro.bad_on_failure",
+                "attractor.bad_on_failure",
                 attrs.span_of(key, span),
                 format!(
                     "`{key}` must be `route`, `exit`, `succeed` or `partially_succeed`, not \
@@ -713,7 +716,7 @@ impl Ctx<'_> {
         for node in &workflow.nodes {
             if !node.declared {
                 self.diags.error(
-                    "fabro.undeclared_node",
+                    "attractor.undeclared_node",
                     node.span.clone(),
                     format!("`{}` is named by an edge but never declared", node.id),
                 );
@@ -722,7 +725,7 @@ impl Ctx<'_> {
         }
         if workflow.node(GOAL_CHECK_NODE).is_some() {
             self.diags.error(
-                "fabro.reserved_node_id",
+                "attractor.reserved_node_id",
                 workflow.node(GOAL_CHECK_NODE)?.span.clone(),
                 format!("`{GOAL_CHECK_NODE}` is reserved for goal-gate lowering"),
             );
@@ -748,7 +751,7 @@ impl Ctx<'_> {
             .collect();
         if starts.is_empty() {
             self.diags.error(
-                "fabro.no_start",
+                "attractor.no_start",
                 workflow.span.clone(),
                 "the workflow has no start node (`shape=Mdiamond`, `type=start`, or an id of `start`)",
             );
@@ -756,7 +759,7 @@ impl Ctx<'_> {
         }
         if starts.len() > 1 {
             self.diags.error(
-                "fabro.multiple_starts",
+                "attractor.multiple_starts",
                 workflow.span.clone(),
                 format!(
                     "the workflow has multiple start nodes: {}",
@@ -771,7 +774,7 @@ impl Ctx<'_> {
         }
         if exits.is_empty() {
             self.diags.error(
-                "fabro.no_exit",
+                "attractor.no_exit",
                 workflow.span.clone(),
                 "the workflow has no exit node (`shape=Msquare`, `type=exit`, or an id of `exit`)",
             );
@@ -779,7 +782,7 @@ impl Ctx<'_> {
         }
         if exits.len() > 1 {
             self.diags.error(
-                "fabro.multiple_exits",
+                "attractor.multiple_exits",
                 workflow.span.clone(),
                 format!(
                     "the workflow has multiple exit nodes: {}",
@@ -797,7 +800,7 @@ impl Ctx<'_> {
         for edge in &workflow.edges {
             if edge.to == start {
                 self.diags.error(
-                    "fabro.start_has_incoming",
+                    "attractor.start_has_incoming",
                     edge.span.clone(),
                     format!(
                         "`{}` points at the start node, which takes no incoming edges",
@@ -808,7 +811,7 @@ impl Ctx<'_> {
             }
             if edge.from == exit {
                 self.diags.error(
-                    "fabro.exit_has_outgoing",
+                    "attractor.exit_has_outgoing",
                     edge.span.clone(),
                     "the exit node has an outgoing edge; nothing runs after exit",
                 );
@@ -828,7 +831,7 @@ impl Ctx<'_> {
         for node in &workflow.nodes {
             if !seen.contains(node.id.as_str()) {
                 self.diags.error(
-                    "fabro.unreachable_node",
+                    "attractor.unreachable_node",
                     node.span.clone(),
                     format!("`{}` is not reachable from the start node", node.id),
                 );
@@ -837,7 +840,7 @@ impl Ctx<'_> {
         }
         if !seen.contains(exit.as_str()) {
             self.diags.error(
-                "fabro.exit_unreachable",
+                "attractor.exit_unreachable",
                 workflow.span.clone(),
                 "the exit node is not reachable from the start node",
             );
@@ -863,7 +866,7 @@ impl Ctx<'_> {
         if let Some(name) = node.attrs.text("type") {
             return Kind::from_type(&name).unwrap_or_else(|| {
                 self.diags.error(
-                    "fabro.unknown_type",
+                    "attractor.unknown_type",
                     node.attrs.span_of("type", &node.span),
                     format!("`type=\"{name}\"` is not a Fabro handler type"),
                 );
@@ -873,7 +876,7 @@ impl Ctx<'_> {
         let shape = shape_of(node);
         Kind::from_shape(&shape).unwrap_or_else(|| {
             self.diags.warning(
-                "fabro.unknown_shape",
+                "attractor.unknown_shape",
                 node.attrs.span_of("shape", &node.span),
                 format!("`shape={shape}` is not a Fabro shape; the node runs as an agent (`box`)"),
             );
@@ -1011,7 +1014,7 @@ impl Ctx<'_> {
                 let duration = node.attrs.duration("duration", &mut self.diags);
                 if duration.is_none() && !node.attrs.contains("duration") {
                     self.diags.error(
-                        "fabro.wait_requires_duration",
+                        "attractor.wait_requires_duration",
                         node.span.clone(),
                         format!("wait node `{}` needs a `duration`", node.id),
                     );
@@ -1045,10 +1048,10 @@ impl Ctx<'_> {
             && attr.value.as_text().trim().parse::<f64>().is_ok()
         {
             self.diags.unsupported(
-                "attractor",
+                "legacy_dialect",
                 attr.span.clone(),
                 format!(
-                    "`timeout={}` is a bare number, the Attractor spelling",
+                    "`timeout={}` is a bare number, the legacy-dialect spelling",
                     attr.value.as_text()
                 ),
                 "write the unit: `timeout=\"1200s\"`",
@@ -1122,7 +1125,7 @@ impl Ctx<'_> {
             Some(prompt) if !prompt.trim().is_empty() => prompt,
             _ => {
                 self.diags.warning(
-                    "fabro.prompt_missing",
+                    "attractor.prompt_missing",
                     node.span.clone(),
                     format!(
                         "agent node `{}` has no `prompt`; its label is the prompt",
@@ -1147,7 +1150,7 @@ impl Ctx<'_> {
         {
             if !matches!(backend.as_str(), "acp" | "api") {
                 self.diags.error(
-                    "fabro.bad_backend",
+                    "attractor.bad_backend",
                     node.attrs.span_of("backend", &node.span),
                     "agent backend must be acp or api",
                 );
@@ -1157,7 +1160,7 @@ impl Ctx<'_> {
             if is_prompt && backend == "acp" {
                 if node.attrs.contains("backend") {
                     self.diags.error(
-                        "fabro.prompt_backend",
+                        "attractor.prompt_backend",
                         node.attrs.span_of("backend", &node.span),
                         "backend=\"acp\" is only valid on agent nodes; prompt nodes are API-only",
                     );
@@ -1217,7 +1220,7 @@ impl Ctx<'_> {
             let retries = retries.max(0);
             if retries > i64::try_from(MAX_OUTPUT_RETRIES).unwrap_or(i64::MAX) {
                 self.diags.error(
-                    "fabro.output_retries_too_large",
+                    "attractor.output_retries_too_large",
                     node.attrs.span_of("output_retries", &node.span),
                     format!("`output_retries={retries}` exceeds the hard maximum of {MAX_OUTPUT_RETRIES}"),
                 );
@@ -1230,7 +1233,7 @@ impl Ctx<'_> {
         if is_prompt {
             if node.attrs.text("acp.command").is_some() || node.attrs.text("acp.config").is_some() {
                 self.diags.error(
-                    "fabro.backend_options",
+                    "attractor.backend_options",
                     node.span.clone(),
                     "a prompt node cannot set acp.command or acp.config; prompt nodes are API-only",
                 );
@@ -1238,7 +1241,7 @@ impl Ctx<'_> {
         } else if config.get("backend").and_then(Value::as_str) == Some("api") {
             if node.attrs.text("acp.command").is_some() || node.attrs.text("acp.config").is_some() {
                 self.diags.error(
-                    "fabro.backend_options",
+                    "attractor.backend_options",
                     node.span.clone(),
                     "an API node cannot set acp.command or acp.config",
                 );
@@ -1272,7 +1275,7 @@ impl Ctx<'_> {
                 config.insert("output_schema".into(), value);
             }
             _ => self.diags.error(
-                "fabro.bad_output_schema",
+                "attractor.bad_output_schema",
                 span,
                 format!(
                     "`output_schema` on `{}` must be `routing` or a JSON Schema object",
@@ -1293,7 +1296,7 @@ impl Ctx<'_> {
             .or_else(|| workflow.attrs.text("acp.config"));
         match (command, acp_config) {
             (Some(_), Some(_)) => self.diags.error(
-                "fabro.acp_both",
+                "attractor.acp_both",
                 node.attrs.span_of("acp.command", &node.span),
                 format!(
                     "node `{}` sets both `acp.command` and `acp.config`",
@@ -1308,7 +1311,7 @@ impl Ctx<'_> {
                     config.insert("acp".into(), json!({ "config": value }));
                 }
                 Err(error) => self.diags.error(
-                    "fabro.bad_acp_config",
+                    "attractor.bad_acp_config",
                     node.attrs.span_of("acp.config", &node.span),
                     format!("`acp.config` is not JSON: {error}"),
                 ),
@@ -1331,7 +1334,7 @@ impl Ctx<'_> {
             .unwrap_or_else(|| "shell".into());
         if language != "shell" && language != "python" {
             self.diags.error(
-                "fabro.bad_language",
+                "attractor.bad_language",
                 node.attrs.span_of("language", &node.span),
                 format!("`language` must be `shell` or `python`, not `{language}`"),
             );
@@ -1354,7 +1357,7 @@ impl Ctx<'_> {
                 }
             }
             _ => self.diags.error(
-                "fabro.command_requires_script",
+                "attractor.command_requires_script",
                 node.span.clone(),
                 format!("command node `{}` needs a `script`", node.id),
             ),
@@ -1382,7 +1385,7 @@ impl Ctx<'_> {
                     config.insert("stdin".into(), placeholder(expr));
                 }
                 None => self.diags.error(
-                    "fabro.bad_stdin_source",
+                    "attractor.bad_stdin_source",
                     span,
                     format!("`stdin_source` must name a context key such as `context.output`, not `{source}`"),
                 ),
@@ -1408,7 +1411,7 @@ impl Ctx<'_> {
         }
         if key == "parallel.results" && !self.upstream_fan_in(&node.id, workflow) {
             self.diags.warning(
-                "fabro.parallel_results_without_fan_in",
+                "attractor.parallel_results_without_fan_in",
                 span.clone(),
                 format!(
                     "`{}` reads `context.parallel.results` but no fan-in node precedes it",
@@ -1418,7 +1421,7 @@ impl Ctx<'_> {
         }
         if key.starts_with("internal.") {
             self.diags.warning(
-                "fabro.internal_context",
+                "attractor.internal_context",
                 span.clone(),
                 format!("`{key}` is Fabro-internal run state, which Petri does not populate; it reads as null"),
             );
@@ -1467,7 +1470,7 @@ impl Ctx<'_> {
             {
                 if freeform_target.is_some() {
                     self.diags.error(
-                        "fabro.freeform_edge_count",
+                        "attractor.freeform_edge_count",
                         edge.span.clone(),
                         format!(
                             "human gate `{}` has more than one `freeform=true` edge",
@@ -1491,7 +1494,7 @@ impl Ctx<'_> {
         }
         if choices.is_empty() && freeform_target.is_none() {
             self.diags.error(
-                "fabro.human_without_edges",
+                "attractor.human_without_edges",
                 node.span.clone(),
                 format!(
                     "human gate `{}` has no outgoing edges to offer as choices",
@@ -1502,7 +1505,7 @@ impl Ctx<'_> {
         if let Some(kind) = node.attrs.text("question_type") {
             if !attrs::QUESTION_TYPES.contains(&kind.as_str()) {
                 self.diags.error(
-                    "fabro.bad_question_type",
+                    "attractor.bad_question_type",
                     node.attrs.span_of("question_type", &node.span),
                     format!(
                         "`question_type` must be one of {}",
@@ -1524,7 +1527,7 @@ impl Ctx<'_> {
                     || choice["to"] == Value::String(default.clone())
             }) {
                 self.diags.error(
-                    "fabro.bad_default_choice",
+                    "attractor.bad_default_choice",
                     node.attrs.span_of("human.default_choice", &node.span),
                     format!(
                         "`human.default_choice=\"{default}\"` names none of the gate's \
@@ -1567,7 +1570,7 @@ impl Ctx<'_> {
                 }
                 other => {
                     self.diags.warning(
-                        "fabro.manager.max_cycles",
+                        "attractor.manager.max_cycles",
                         attr.span.clone(),
                         format!(
                             "`manager.max_cycles={}` is not a non-negative integer; Fabro reads \
@@ -1613,7 +1616,7 @@ impl Ctx<'_> {
             }
             (None, None) => {
                 self.diags.error(
-                    "fabro.manager_loop_without_child",
+                    "attractor.manager_loop_without_child",
                     node.span.clone(),
                     format!(
                         "manager loop `{}` needs `stack.child_workflow` or `stack.child_dot_source`",
@@ -1647,7 +1650,7 @@ impl Ctx<'_> {
         });
         let Some((resolved, text)) = found else {
             self.diags.error(
-                "fabro.child_workflow_not_found",
+                "attractor.child_workflow_not_found",
                 span.clone(),
                 format!(
                     "manager loop `{node}` names `{path}`, which cannot be read ({} tried)",
@@ -1664,7 +1667,7 @@ impl Ctx<'_> {
     fn child_from_text(&mut self, name: &str, text: &str, span: &Span) -> Option<String> {
         if self.stack.iter().any(|f| f == name) {
             self.diags.error(
-                "fabro.workflow_cycle",
+                "attractor.workflow_cycle",
                 span.clone(),
                 format!(
                     "workflow call cycle: {} -> `{name}`",
@@ -1675,7 +1678,7 @@ impl Ctx<'_> {
         }
         if self.stack.len() > MAX_CALL_DEPTH {
             self.diags.error(
-                "fabro.workflow_depth",
+                "attractor.workflow_depth",
                 span.clone(),
                 format!("nested workflows nest more than {MAX_CALL_DEPTH} deep at `{name}`"),
             );
@@ -1793,7 +1796,7 @@ impl Ctx<'_> {
                     arms.push(edge);
                 }
                 None => self.diags.warning(
-                    "fabro.goal_gate_without_target",
+                    "attractor.goal_gate_without_target",
                     gate.span.clone(),
                     format!(
                         "goal gate `{}` has no retry target that exists; when it fails the run ends failed",
@@ -1833,7 +1836,7 @@ impl Ctx<'_> {
             Some("deterministic") => false,
             Some(other) => {
                 self.diags.error(
-                    "fabro.bad_selection",
+                    "attractor.bad_selection",
                     node.attrs.span_of("selection", &node.span),
                     format!("`selection` must be `deterministic` or `random`, not `{other}`"),
                 );
@@ -1897,7 +1900,7 @@ impl Ctx<'_> {
         }
         if random && lowered.iter().any(|e| e.condition.is_some()) {
             self.diags.error(
-                "fabro.random_with_conditions",
+                "attractor.random_with_conditions",
                 node.span.clone(),
                 format!(
                     "`{}` uses `selection=\"random\"` and has conditional edges; Fabro forbids the combination",
@@ -2023,7 +2026,7 @@ impl Ctx<'_> {
             && limit > i64::from(MAX_FIRINGS)
         {
             self.diags.error(
-                "fabro.max_visits_too_large",
+                "attractor.max_visits_too_large",
                 workflow.attrs.span_of("max_node_visits", &workflow.span),
                 format!("`max_node_visits={limit}` exceeds the hard maximum of {MAX_FIRINGS}"),
             );
@@ -2043,7 +2046,7 @@ impl Ctx<'_> {
                 && limit > i64::from(MAX_FIRINGS)
             {
                 self.diags.error(
-                    "fabro.max_visits_too_large",
+                    "attractor.max_visits_too_large",
                     node.attrs.span_of("max_visits", &node.span),
                     format!("`max_visits={limit}` exceeds the hard maximum of {MAX_FIRINGS}"),
                 );

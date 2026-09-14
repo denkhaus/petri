@@ -154,7 +154,7 @@ impl Attrs {
         let duration = parse_duration(&text);
         if duration.is_none() {
             diags.error(
-                "fabro.bad_duration",
+                "attractor.bad_duration",
                 attr.span.clone(),
                 format!(
                     "`{key}` must be a duration such as `900s`, `15m`, `2h` or `250ms`, not \
@@ -168,7 +168,7 @@ impl Attrs {
 
 fn wrong_type(diags: &mut Diagnostics, key: &str, got: &AttrValue, want: &str, span: &Span) {
     diags.error(
-        "fabro.bad_attribute_type",
+        "attractor.bad_attribute_type",
         span.clone(),
         format!("`{key}` must be {want}, not {}", got.kind()),
     );

@@ -70,7 +70,7 @@ pub const SSE_PATH: &str = "/sse";
 /// unavailable: `{ kind, node, firing, attempt, server, error }`. Emitted
 /// once per such server, before the agent is built. Every other fact about
 /// the servers is Pebble's own event.
-pub const UNAVAILABLE_EVENT: &str = "fabro.mcp.unavailable";
+pub const UNAVAILABLE_EVENT: &str = "attractor.mcp.unavailable";
 
 /// Fabro's entries as Pebble's servers, in configuration order, their
 /// secrets resolved.

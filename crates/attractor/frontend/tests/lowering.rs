@@ -176,7 +176,7 @@ fn random_selection_picks_weighted_and_forbids_conditions() {
         a -> exit [condition="outcome=succeeded"]
         a -> exit
     "#))
-        .contains(&"fabro.random_with_conditions".to_string())
+        .contains(&"attractor.random_with_conditions".to_string())
     );
 }
 
@@ -304,7 +304,7 @@ fn promoting_policies_carry_the_explicit_routes() {
         start -> a -> exit
     "#));
     assert!(
-        found.contains(&"fabro.petri_extension".to_string()),
+        found.contains(&"attractor.petri_extension".to_string()),
         "the Petri-only spelling is named: {found:?}"
     );
 }
@@ -341,14 +341,14 @@ fn succeed_is_supported_and_auto_status_is_a_warned_alias() {
         a [prompt="x"]
         start -> a -> exit
     "#))
-        .contains(&"fabro.bad_on_failure".to_string())
+        .contains(&"attractor.bad_on_failure".to_string())
     );
     assert!(
         codes(&dot(r#"
         a [prompt="x", allow_partial=true, on_retries_exhausted="exit"]
         start -> a -> exit
     "#))
-        .contains(&"fabro.allow_partial_conflict".to_string())
+        .contains(&"attractor.allow_partial_conflict".to_string())
     );
 }
 
@@ -450,7 +450,7 @@ fn visit_limits_above_the_cap_are_rejected_and_unlimited_is_capped_with_a_note()
         a [prompt="x", max_visits=501]
         start -> a -> exit
     "#))
-        .contains(&"fabro.max_visits_too_large".to_string())
+        .contains(&"attractor.max_visits_too_large".to_string())
     );
     let lowered = frontend_attractor::load_text(
         "w.fabro",
@@ -493,7 +493,7 @@ fn static_fan_out_and_fan_in_lower_to_groups_and_an_all_join() {
     );
     assert_eq!(node(&graph, "merge").join, JoinPolicy::All);
     assert_eq!(node(&graph, "a").join, JoinPolicy::Any);
-    // Each branch is a `fabro/branch` step over a child graph of its own,
+    // Each branch is an `attractor/branch` step over a child graph of its own,
     // routing only to the fan-in with its envelope.
     let a = node(&graph, "a");
     assert_eq!(a.step.kind, BRANCH_KIND);
@@ -613,7 +613,7 @@ fn max_parallel_follows_fabro_normalization() {
         merge [shape=tripleoctagon]
         start -> fork -> a -> merge -> exit
     "#))
-        .contains(&"fabro.max_parallel.normalized".to_string())
+        .contains(&"attractor.max_parallel.normalized".to_string())
     );
 }
 
@@ -657,7 +657,7 @@ fn branches_must_share_a_join_and_a_branch_follows_no_other_edge() {
         fork -> b -> merge
         merge -> exit
     "#))
-        .contains(&"fabro.parallel.no_join".to_string())
+        .contains(&"attractor.parallel.no_join".to_string())
     );
     // An edge from a branch target to anything but the join is reported.
     assert!(
@@ -676,7 +676,7 @@ fn branches_must_share_a_join_and_a_branch_follows_no_other_edge() {
         merge -> exit
         extra -> exit
     "#))
-        .contains(&"fabro.parallel.branch_edge_ignored".to_string())
+        .contains(&"attractor.parallel.branch_edge_ignored".to_string())
     );
     // The exit is not a branch target.
     assert!(
@@ -688,7 +688,7 @@ fn branches_must_share_a_join_and_a_branch_follows_no_other_edge() {
         fork -> exit
         gate -> exit
     "#))
-        .contains(&"fabro.parallel.bad_branch_target".to_string())
+        .contains(&"attractor.parallel.bad_branch_target".to_string())
     );
 }
 
@@ -844,7 +844,7 @@ fn for_each_lowers_to_an_expansion_on_the_template_node() {
         c [shape=parallelogram, script="x"]
         start -> fan -> c -> exit
     "#))
-        .contains(&"fabro.for_each.target".to_string())
+        .contains(&"attractor.for_each.target".to_string())
     );
 }
 
@@ -1074,7 +1074,7 @@ fn imports_expand_at_load_with_fabro_rules() {
     let messages: Vec<String> = cycle
         .diagnostics
         .iter()
-        .filter(|d| d.code == "fabro.import")
+        .filter(|d| d.code == "attractor.import")
         .map(|d| d.message.clone())
         .collect();
     assert!(
@@ -1089,7 +1089,7 @@ fn imports_expand_at_load_with_fabro_rules() {
         load(&dot(body))
             .diagnostics
             .iter()
-            .filter(|d| d.code == "fabro.import")
+            .filter(|d| d.code == "attractor.import")
             .map(|d| d.message.clone())
             .collect()
     };
@@ -1142,30 +1142,30 @@ fn structural_mistakes_are_specific_errors() {
     );
     assert!(
         codes("digraph G { start; other [shape=Mdiamond]; exit; start -> other -> exit }")
-            .contains(&"fabro.multiple_starts".to_string())
+            .contains(&"attractor.multiple_starts".to_string())
     );
     assert!(
         codes("digraph G { start; exit; done [shape=Msquare]; start -> exit; start -> done }")
-            .contains(&"fabro.multiple_exits".to_string())
+            .contains(&"attractor.multiple_exits".to_string())
     );
     assert!(
         codes(&dot(
             "goal_check [prompt=\"x\"] start -> goal_check -> exit"
         ))
-        .contains(&"fabro.reserved_node_id".to_string())
+        .contains(&"attractor.reserved_node_id".to_string())
     );
     assert!(
         codes("digraph G { a [prompt=\"x\"] a -> exit  exit [shape=Msquare] }")
-            .contains(&"fabro.no_start".to_string())
+            .contains(&"attractor.no_start".to_string())
     );
-    assert!(codes(&dot("start -> ghost")).contains(&"fabro.undeclared_node".to_string()));
+    assert!(codes(&dot("start -> ghost")).contains(&"attractor.undeclared_node".to_string()));
     assert!(
         codes(&dot(r#"
         a [prompt="x"]
         b [prompt="x"]
         start -> a -> exit
     "#))
-        .contains(&"fabro.unreachable_node".to_string())
+        .contains(&"attractor.unreachable_node".to_string())
     );
     assert!(
         codes(&dot(r#"
@@ -1173,35 +1173,35 @@ fn structural_mistakes_are_specific_errors() {
         start -> a -> exit
         a -> start
     "#))
-        .contains(&"fabro.start_has_incoming".to_string())
+        .contains(&"attractor.start_has_incoming".to_string())
     );
     assert!(
         codes(&dot(r#"
         a [prompt="x"]
         start -> a -> exit -> a
     "#))
-        .contains(&"fabro.exit_has_outgoing".to_string())
+        .contains(&"attractor.exit_has_outgoing".to_string())
     );
     assert!(
         codes(&dot(r#"
         a [llm_prompt="x"]
         start -> a -> exit
     "#))
-        .contains(&"unsupported.attractor".to_string())
+        .contains(&"unsupported.legacy_dialect".to_string())
     );
     assert!(
         codes(&dot(r#"
         a [prompt="x", timeout=1200]
         start -> a -> exit
     "#))
-        .contains(&"unsupported.attractor".to_string())
+        .contains(&"unsupported.legacy_dialect".to_string())
     );
     assert!(
         codes(&dot(r#"
         a [prompt="x", import="other.fabro"]
         start -> a -> exit
     "#))
-        .contains(&"fabro.import".to_string()),
+        .contains(&"attractor.import".to_string()),
         "a missing import file is an import error"
     );
     assert!(
@@ -1209,7 +1209,7 @@ fn structural_mistakes_are_specific_errors() {
         a [prompt="x", frobnicate=1]
         start -> a -> exit
     "#))
-        .contains(&"fabro.unknown_attribute".to_string())
+        .contains(&"attractor.unknown_attribute".to_string())
     );
     assert!(
         codes(&dot(r#"
@@ -1241,7 +1241,7 @@ fn unknown_attributes_are_refused_with_the_closest_name_as_the_hint() {
     let unknown: Vec<&frontend::Diagnostic> = lowered
         .diagnostics
         .iter()
-        .filter(|d| d.code == "fabro.unknown_attribute")
+        .filter(|d| d.code == "attractor.unknown_attribute")
         .collect();
     assert_eq!(unknown.len(), 1, "{:?}", lowered.diagnostics);
     assert!(unknown[0].is_error());
@@ -1263,7 +1263,7 @@ fn unknown_attributes_are_refused_with_the_closest_name_as_the_hint() {
     "#));
     let hints: Vec<String> = typo
         .iter()
-        .filter(|d| d.code == "fabro.unknown_attribute")
+        .filter(|d| d.code == "attractor.unknown_attribute")
         .map(|d| d.hint.clone().unwrap_or_default())
         .collect();
     assert_eq!(hints.len(), 3, "{typo:?}");
@@ -1295,7 +1295,7 @@ fn unbounded_agent_repairs_are_rejected() {
             a [prompt="x", output_retries=101]
             start -> a -> exit
         "#))
-        .contains(&"fabro.output_retries_too_large".to_string())
+        .contains(&"attractor.output_retries_too_large".to_string())
     );
 }
 
@@ -1387,7 +1387,7 @@ fn run_policies_lower_with_fabro_defaults() {
         start -> a -> exit
     "#));
     assert!(
-        codes.contains(&"fabro.bad_signature_limit".to_string()),
+        codes.contains(&"attractor.bad_signature_limit".to_string()),
         "{codes:?}"
     );
     let diags = diagnostics(&dot(r#"
@@ -1430,7 +1430,7 @@ fn human_gate_review_target_and_default_choice_lower() {
         a -> exit
     "#));
     assert!(
-        codes.contains(&"fabro.bad_default_choice".to_string()),
+        codes.contains(&"attractor.bad_default_choice".to_string()),
         "{codes:?}"
     );
 }
@@ -1562,7 +1562,7 @@ fn a_check_with_no_inputs_warns_on_unbound_inputs_and_keeps_the_text() {
         .map(|d| d.code.as_str())
         .collect();
     assert!(
-        found.iter().all(|c| *c == "fabro.unbound_input"),
+        found.iter().all(|c| *c == "attractor.unbound_input"),
         "{found:?}"
     );
     assert_eq!(lowered.diagnostics.errors().count(), 0);
@@ -1622,7 +1622,7 @@ fn a_template_local_set_inside_an_if_renders_and_a_missing_input_is_named() {
         .iter()
         .map(|d| d.code.as_str())
         .collect();
-    assert_eq!(found, ["fabro.unbound_input"], "{found:?}");
+    assert_eq!(found, ["attractor.unbound_input"], "{found:?}");
     assert!(lenient.graph.is_some());
 }
 
@@ -1666,7 +1666,7 @@ fn threads_fidelity_memory_and_controls_lower_onto_agent_nodes_and_edges() {
         payload,
         json!({"from": "plan", "fidelity": "truncate", "thread_id": "side"})
     );
-    assert_eq!(graph.params["fabro_hooks"], json!([]));
+    assert_eq!(graph.params["attractor.hooks"], json!([]));
 }
 
 #[test]
@@ -1680,7 +1680,7 @@ fn thread_ids_without_full_fidelity_warn_and_bad_modes_are_errors() {
         b -> exit
     "#));
     assert!(
-        codes.contains(&"fabro.thread_id_requires_fidelity_full".to_string()),
+        codes.contains(&"attractor.thread_id_requires_fidelity_full".to_string()),
         "{codes:?}"
     );
     assert!(
@@ -1692,8 +1692,11 @@ fn thread_ids_without_full_fidelity_warn_and_bad_modes_are_errors() {
         start -> a
         a -> exit [fidelity="quiet"]
     "#));
-    assert!(bad.contains(&"fabro.bad_fidelity".to_string()), "{bad:?}");
-    assert!(bad.contains(&"fabro.bad_speed".to_string()), "{bad:?}");
+    assert!(
+        bad.contains(&"attractor.bad_fidelity".to_string()),
+        "{bad:?}"
+    );
+    assert!(bad.contains(&"attractor.bad_speed".to_string()), "{bad:?}");
     // A thread on a parallel branch is inert, and says so.
     let branch = codes_of(&dot(r#"
         fork [shape=component]
@@ -1702,7 +1705,7 @@ fn thread_ids_without_full_fidelity_warn_and_bad_modes_are_errors() {
         start -> fork -> a -> join -> exit
     "#));
     assert!(
-        branch.contains(&"fabro.parallel_branch_inert_attribute".to_string()),
+        branch.contains(&"attractor.parallel_branch_inert_attribute".to_string()),
         "{branch:?}"
     );
     // `tool_hooks.*` are not Fabro attributes.
@@ -1712,7 +1715,7 @@ fn thread_ids_without_full_fidelity_warn_and_bad_modes_are_errors() {
     "#));
     let unknown: Vec<&frontend::Diagnostic> = unknown
         .iter()
-        .filter(|d| d.code == "fabro.unknown_attribute")
+        .filter(|d| d.code == "attractor.unknown_attribute")
         .collect();
     assert_eq!(unknown.len(), 2, "{unknown:?}");
     assert!(
@@ -1806,6 +1809,6 @@ fn attractor_lowers_the_same_graph_beside_fabro_settings_files() {
             .any(|n| n.name.starts_with(frontend_attractor::PREPARE_NODE_PREFIX)),
         "no prepare node"
     );
-    assert_eq!(beside.params["fabro_hooks"], json!([]));
+    assert_eq!(beside.params["attractor.hooks"], json!([]));
     assert!(!beside.params.contains_key("fabro.launch"));
 }

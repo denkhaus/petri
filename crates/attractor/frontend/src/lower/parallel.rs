@@ -3,11 +3,11 @@
 //! Every branch of a parallel node runs as an internal child invocation, the
 //! way Fabro runs it as a branch task: the branch target is lowered into a
 //! graph of its own, and the parent graph's node for that target becomes a
-//! `fabro/branch` step that starts the child with a snapshot of the parent's
-//! context, waits for it, and returns the branch envelope. The child inherits
-//! the parent's sandbox and workspace and keeps its own context; its changes
-//! come back as output only and never merge into the parent's `kv`. A branch
-//! never follows its target's outgoing edges: every branch routes to the
+//! `attractor/branch` step that starts the child with a snapshot of the
+//! parent's context, waits for it, and returns the branch envelope. The child
+//! inherits the parent's sandbox and workspace and keeps its own context; its
+//! changes come back as output only and never merge into the parent's `kv`. A
+//! branch never follows its target's outgoing edges: every branch routes to the
 //! join, the one direct successor all branch targets share.
 //!
 //! Static branches are the parallel node's outgoing edges, in order, each
@@ -18,7 +18,7 @@
 //! fan-in still fires, while branch maps and the event stream count no
 //! branch for the clone.
 //!
-//! The parallel node itself is the `fabro/fork` step. It runs once per
+//! The parallel node itself is the `attractor/fork` step. It runs once per
 //! visit, before any branch, and takes the fork snapshot of `kv` and, for
 //! agent or prompt targets, of the stage records. It offloads the `for_each`
 //! source list and every other large value to the run's output store, so
@@ -112,7 +112,7 @@ impl Ctx<'_> {
             let Some(position) = ready else {
                 for node in &pending {
                     self.diags.error(
-                        "fabro.parallel.cycle",
+                        "attractor.parallel.cycle",
                         node.span.clone(),
                         format!(
                             "parallel node `{}` is a branch of a parallel node that is a branch of \
@@ -135,7 +135,8 @@ impl Ctx<'_> {
     }
 
     /// The fan-in step: the ordered branch envelopes its inputs carry. A
-    /// prompted fan-in (already a `fabro/prompt` step) reads the same list.
+    /// prompted fan-in (already an `attractor/prompt` step) reads the same
+    /// list.
     fn fan_in_step(&mut self, node: &NodeDecl, id: NodeId) {
         let ordered = self.ordered_results();
         let occurrences = self.ordered_field(FORK_OCCURRENCE_FIELD);
@@ -177,7 +178,7 @@ impl Ctx<'_> {
                 .is_some_and(|c| !c.trim().is_empty())
             {
                 self.diags.error(
-                    "fabro.parallel.conditional_branch",
+                    "attractor.parallel.conditional_branch",
                     edge.span.clone(),
                     "a parallel node's branches are unconditional",
                 );
@@ -185,7 +186,7 @@ impl Ctx<'_> {
         }
         if edges.is_empty() {
             self.diags.error(
-                "fabro.parallel.no_branches",
+                "attractor.parallel.no_branches",
                 node.span.clone(),
                 format!("parallel node `{}` has no branches", node.id),
             );
@@ -218,8 +219,8 @@ impl Ctx<'_> {
         }
     }
 
-    /// The `fabro/fork` step on the parallel node: the fork-time snapshot of
-    /// `kv` (and of the stage records when a branch target renders a
+    /// The `attractor/fork` step on the parallel node: the fork-time snapshot
+    /// of `kv` (and of the stage records when a branch target renders a
     /// preamble), the `for_each` source key it offloads at any size, and the
     /// keys it must keep inline.
     fn fork_step(
@@ -267,7 +268,7 @@ impl Ctx<'_> {
             Some(n) if n > 0 => u32::try_from(n).unwrap_or(u32::MAX),
             Some(0) => {
                 self.diags.warning(
-                    "fabro.max_parallel.normalized",
+                    "attractor.max_parallel.normalized",
                     span,
                     format!(
                         "`max_parallel=0` on `{}` runs one branch at a time, as Fabro does",
@@ -278,7 +279,7 @@ impl Ctx<'_> {
             }
             Some(n) => {
                 self.diags.warning(
-                    "fabro.max_parallel.normalized",
+                    "attractor.max_parallel.normalized",
                     span,
                     format!(
                         "`max_parallel={n}` on `{}` is negative; Fabro reads it as \
@@ -290,7 +291,7 @@ impl Ctx<'_> {
             }
             None => {
                 self.diags.warning(
-                    "fabro.max_parallel.normalized",
+                    "attractor.max_parallel.normalized",
                     span,
                     format!(
                         "`max_parallel={}` on `{}` is not an integer; Fabro reads it as \
@@ -342,7 +343,7 @@ impl Ctx<'_> {
         shared.sort();
         let Some(join) = shared.into_iter().next() else {
             self.diags.error(
-                "fabro.parallel.no_join",
+                "attractor.parallel.no_join",
                 fork.span.clone(),
                 format!(
                     "the branches of parallel node `{}` share no direct successor to join at; \
@@ -356,7 +357,7 @@ impl Ctx<'_> {
             for edge in workflow.outgoing(&exit_of(&branch.to)) {
                 if edge.to != join {
                     self.diags.warning(
-                        "fabro.parallel.branch_edge_ignored",
+                        "attractor.parallel.branch_edge_ignored",
                         edge.span.clone(),
                         format!(
                             "`{} -> {}` is never taken: `{}` runs as a branch of `{}` and returns \
@@ -446,7 +447,7 @@ impl Ctx<'_> {
             let kind = self.kinds.get(&edge.to).copied();
             if matches!(kind, None | Some(Kind::Start | Kind::Exit | Kind::FanIn)) {
                 self.diags.error(
-                    "fabro.parallel.bad_branch_target",
+                    "attractor.parallel.bad_branch_target",
                     edge.to_span.clone(),
                     format!(
                         "`{}` cannot be a branch of parallel node `{}`; a branch target is a \
@@ -553,7 +554,7 @@ impl Ctx<'_> {
         let key = source_key(source);
         if key.is_empty() {
             self.diags.error(
-                "fabro.for_each.source",
+                "attractor.for_each.source",
                 span,
                 format!("`for_each` on `{}` must name a context key", fork.id),
             );
@@ -561,7 +562,7 @@ impl Ctx<'_> {
         }
         if edges.len() != 1 {
             self.diags.error(
-                "fabro.for_each.template_edges",
+                "attractor.for_each.template_edges",
                 fork.span.clone(),
                 format!(
                     "`for_each` node `{}` needs exactly one template edge",
@@ -575,7 +576,7 @@ impl Ctx<'_> {
         let kind = self.kinds[&template.to];
         if !kind.is_llm() {
             self.diags.error(
-                "fabro.for_each.target",
+                "attractor.for_each.target",
                 template.to_span.clone(),
                 format!(
                     "the `for_each` template `{}` must be an agent or prompt node",
@@ -589,7 +590,7 @@ impl Ctx<'_> {
             .is_some_and(|n| n.attrs.contains("for_each"))
         {
             self.diags.error(
-                "fabro.for_each.nested",
+                "attractor.for_each.nested",
                 template.to_span.clone(),
                 "nested `for_each` is not supported",
             );

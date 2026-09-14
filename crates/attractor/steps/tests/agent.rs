@@ -1,4 +1,4 @@
-//! `fabro/agent` against the fake ACP agent Fabro ships, packaged as test
+//! `attractor/agent` against the fake ACP agent Fabro ships, packaged as test
 //! data in `crates/fabro/acceptance/testdata/fake_acp_agent.py`: initialize,
 //! session, one prompt turn, the response text captured, a routing directive
 //! read, permission requests answered, cancellation honoured.

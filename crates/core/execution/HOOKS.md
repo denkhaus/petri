@@ -70,9 +70,9 @@ the local service itself. Both are exercised: the first by
 | `AfterAttempt` | `HookAdapter::prepare_result` | `Adjust` |
 | `AfterVisit` | `HookAdapter::after_record` | none |
 | `RouteSelected` | `HookAdapter::transition` | `Override`, `Block` |
-| `ForkStarted` | the fork node's step (`fabro/fork`), through the `HookServiceHandle`, once per fork visit before any branch; the view is the fork node's | none |
+| `ForkStarted` | the fork node's step (`attractor/fork`), through the `HookServiceHandle`, once per fork visit before any branch; the view is the fork node's | none |
 | `ForkCompleted` | the fan-in step (plain, synthetic, or prompted), through the `HookServiceHandle`, once every branch is in and before the results are published; the view is the fan-in's, the payload `ForkCompletedPayload { fork }` names the fork node | none |
-| `ScopeReady` | the first step to run in a scope's environment (`fabro/stage` at the root workflow's `start`), through the `HookServiceHandle`, once per run, after the checkout seeded the workspace; the view is the step's, the payload `ScopeReadyPayload { scope, workspace }` | `Block` |
+| `ScopeReady` | the first step to run in a scope's environment (`attractor/stage` at the root workflow's `start`), through the `HookServiceHandle`, once per run, after the checkout seeded the workspace; the view is the step's, the payload `ScopeReadyPayload { scope, workspace }` | `Block` |
 | `RunStarted` | the same step, right after `ScopeReady`, once per run; the view is the step's, no payload | `Block` |
 | `RunFinished` | `HookAdapter::run_finished`, from the driver that owns the run (a bare driver, or the coordinator's root invocation) at a terminal exit, before any environment is released; no firing view, payload `RunFinishedPayload { status, failure }`; the report comes back as a note the coordinator records at run level | none |
 | `ScopeReleased` | `HookAdapter::scope_released`, from the driver just before a scope's own environment is released (an inherited sandbox's release reports nothing); a release that is part of the run's end waits for `RunFinished`; no firing view, payload `ScopeReleasedPayload { scope, outcome }`; the report comes back as a note the coordinator records at run level | none |
@@ -110,7 +110,7 @@ delivers `ScopeReady` and `RunStarted` once. A host whose own pipeline
 already ran the `sandbox_ready` and `run_start` phases answers `Proceed` at
 these two points without running hooks: Petri asks once, the service decides
 whether anything runs, and nothing runs twice. The reports of every
-step-asked point ride the public stream as `fabro.hook` events on the
+step-asked point ride the public stream as `attractor.hook` events on the
 asking firing (`EVENTS.md`), where the adapter's ride as `hook` notes.
 
 The two run-level end points carry no firing, so the driver records nothing
@@ -145,7 +145,7 @@ identity, never as the stage's: `HookReport::notes` yields one
 `hook.activity` note per agent event (`HookActivity { hook: { point, hook },
 backend, envelope }`), then the `hook` note; the adapter records them at the
 driver's points, and a step that asks a point itself records the same
-activity notes before its `fabro.hook` event (`attractor_steps::hooks::record_report`).
+activity notes before its `attractor.hook` event (`attractor_steps::hooks::record_report`).
 The projector reads each note as `parsed.hook_activity`, apart from the
 stage's own backend events, so a consumer summing a stage's agent activity
 or its `pebble.usage` never counts a hook's work, and `HookRun::usage` sums

@@ -1,6 +1,6 @@
-//! The real Fabro steps on the host executor: `fabro/command` with stdin and
-//! a routing directive, `fabro/wait`, and `fabro/human` answered through
-//! `Control::Deliver` — with byte-identical replay on every run.
+//! The real Fabro steps on the host executor: `attractor/command` with stdin
+//! and a routing directive, `attractor/wait`, and `attractor/human` answered
+//! through `Control::Deliver` — with byte-identical replay on every run.
 
 use std::fs;
 use std::sync::{Arc, Mutex};

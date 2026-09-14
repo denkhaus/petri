@@ -1,4 +1,4 @@
-//! `fabro/stage`: Fabro's structural stages (`start`, `exit`, a
+//! `attractor/stage`: Fabro's structural stages (`start`, `exit`, a
 //! conditional) as a step that records where its scope runs.
 //!
 //! The engine acquires a scope's environment when the first firing in it is
@@ -153,7 +153,7 @@ pub struct StageStep;
 /// with the sandbox still in place.
 #[async_trait::async_trait]
 impl Step for StageStep {
-    const NAME: &'static str = "fabro/stage";
+    const NAME: &'static str = "attractor/stage";
     type Config = StageConfig;
 
     async fn run(&self, config: StageConfig, ctx: StepCtx) -> Outcome {
@@ -220,7 +220,7 @@ impl Step for StageStep {
 /// points: each is asked once, here. The two run-level points are the root
 /// workflow's alone (its `start` carries the run's hook list); a nested
 /// workflow's `start` asks only its own admission. Every report that says
-/// something is recorded as a `fabro.hook` event on this firing. Returns
+/// something is recorded as an `attractor.hook` event on this firing. Returns
 /// the stage a stopping decision ends the run with.
 async fn start_hooks(
     service: &Arc<dyn HookService>,

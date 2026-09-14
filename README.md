@@ -130,7 +130,7 @@ crates/fabro/acceptance/tests/workflow.rs    Fabro plan §5.2: nested workflows 
 crates/attractor/steps/tests/manager.rs          readiness item 4: the manager loop under a controlled clock (polls, stop condition, exhaustion, defaults, reattach, cancel)
 crates/attractor/steps/tests/parallel.rs         readiness item 3: branches as child invocations; static, mixed and all-failed forks, promotion, duplicate targets, empty `for_each`, item labels, repeated forks, nested forks, cancellation, resume; the fork snapshot offloaded (a 50-item fork's children, resume through the store, two forks in sequence)
 crates/core/execution/tests/admission.rs      readiness item 3: `max_parallel` as a bound on a fork's live children (dispatch in declaration order, a branch in backoff holds none, cancel while queued, redispatch on resume) and the run-wide 10,000 invocation ceiling (boundary, nested, finished children, lower limits, refusals, resume)
-crates/attractor/steps/tests/prompt.rs           readiness item 4: `fabro/prompt` against a scripted model client, contracts and repair turns, the prompted fan-in, prompt events
+crates/attractor/steps/tests/prompt.rs           readiness item 4: `attractor/prompt` against a scripted model client, contracts and repair turns, the prompted fan-in, prompt events
 crates/fabro/acceptance/tests/e2e.rs         Fabro plan §7 6: gh-list, hello, a for_each fan-out, random selection, two 1,000-item forks in one run, end to end
 crates/petri/cli/tests/fabro_cli.rs          Fabro plan §6: `petri run --auto-approve` answers a human gate
 crates/petri/cli/tests/inspect_cli.rs        black box phase 2: `petri inspect` over finished, restarted, failed, cancelled and damaged run dirs
@@ -1049,7 +1049,7 @@ paths, and `run: <status>`. The exit code is 0 for success, 1 for a failed or
 cancelled run, 2 for a usage error, 3 for a host error, and 4 when the run
 finished but its interview did not go as scripted.
 
-**Answering questions.** A `fabro/human` gate, and a native agent's question
+**Answering questions.** A `attractor/human` gate, and a native agent's question
 tool, ask through the core `Question` event; the host's `Interviewer` answers
 (`execution::Interviewer`, an open trait a product host implements too). The
 CLI ships three, one per option, and they exclude one another:

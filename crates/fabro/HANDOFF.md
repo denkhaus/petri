@@ -12,7 +12,12 @@ the store seam, the run directory by default), the public event stream and
 the extension points. Pebble owns the agent loop.
 `lithos-llm` owns provider transport. Fabro owns its platform: Git
 checkpoints and branches, the database, the UI and API, publication,
-notifications, the vault. Nothing in Petri production code depends on,
+notifications, the vault. Inside Petri, the Fabro frontend
+(`crates/fabro/frontend`) owns Fabro's settings layers (`workflow.toml`,
+`.fabro/project.toml`, the user settings) and the launch precedence; the
+language and the step kinds a Fabro workflow runs on are the Attractor
+component's (`crates/attractor`), and their identifiers carry the
+`attractor` prefix. Nothing in Petri production code depends on,
 links, or launches Fabro (`crates/petri/lib/tests/fabro_dependencies.rs`,
 `crates/petri/cli/tests/standalone.rs`); every adapter that calls a Fabro
 handler lives in Fabro.
@@ -81,7 +86,7 @@ subset; the unconfigured path stays the standalone runner.
 - **Agent sessions.** Pebble's session id, parent session id, stream id and
   sequence, and tool call id are in every backend envelope a
   `step.progress.recorded` forwards as recorded, never rewritten. A retained thread keeps one session across the nodes
-  that share it; `fabro.thread` names the thread and fidelity per node.
+  that share it; `attractor.thread` names the thread and fidelity per node.
 - **Model routes.** `fabro.fallback.route` carries the position in the plan,
   the provider and model, whether the session was reused, and the session id.
 - **Sandboxes and workspaces.** `invocation.declared`'s `sandbox` is the binding;

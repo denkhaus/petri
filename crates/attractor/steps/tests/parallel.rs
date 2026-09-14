@@ -679,12 +679,12 @@ async fn an_empty_for_each_list_joins_with_no_branches_and_no_child() {
         ForkDisposition::Joined,
         Vec::new()
     )]);
-    let completed = customs(&events, "fabro.parallel.completed");
+    let completed = customs(&events, "attractor.parallel.completed");
     assert_eq!(completed.len(), 1, "{completed:#?}");
     assert_eq!(completed[0]["branch_count"], json!(0));
     assert!(
-        customs(&events, "fabro.parallel.branch.started").is_empty()
-            && customs(&events, "fabro.parallel.branch.completed").is_empty(),
+        customs(&events, "attractor.parallel.branch.started").is_empty()
+            && customs(&events, "attractor.parallel.branch.completed").is_empty(),
         "the placeholder clone reports no branch lifecycle"
     );
     // The roles as the expansion left them: the fork's first events precede
@@ -818,8 +818,8 @@ async fn a_repeated_fork_publishes_results_per_visit_with_its_own_children() {
     // The Fabro events of each visit name the same occurrence, by the
     // fork's firing in the execution.
     for kind in [
-        "fabro.parallel.branch.started",
-        "fabro.parallel.branch.completed",
+        "attractor.parallel.branch.started",
+        "attractor.parallel.branch.completed",
     ] {
         let mut firings: Vec<u64> = customs(&events, kind)
             .iter()
@@ -837,7 +837,7 @@ async fn a_repeated_fork_publishes_results_per_visit_with_its_own_children() {
             "{kind}"
         );
     }
-    let completed = customs(&events, "fabro.parallel.completed");
+    let completed = customs(&events, "attractor.parallel.completed");
     assert_eq!(
         completed.iter().map(custom_occurrence).collect::<Vec<_>>(),
         vec![first.firing.raw(), second.firing.raw()]
@@ -929,7 +929,7 @@ async fn a_nested_fork_runs_inside_its_branch_and_reports_its_own_results() {
         (inner.clone(), vec![0, 1]),
         (outer.clone(), vec![0, 1]),
     ]);
-    let completed = customs(&events, "fabro.parallel.completed");
+    let completed = customs(&events, "attractor.parallel.completed");
     assert_eq!(completed.len(), 2, "{completed:#?}");
     let of = |fork: &str| {
         completed
@@ -1020,9 +1020,9 @@ async fn a_clean_cancel_during_work_closes_the_branches_and_the_fork() {
     .await;
     assert_eq!(report.status, RunStatus::Cancelled);
 
-    let started = customs(&events, "fabro.parallel.branch.started");
+    let started = customs(&events, "attractor.parallel.branch.started");
     assert_eq!(started.len(), 2, "{started:#?}");
-    let completed = customs(&events, "fabro.parallel.branch.completed");
+    let completed = customs(&events, "attractor.parallel.branch.completed");
     assert_eq!(completed.len(), 2, "{completed:#?}");
     for event in &completed {
         assert!(event["index"].is_u64(), "{event}");
@@ -1032,7 +1032,7 @@ async fn a_clean_cancel_during_work_closes_the_branches_and_the_fork() {
         assert!(event["invocation"].is_u64(), "{event}");
     }
     assert!(
-        customs(&events, "fabro.parallel.completed").is_empty(),
+        customs(&events, "attractor.parallel.completed").is_empty(),
         "the fan-in never ran, so no group completion is claimed"
     );
     assert_eq!(branch_closes(&events), vec![
@@ -1114,10 +1114,10 @@ async fn a_cancel_before_admission_records_a_branch_that_never_started() {
     assert_eq!(report.status, RunStatus::Cancelled);
     assert!(!workspace.join("started_b").exists(), "b never ran");
 
-    let started = customs(&events, "fabro.parallel.branch.started");
+    let started = customs(&events, "attractor.parallel.branch.started");
     assert_eq!(started.len(), 1, "{started:#?}");
     assert_eq!(started[0]["branch"], json!("a"));
-    let completed = customs(&events, "fabro.parallel.branch.completed");
+    let completed = customs(&events, "attractor.parallel.branch.completed");
     assert_eq!(completed.len(), 2, "{completed:#?}");
     let of = |branch: &str| {
         completed
@@ -1189,7 +1189,7 @@ async fn a_cancel_before_the_fan_in_keeps_the_finished_branch_result() {
     .await;
     assert_eq!(report.status, RunStatus::Cancelled);
 
-    let completed = customs(&events, "fabro.parallel.branch.completed");
+    let completed = customs(&events, "attractor.parallel.branch.completed");
     assert_eq!(completed.len(), 2, "{completed:#?}");
     let of = |branch: &str| {
         completed
@@ -1201,7 +1201,7 @@ async fn a_cancel_before_the_fan_in_keeps_the_finished_branch_result() {
     assert_eq!(of("a")["disposition"], json!("completed"), "{completed:#?}");
     assert_eq!(of("a")["status"], json!("succeeded"));
     assert_eq!(of("b")["disposition"], json!("cancelled"));
-    assert!(customs(&events, "fabro.parallel.completed").is_empty());
+    assert!(customs(&events, "attractor.parallel.completed").is_empty());
     assert_eq!(fork_closes(&events), vec![(
         ForkDisposition::Cancelled,
         vec![(0, "success".to_owned()), (1, "cancelled".to_owned()),]
@@ -1253,7 +1253,7 @@ async fn a_kill_after_the_cancel_closes_the_fork_as_killed() {
     .await;
     assert_eq!(report.status, RunStatus::Cancelled);
 
-    let completed = customs(&events, "fabro.parallel.branch.completed");
+    let completed = customs(&events, "attractor.parallel.branch.completed");
     assert_eq!(completed.len(), 2, "{completed:#?}");
     for event in &completed {
         assert_eq!(event["started"], json!(true), "{event}");

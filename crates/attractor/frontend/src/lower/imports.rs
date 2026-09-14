@@ -25,7 +25,7 @@ use crate::model::{AttrValue, Attrs, EdgeDecl, NodeDecl, Workflow};
 use crate::{dot, model};
 
 /// The diagnostic code every import problem carries, Fabro's `import_error`.
-pub const IMPORT_ERROR: &str = "fabro.import";
+pub const IMPORT_ERROR: &str = "attractor.import";
 
 /// The placeholder attributes an import may carry beside `import` and
 /// `class`; each becomes a default the imported nodes inherit.
@@ -145,7 +145,7 @@ fn expand_one(
     let mut imported = model::build(&parsed);
     if imported.attrs.contains("model_stylesheet") {
         diags.warning(
-            "fabro.imported_model_stylesheet_ignored",
+            "attractor.imported_model_stylesheet_ignored",
             Span::file(&resolved),
             format!(
                 "`{resolved}` sets a `model_stylesheet`, which an imported workflow does not \

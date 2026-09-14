@@ -69,7 +69,7 @@ fn petri_check_lowers_a_fabro_file_and_warns_on_the_deprecated_spelling() {
         String::from_utf8_lossy(&ok.stderr)
     );
     let printed = String::from_utf8_lossy(&ok.stdout);
-    assert!(printed.contains("step=fabro/agent"), "{printed}");
+    assert!(printed.contains("step=attractor/agent"), "{printed}");
     let shimmed = Command::new(env!("CARGO_BIN_EXE_petri"))
         .args(["check"])
         .arg(&bad)
@@ -141,7 +141,7 @@ fn petri_check_without_inputs_warns_where_a_run_would_stop() {
         .expect("petri runs");
     let stderr = String::from_utf8_lossy(&checked.stderr);
     assert!(checked.status.success(), "{stderr}");
-    assert!(stderr.contains("fabro.unbound_input"), "{stderr}");
+    assert!(stderr.contains("attractor.unbound_input"), "{stderr}");
     let bound = Command::new(env!("CARGO_BIN_EXE_petri"))
         .args(["check", "--input", "pr=42"])
         .arg(&workflow)

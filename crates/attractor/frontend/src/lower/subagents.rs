@@ -5,7 +5,7 @@
 //! that turns them on or off: `[run.agent]` has no such key and its parser
 //! refuses one, and no node attribute exists either. It hands Pebble
 //! `SubagentOptions::enabled()` with Pebble's defaults (no depth limit, four
-//! open sessions per tree). Petri keeps the same shape: every `fabro/agent`
+//! open sessions per tree). Petri keeps the same shape: every `attractor/agent`
 //! node carries this configuration with those defaults, the `subagents` key
 //! stays refused, and what Petri decides is the bound Pebble's agent tree
 //! runs under.

@@ -9,8 +9,8 @@
 //! What a run reports about its routes is read from the event log it names
 //! on stderr (`event log: <path>`), which is what a person or a host reads
 //! after the process exits: Petri's own `StepEvent::Custom` payloads (the
-//! fallback plan, `fabro.fallback.plan`; the thread resolution,
-//! `fabro.thread`), and Pebble's events inside the `pebble` envelope
+//! fallback plan, `attractor.fallback.plan`; the thread resolution,
+//! `attractor.thread`), and Pebble's events inside the `pebble` envelope
 //! (`RouteFailover`, `RouteFailoverStopped`, `SessionStarted`,
 //! `AssistantMessage`, ...), each attributed to its node.
 

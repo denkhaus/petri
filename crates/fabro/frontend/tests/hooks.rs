@@ -93,7 +93,7 @@ impl Customs {
             .collect()
     }
 
-    /// The reports steps drove themselves (`fabro.hook`).
+    /// The reports steps drove themselves (`attractor.hook`).
     fn reports(&self) -> Vec<(String, Value)> {
         self.all()
             .into_iter()

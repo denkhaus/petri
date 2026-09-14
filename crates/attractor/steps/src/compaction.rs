@@ -79,7 +79,7 @@ pub struct CompactionPolicyHandle(pub Arc<dyn CompactionPolicy>);
 /// `CompactionStarted`, `CompactionCompleted`, `CompactionFailed` and
 /// `CompactionCancelled` events arrive live through the `pebble` envelope; this
 /// one attributes the completion to the node and its attempt.
-pub const EVENT: &str = "fabro.compaction";
+pub const EVENT: &str = "attractor.compaction";
 
 /// Fabro's compaction settings as Pebble options.
 #[must_use]

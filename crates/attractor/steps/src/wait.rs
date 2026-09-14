@@ -1,4 +1,4 @@
-//! `fabro/wait`: sleep for the node's `duration`, cancellation aware.
+//! `attractor/wait`: sleep for the node's `duration`, cancellation aware.
 
 use std::time::Duration;
 
@@ -24,7 +24,7 @@ pub struct WaitStep;
 
 #[async_trait::async_trait]
 impl Step for WaitStep {
-    const NAME: &'static str = "fabro/wait";
+    const NAME: &'static str = "attractor/wait";
     type Config = WaitConfig;
 
     async fn run(&self, config: WaitConfig, mut ctx: StepCtx) -> Outcome {

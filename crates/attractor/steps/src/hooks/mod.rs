@@ -2,14 +2,14 @@
 //!
 //! [`LocalHooks`] is the `execution::hooks::HookService` the Fabro component
 //! installs. Every caller reaches it as a `HookService`: the `HookAdapter`
-//! asks it at the driver's points; the `fabro/stage` step asks it at `start`
-//! for `sandbox_ready`, `run_start` and the start stage's own admission; the
-//! fork and fan-in steps ask it for `parallel_start` and `parallel_complete`;
-//! the native agent's tool middleware ([`tools`]) and the ACP client ask it
-//! at the tool boundary. Each of them goes through the `HookServiceHandle`
-//! capability, the handle a host's replacement service would be behind, so a
-//! configured hook runs once whoever serves the point, and a replacement
-//! receives every point.
+//! asks it at the driver's points; the `attractor/stage` step asks it at
+//! `start` for `sandbox_ready`, `run_start` and the start stage's own
+//! admission; the fork and fan-in steps ask it for `parallel_start` and
+//! `parallel_complete`; the native agent's tool middleware ([`tools`]) and the
+//! ACP client ask it at the tool boundary. Each of them goes through the
+//! `HookServiceHandle` capability, the handle a host's replacement service
+//! would be behind, so a configured hook runs once whoever serves the point,
+//! and a replacement receives every point.
 //!
 //! The service configures itself from the first firing it sees whose step
 //! config carries the run's `hooks` list: the lowering puts the merged
@@ -57,12 +57,12 @@ use crate::stage::{RunInfo, ScopeEnvironments};
 /// The `kind` of the `StepEvent::Custom` payload a report a step asked for
 /// itself rides on (the start stage's points, a fork's, the tool boundary's):
 /// `{ kind, node, firing, attempt, event, report }`.
-pub const REPORT_EVENT: &str = "fabro.hook";
+pub const REPORT_EVENT: &str = "attractor.hook";
 
 /// The `kind` of the `StepEvent::Custom` payload an enforcement warning rides
 /// on: `{ kind, node, firing, attempt, backend, hook, event, boundary,
 /// message }`.
-pub const WARNING_EVENT: &str = "fabro.hook.warning";
+pub const WARNING_EVENT: &str = "attractor.hook.warning";
 
 /// The failure class of a stage a blocking run-level hook stopped.
 pub const BLOCKED_CLASS: &str = "hook_blocked";

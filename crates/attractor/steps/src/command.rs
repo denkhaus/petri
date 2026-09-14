@@ -1,4 +1,4 @@
-//! `fabro/command`: Fabro's command node. A bash (or python) script in the
+//! `attractor/command`: Fabro's command node. A bash (or python) script in the
 //! scope environment, its combined output captured, an optional stdin from
 //! the run context, and — with `output_schema="routing"` — the last JSON
 //! object of the output read as a routing directive.
@@ -79,7 +79,7 @@ pub struct CommandStep;
 
 #[async_trait::async_trait]
 impl Step for CommandStep {
-    const NAME: &'static str = "fabro/command";
+    const NAME: &'static str = "attractor/command";
     type Config = CommandConfig;
 
     async fn run(&self, config: CommandConfig, ctx: StepCtx) -> Outcome {

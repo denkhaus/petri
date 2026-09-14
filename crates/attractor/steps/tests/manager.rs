@@ -1,4 +1,4 @@
-//! The manager loop (`fabro/workflow`) under a controlled clock, against a
+//! The manager loop (`attractor/workflow`) under a controlled clock, against a
 //! fake invocation client: one child per manager attempt, reattached on a
 //! re-dispatch of the same attempt; Fabro's poll interval and `max_cycles`
 //! defaults; the stop condition evaluated at each poll against the parent
@@ -236,7 +236,7 @@ fn finished(status: RunStatus, context: &[(&str, Value)]) -> InvocationResult {
 
 #[test]
 fn the_step_registers_under_the_workflow_kind() {
-    assert_eq!(WORKFLOW_KIND.as_str(), "fabro/workflow");
+    assert_eq!(WORKFLOW_KIND.as_str(), "attractor/workflow");
     assert_eq!(DEFAULT_POLL_INTERVAL_MS, 45_000);
     assert_eq!(DEFAULT_MAX_CYCLES, 1000);
 }
@@ -448,13 +448,13 @@ async fn max_cycles_normalizes_as_fabro_does() {
     let (negative, codes) = graph(", manager.max_cycles=-4");
     assert_eq!(negative["max_cycles"], json!(1000));
     assert!(
-        codes.contains(&"fabro.manager.max_cycles".to_string()),
+        codes.contains(&"attractor.manager.max_cycles".to_string()),
         "{codes:?}"
     );
     let (text, codes) = graph(r#", manager.max_cycles="many""#);
     assert_eq!(text["max_cycles"], json!(1000));
     assert!(
-        codes.contains(&"fabro.manager.max_cycles".to_string()),
+        codes.contains(&"attractor.manager.max_cycles".to_string()),
         "{codes:?}"
     );
     assert!(

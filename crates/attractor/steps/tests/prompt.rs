@@ -1,4 +1,4 @@
-//! `fabro/prompt` against a scripted `lithos-llm` client: one model call
+//! `attractor/prompt` against a scripted `lithos-llm` client: one model call
 //! with no tools, the output contract and its repair turns, the result
 //! mapping, the ACP rejection, the prompted fan-in, and the events a host
 //! maps onto Fabro's `stage.prompt` and `prompt.completed`.
@@ -158,7 +158,7 @@ async fn a_prompt_node_makes_one_tool_free_call_and_writes_the_response() {
         .filter(|e| {
             !e["kind"]
                 .as_str()
-                .is_some_and(|k| k.starts_with("fabro.fallback."))
+                .is_some_and(|k| k.starts_with("attractor.fallback."))
         })
         .collect();
     assert!(
@@ -294,7 +294,7 @@ fn acp_on_a_prompt_node_is_refused_as_fabro_refuses_it() {
         .map(|d| d.code.to_string())
         .collect();
     assert!(
-        codes.contains(&"fabro.prompt_backend".to_string()),
+        codes.contains(&"attractor.prompt_backend".to_string()),
         "{codes:?}"
     );
     assert!(

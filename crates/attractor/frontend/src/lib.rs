@@ -18,13 +18,13 @@
 //! | `Mdiamond` start              | `noop`, the graph entry                          |
 //! | `Msquare` exit                | `noop`; `Completion::TerminalNode`               |
 //! | `diamond` conditional         | `noop`                                           |
-//! | `box` agent, `tab` prompt     | `fabro/agent`                                    |
-//! | `parallelogram` command       | `fabro/command`                                  |
-//! | `hexagon` human               | `fabro/human`                                    |
+//! | `box` agent, `tab` prompt     | `attractor/agent`                                    |
+//! | `parallelogram` command       | `attractor/command`                                  |
+//! | `hexagon` human               | `attractor/human`                                    |
 //! | `component` parallel          | fan-out groups, or `Expansion::ForEach`          |
 //! | `tripleoctagon` fan-in        | `noop`, `join: all`, output = branch results     |
-//! | `insulator` wait              | `fabro/wait`                                     |
-//! | `house` manager loop          | `fabro/workflow`                                 |
+//! | `insulator` wait              | `attractor/wait`                                     |
+//! | `house` manager loop          | `attractor/workflow`                                 |
 //! | edge selection                | one `Tiered` group per node, four tiers          |
 //! | `goal_gate`                   | a `goal_check` noop before exit with back arms   |
 //! | `max_visits`, unlimited       | `Budget.max_firings`, capped at 500              |

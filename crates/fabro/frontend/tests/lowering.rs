@@ -44,7 +44,8 @@ fn file_references_and_workflow_toml_defaults_resolve_through_the_file_source() 
         a [prompt="@missing.md"]
         start -> a -> exit
     "#))
-        .contains(&"fabro.file_not_found".to_string())
+        .contains(&"attractor.file_not_found".to_string()),
+        "a missing `@file` prompt reference is the language's diagnostic"
     );
 }
 
@@ -332,7 +333,7 @@ fn run_environment_and_prepare_lower_onto_the_scope_and_the_graph() {
         clash
             .diagnostics
             .iter()
-            .any(|d| d.code == "fabro.reserved_node_id"),
+            .any(|d| d.code == "attractor.reserved_node_id"),
         "{:?}",
         clash.diagnostics
     );
@@ -473,7 +474,7 @@ fn hooks_load_from_every_layer_and_merge_by_id() {
     );
     assert!(lowered.diagnostics.errors().count() == 0, "{codes:?}");
     let graph = lowered.graph.expect("lowers");
-    let hooks = graph.params["fabro_hooks"]
+    let hooks = graph.params["attractor.hooks"]
         .as_array()
         .expect("hook list")
         .clone();

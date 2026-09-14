@@ -3,9 +3,10 @@
 //! injecting the failures. Every case runs the real `petri` binary with an
 //! isolated environment, one twin per provider on loopback, and reads what
 //! the run reported: its status, the workspace, the twins' request logs, and
-//! the event log the run names, where the plan is Petri's `fabro.fallback.plan`
-//! and every route fact is Pebble's own event (`SessionStarted`,
-//! `RouteFailover`, `RouteFailoverStopped`, `AssistantMessage`).
+//! the event log the run names, where the plan is Petri's
+//! `attractor.fallback.plan` and every route fact is Pebble's own event
+//! (`SessionStarted`, `RouteFailover`, `RouteFailoverStopped`,
+//! `AssistantMessage`).
 //!
 //! The expected request sequences are derived from the pinned Fabro's
 //! source (at `05ebd0fd`: `handler/llm/fallback.rs` `fallback_plan` and
@@ -92,7 +93,7 @@ fn plan_routes(records: &[Value]) -> Vec<String> {
 }
 
 fn plan_routes_of(records: &[Value], node: &str) -> Vec<String> {
-    let plan = failures::of_node(records, node, "fabro.fallback.plan");
+    let plan = failures::of_node(records, node, "attractor.fallback.plan");
     assert_eq!(plan.len(), 1, "one plan per stage: {records:?}");
     plan[0]["routes"]
         .as_array()
@@ -196,7 +197,7 @@ async fn a_successful_primary_request_never_leaves_its_route() {
     assert!(failovers(&finished.run_dir, "agent").is_empty());
     assert!(stops(&finished.run_dir, "agent").is_empty());
     assert_eq!(sessions(&finished.run_dir, "agent"), ["openai/gpt-5.6-sol"]);
-    let thread = &failures::of_node(&records, "agent", "fabro.thread")[0];
+    let thread = &failures::of_node(&records, "agent", "attractor.thread")[0];
     assert_eq!(thread["reused"], json!(false));
     assert!(
         !finished.stderr.contains("model fallback:"),
@@ -929,7 +930,7 @@ async fn a_workflow_retry_is_not_a_failover() {
         "the chain never ran"
     );
     let records = failures::records(&finished.run_dir);
-    let plans = failures::of_node(&records, "agent", "fabro.fallback.plan");
+    let plans = failures::of_node(&records, "agent", "attractor.fallback.plan");
     assert_eq!(plans.len(), 2, "one plan per firing: {records:?}");
     assert_ne!(plans[0]["firing"], plans[1]["firing"]);
     assert!(failovers(&finished.run_dir, "agent").is_empty());
@@ -998,7 +999,7 @@ async fn reasoning_effort_maps_per_target_and_unfit_targets_are_skipped() {
         "openai/gpt-5.6-sol",
         "anthropic/claude-sonnet-5"
     ]);
-    let plan = &failures::of_node(&records, "agent", "fabro.fallback.plan")[0];
+    let plan = &failures::of_node(&records, "agent", "attractor.fallback.plan")[0];
     assert_eq!(plan["routes"][1]["reasoning_effort"], json!("high"));
     let notices = plan["notices"].as_array().expect("notices");
     assert_eq!(notices.len(), 1, "{notices:?}");
@@ -1053,7 +1054,7 @@ async fn reasoning_effort_maps_per_target_and_unfit_targets_are_skipped() {
     );
     let records = failures::records(&finished.run_dir);
     assert_eq!(plan_routes(&records), ["openai/gpt-5.6-sol"]);
-    let plan = &failures::of_node(&records, "agent", "fabro.fallback.plan")[0];
+    let plan = &failures::of_node(&records, "agent", "attractor.fallback.plan")[0];
     let codes: Vec<&str> = plan["notices"]
         .as_array()
         .expect("notices")
@@ -1291,15 +1292,15 @@ async fn a_retained_thread_continues_on_the_fallback_route() {
     );
     let records = failures::records(&finished.run_dir);
     assert_eq!(
-        failures::of_node(&records, "plan", "fabro.fallback.plan").len(),
+        failures::of_node(&records, "plan", "attractor.fallback.plan").len(),
         1
     );
     assert_eq!(failovers(&finished.run_dir, "plan").len(), 1);
     assert!(
-        failures::of_node(&records, "implement", "fabro.fallback.plan").is_empty(),
+        failures::of_node(&records, "implement", "attractor.fallback.plan").is_empty(),
         "a reused thread has no plan of its own: {records:?}"
     );
-    let reused = &failures::of_node(&records, "implement", "fabro.thread")[0];
+    let reused = &failures::of_node(&records, "implement", "attractor.thread")[0];
     assert_eq!(reused["reused"], json!(true));
     // The reused thread resumes on the route it reached and moves no further.
     assert_eq!(sessions(&finished.run_dir, "implement"), [
@@ -1308,7 +1309,7 @@ async fn a_retained_thread_continues_on_the_fallback_route() {
     assert!(failovers(&finished.run_dir, "implement").is_empty());
     // A node off the thread starts a new plan on the primary.
     assert_eq!(
-        failures::of_node(&records, "review", "fabro.fallback.plan").len(),
+        failures::of_node(&records, "review", "attractor.fallback.plan").len(),
         1
     );
     assert_eq!(sessions(&finished.run_dir, "review"), [
@@ -1391,7 +1392,7 @@ async fn a_prompt_node_fails_over_and_repairs_on_its_plan() {
     ]);
     // A prompt node runs no session, so no Pebble event describes its
     // move: it is reported on the node's stderr, and the calls that
-    // answered are counted on `fabro.prompt.completed`.
+    // answered are counted on `attractor.prompt.completed`.
     assert!(
         finished.stderr.contains(
             "model fallback: openai/gpt-5.6-sol failed (quota_exceeded); continuing on \
@@ -1400,7 +1401,7 @@ async fn a_prompt_node_fails_over_and_repairs_on_its_plan() {
         "{}",
         finished.stderr
     );
-    let completed = &failures::of_node(&records, "summary", "fabro.prompt.completed")[0];
+    let completed = &failures::of_node(&records, "summary", "attractor.prompt.completed")[0];
     assert_eq!(completed["outcome"], json!("succeeded"));
     assert_eq!(completed["calls"], json!(2), "{completed}");
     assert_eq!(completed["repairs"], json!(1), "{completed}");

@@ -67,7 +67,7 @@ fn every_corpus_workflow_lowers_or_is_rejected_specifically() {
             .join("\n")
     );
     // The Attractor fixtures are the dialect boundary: one that uses an
-    // Attractor spelling is rejected as `unsupported.attractor` (or another
+    // Attractor spelling is rejected as `unsupported.legacy_dialect` (or another
     // specific code), never as a generic error; one written in the Fabro
     // subset lowers like any Fabro file.
     for outcome in outcomes.iter().filter(|o| o.is_attractor()) {

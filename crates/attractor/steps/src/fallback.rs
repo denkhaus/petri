@@ -84,7 +84,7 @@ use crate::pebble::speed_of;
 /// level, message}] }`. `routes[0]` is the original route. The only
 /// `StepEvent::Custom` kind of this module: the routes a prompt then ran on
 /// are Pebble's `RouteFailover` and `RouteFailoverStopped` events.
-pub const PLAN_EVENT: &str = "fabro.fallback.plan";
+pub const PLAN_EVENT: &str = "attractor.fallback.plan";
 
 /// One route a stage runs on: a provider and a catalog model id, with the
 /// controls the request carries.

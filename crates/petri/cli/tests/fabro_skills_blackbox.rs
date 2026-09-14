@@ -211,7 +211,7 @@ async fn skills_resolve_in_fabros_order_and_the_repository_wins_through_the_bina
     );
 
     // Petri's record of the directories, in Fabro's order.
-    let resolved = persisted_events(&case.run_dir, "fabro.skills");
+    let resolved = persisted_events(&case.run_dir, "attractor.skills");
     assert_eq!(resolved.len(), 1, "{resolved:?}");
     let sources: Vec<&str> = resolved[0]["dirs"]
         .as_array()
@@ -261,7 +261,7 @@ async fn skills_resolve_in_fabros_order_and_the_repository_wins_through_the_bina
     );
 
     // The broken files: a warning event each, and a terminal line each.
-    let warnings = persisted_events(&case.run_dir, "fabro.skills.warning");
+    let warnings = persisted_events(&case.run_dir, "attractor.skills.warning");
     let mut skipped: Vec<String> = warnings
         .iter()
         .map(|w| {
@@ -597,7 +597,7 @@ async fn a_skill_loaded_in_one_branch_does_not_reach_its_sibling() {
             "{request}"
         );
     }
-    let resolved = persisted_events(&case.run_dir, "fabro.skills");
+    let resolved = persisted_events(&case.run_dir, "attractor.skills");
     let mut nodes: Vec<&str> = resolved
         .iter()
         .map(|e| e["node"].as_str().expect("node"))

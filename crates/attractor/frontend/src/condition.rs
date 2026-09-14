@@ -382,7 +382,7 @@ impl Builder<'_> {
                 Op::Truthy => self.table.lit(true),
                 _ => {
                     self.error(
-                        "fabro.condition.outcome_op",
+                        "attractor.condition.outcome_op",
                         "`outcome` supports only `=` and `!=`".into(),
                     );
                     falsy
@@ -417,7 +417,7 @@ impl Builder<'_> {
                 // false, which Fabro also does — but silently.
                 let Ok(number) = clause.value.trim().parse::<f64>() else {
                     self.diags.warning(
-                        "fabro.condition.non_numeric",
+                        "attractor.condition.non_numeric",
                         self.span.clone(),
                         format!(
                             "`{}` compares against `{}`, which is not a number, so the clause \
@@ -457,7 +457,7 @@ impl Builder<'_> {
             Op::Matches => {
                 if let Err(error) = regex::Regex::new(&clause.value) {
                     self.error(
-                        "fabro.condition.regex",
+                        "attractor.condition.regex",
                         format!("`{}` is not a valid regex: {error}", clause.value),
                     );
                     return falsy;
@@ -517,7 +517,7 @@ pub fn lower(
         Ok(condition) => condition,
         Err(error) => {
             diags.error(
-                "fabro.condition.syntax",
+                "attractor.condition.syntax",
                 span.clone(),
                 format!("condition `{text}`: {error}"),
             );

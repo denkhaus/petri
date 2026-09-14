@@ -317,7 +317,7 @@ fn backend_selection_inherits_and_accepts_stylesheets() {
         invalid
             .diagnostics
             .iter()
-            .any(|d| d.code == "fabro.bad_backend")
+            .any(|d| d.code == "attractor.bad_backend")
     );
 }
 

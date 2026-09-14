@@ -1,4 +1,4 @@
-//! `fabro/prompt`: Fabro's prompt node (`tab`), and a fan-in with a
+//! `attractor/prompt`: Fabro's prompt node (`tab`), and a fan-in with a
 //! `prompt`. One model call through the application's `lithos-llm` client,
 //! with no agent tools and no coding-agent loop. Petri owns the prompt
 //! assembly, the output contract, the repair turns and the result mapping;
@@ -64,12 +64,12 @@ const LAST_RESPONSE_CHARS: usize = 200;
 
 /// The `kind` of the `StepEvent::Custom` payload emitted before the first
 /// model call: `{ kind, node, firing, attempt, model, prompt, sources }`.
-pub const PROMPT_EVENT: &str = "fabro.prompt";
+pub const PROMPT_EVENT: &str = "attractor.prompt";
 
 /// The `kind` of the `StepEvent::Custom` payload emitted after the last
 /// model call: `{ kind, node, firing, attempt, model, outcome, response,
 /// calls, repairs, usage, duration_ms }`; `usage` is lithos-llm's `Usage`.
-pub const COMPLETED_EVENT: &str = "fabro.prompt.completed";
+pub const COMPLETED_EVENT: &str = "attractor.prompt.completed";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -250,7 +250,7 @@ impl PromptConfig {
 
 #[async_trait::async_trait]
 impl Step for PromptStep {
-    const NAME: &'static str = "fabro/prompt";
+    const NAME: &'static str = "attractor/prompt";
     type Config = PromptConfig;
 
     async fn run(&self, mut config: PromptConfig, mut ctx: StepCtx) -> Outcome {

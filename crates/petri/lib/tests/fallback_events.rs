@@ -2,7 +2,7 @@
 //! `RunEvent`s alone can rebuild a stage's fallback plan, the routes it ran
 //! on, the failover decision with its typed error, the accounting per route,
 //! and the terminal outcome. The plan is Petri's own event
-//! (`fabro.fallback.plan`); every other fact is Pebble's, on the
+//! (`attractor.fallback.plan`); every other fact is Pebble's, on the
 //! `agent_activity` stream: `SessionStarted` names each route, `RouteFailover`
 //! the move with the failed route's usage and the typed error,
 //! `RouteFailoverStopped` the stop and its reason, `AssistantMessage` each

@@ -1,4 +1,4 @@
-//! `fabro/human`: a human gate. The question is built from the node's
+//! `attractor/human`: a human gate. The question is built from the node's
 //! outgoing edges, emitted as the core `Question` event, and answered through
 //! `Control::Deliver`. The answer becomes the reported label (so the
 //! preferred-label tier routes) and the suggested target. A cancel fails
@@ -365,7 +365,7 @@ impl HumanConfig {
 
 #[async_trait::async_trait]
 impl Step for HumanStep {
-    const NAME: &'static str = "fabro/human";
+    const NAME: &'static str = "attractor/human";
     type Config = HumanConfig;
 
     async fn run(&self, config: HumanConfig, mut ctx: StepCtx) -> Outcome {

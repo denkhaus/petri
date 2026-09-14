@@ -31,7 +31,7 @@ use tokio::task;
 pub const CLASS: &str = "checkout";
 
 /// The event kind that records a delivered checkout.
-pub const EVENT_KIND: &str = "fabro.checkout";
+pub const EVENT_KIND: &str = "attractor.checkout";
 
 /// The archive's name inside the workspace while it is extracted.
 const ARCHIVE: &str = ".petri-checkout.tar";

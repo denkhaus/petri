@@ -168,7 +168,7 @@ never in context.
 | all `failed` | `failed` (the node fails with "All parallel branches failed"; `jump_to_node` is cleared) |
 | any other mix | `partially_succeeded` |
 | empty `for_each` list | `succeeded`; the node still jumps to the join (`find_join_node` is called with the template target, lines 703 to 713) |
-| empty static list | `partially_succeeded` (Petri's frontend rejects this shape at lowering with `fabro.parallel.no_branches`, so it is unreachable under Petri) |
+| empty static list | `partially_succeeded` (Petri's frontend rejects this shape at lowering with `attractor.parallel.no_branches`, so it is unreachable under Petri) |
 
 `parallel.results` is `[]` and `parallel.branch_count` is `0` for an empty
 list. A fan-in with no `parallel.results` in context fails with
