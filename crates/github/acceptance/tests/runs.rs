@@ -136,6 +136,10 @@ async fn keychain_token() -> Result<String, String> {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[expect(
+    clippy::unused_async,
+    reason = "the macOS variant awaits the Keychain; the caller awaits both alike"
+)]
 async fn keychain_token() -> Result<String, String> {
     Err("Authenticated corpus sweeps require the dedicated macOS Keychain entry".into())
 }
