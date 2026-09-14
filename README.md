@@ -269,7 +269,7 @@ before Petri moves its pin; then the manifests, the contract's pin table, and
 the affected evidence records move together, and the relevant Petri scenarios
 run again through the shipped binary. A library test pass never replaces a
 required Petri scenario. The current pins are in the contract's "Pinned
-revisions" table (Pebble `c91810f`, lithos-llm `55add45`, sandbox-driver
+revisions" table (Pebble `a39f43e`, lithos-llm `55add45`, sandbox-driver
 `ddb32e19`, twins `ca45f0e`, Fabro `05ebd0f`, the runner image
 `f8bbbfd81934`); `mise run check:pins` keeps every citation in agreement.
 The library batch the readiness work asked for landed on
