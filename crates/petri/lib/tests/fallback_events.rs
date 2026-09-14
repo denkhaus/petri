@@ -139,8 +139,8 @@ fn reconstruct(events: &[RunEvent]) -> Reconstructed {
                             payload["continuation"].as_str().unwrap_or("").to_owned(),
                         ));
                         out.failed_usage.push((
-                            payload["usage"]["input"].as_u64().unwrap_or(0),
-                            payload["usage"]["output"].as_u64().unwrap_or(0),
+                            payload["usage"]["tokens"]["input"].as_u64().unwrap_or(0),
+                            payload["usage"]["tokens"]["output"].as_u64().unwrap_or(0),
                         ));
                     }
                     "RouteFailoverStopped" => out.stops.push((
@@ -150,8 +150,8 @@ fn reconstruct(events: &[RunEvent]) -> Reconstructed {
                     "AssistantMessage" if activity.parent_session.is_none() => {
                         let route = current_route.clone().unwrap_or_default();
                         let entry = out.usage.entry(route).or_default();
-                        entry.0 += payload["usage"]["input"].as_u64().unwrap_or(0);
-                        entry.1 += payload["usage"]["output"].as_u64().unwrap_or(0);
+                        entry.0 += payload["usage"]["tokens"]["input"].as_u64().unwrap_or(0);
+                        entry.1 += payload["usage"]["tokens"]["output"].as_u64().unwrap_or(0);
                     }
                     _ => {}
                 }

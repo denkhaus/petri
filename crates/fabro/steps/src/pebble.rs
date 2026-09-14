@@ -49,10 +49,9 @@ use executor::Masker;
 use ir::{Attempt, Control, FiringId, LogStream, ScopeId, StepEvent, Value};
 use lithos_llm::Client;
 use lithos_llm::catalog::Metadata;
-use lithos_llm::types::{ErrorKind, ReasoningEffort, Request, Speed};
+use lithos_llm::types::{ErrorKind, ReasoningEffort, Request, Speed, Usage};
 use pebble_coding_agent::events::{
     AgentProfileKind, CodingAgentEvent, CodingEvent, EventSink, EventSinkError, PermissionLevel,
-    TokenUsage,
 };
 use pebble_coding_agent::extensions::Redactor;
 use pebble_coding_agent::steering::SteeringBus;
@@ -114,8 +113,9 @@ pub(crate) struct NativeSession {
     _cancel_on_drop: DropGuard,
     /// What the session's children spent and did, for the metrics.
     subagents:       Arc<Ledger>,
-    usage:           TokenUsage,
-    cost:            Option<u64>,
+    /// What the session's settled prompts used: their tokens, and their
+    /// cost when every answer that used tokens was priced.
+    usage:           Usage,
     inference:       Duration,
     tool:            Duration,
     prompts:         u64,
@@ -367,8 +367,7 @@ impl NativeSession {
             kill: kill.clone(),
             _cancel_on_drop: guard,
             subagents: ledger,
-            usage: TokenUsage::default(),
-            cost: None,
+            usage: Usage::default(),
             inference: Duration::ZERO,
             tool: Duration::ZERO,
             prompts: 0,
@@ -457,9 +456,6 @@ impl NativeSession {
     fn account(&mut self, report: &PromptReport) {
         self.prompts += 1;
         self.usage = self.usage.saturating_add(report.usage);
-        if let Some(cost) = report.cost_usd_micros {
-            self.cost = Some(self.cost.unwrap_or(0).saturating_add(cost));
-        }
         self.inference = self.inference.saturating_add(report.timing.inference);
         self.tool = self.tool.saturating_add(report.timing.tool);
     }
@@ -486,7 +482,6 @@ impl NativeSession {
         let mut metrics = BTreeMap::from([
             ("pebble.prompts".into(), json!(self.prompts)),
             ("pebble.usage".into(), json!(self.usage)),
-            ("pebble.cost_usd_micros".into(), json!(self.cost)),
             (
                 "pebble.inference_ms".into(),
                 json!(elapsed_ms(self.inference)),

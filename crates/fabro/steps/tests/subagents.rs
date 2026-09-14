@@ -283,13 +283,19 @@ async fn a_child_changes_the_parents_workspace_and_the_stage_accounts_for_it() {
     // Accounting: the parent's own usage and the children's, reconstructed
     // from the events.
     let custom = metrics(&report, "a");
-    assert_eq!(custom["pebble.usage"]["input"], 30, "three parent messages");
+    assert_eq!(
+        custom["pebble.usage"]["tokens"]["input"], 30,
+        "three parent messages"
+    );
     let subagents = &custom[METRIC];
     assert_eq!(subagents["spawned"], 1);
     assert_eq!(subagents["completed"], 1);
     assert_eq!(subagents["failed"], 0);
     assert_eq!(subagents["closed"], 1);
-    assert_eq!(subagents["usage"]["input"], 20, "two child messages");
+    assert_eq!(
+        subagents["usage"]["tokens"]["input"], 20,
+        "two child messages"
+    );
     assert_eq!(
         subagents["sessions"][child_session]["parent"],
         parent_session
@@ -307,7 +313,7 @@ async fn a_child_changes_the_parents_workspace_and_the_stage_accounts_for_it() {
         ) && e["event"]["parent_session_id"].is_string()
         {
             *from_events.entry(session.to_owned()).or_default() +=
-                message["usage"]["input"].as_u64().unwrap_or(0);
+                message["usage"]["tokens"]["input"].as_u64().unwrap_or(0);
         }
     }
     assert_eq!(
@@ -620,7 +626,7 @@ async fn a_childs_failure_reaches_the_parent_without_failing_the_stage() {
     assert_eq!(custom[METRIC]["failed"], 1);
     assert_eq!(custom[METRIC]["completed"], 0);
     assert_eq!(
-        custom[METRIC]["usage"]["input"], 0,
+        custom[METRIC]["usage"]["tokens"]["input"], 0,
         "the child committed no message"
     );
 }
@@ -1149,7 +1155,7 @@ async fn a_child_compacts_under_the_inherited_settings_and_its_events_name_the_c
     assert_eq!(custom[METRIC]["spawned"], 1);
     // The child's summary usage is not in any Petri metric at the pin: Pebble's
     // `CompactionCompleted` carries none and the child's history is Pebble's.
-    assert_eq!(custom["pebble.compaction_usage"]["input"], 0);
+    assert_eq!(custom["pebble.compaction_usage"]["tokens"]["input"], 0);
 }
 
 /// A parent whose own history compacts keeps its supervisor: the turn after

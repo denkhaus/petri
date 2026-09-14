@@ -141,8 +141,8 @@ async fn native_tools_edit_and_verify_in_the_scope() {
     assert_eq!(provider.requests().len(), 3);
     let requests = serde_json::to_string(&provider.requests()).expect("requests");
     assert!(requests.contains("verified"), "{requests}");
-    assert_eq!(metrics(&report)["pebble.usage"]["input"], 30);
-    assert_eq!(metrics(&report)["pebble.usage"]["output"], 15);
+    assert_eq!(metrics(&report)["pebble.usage"]["tokens"]["input"], 30);
+    assert_eq!(metrics(&report)["pebble.usage"]["tokens"]["output"], 15);
 }
 
 #[tokio::test]
@@ -161,7 +161,7 @@ async fn repairs_share_history_and_sum_accounting() {
     );
     assert_eq!(output_of(&report, "a")["structured"]["value"], 42);
     assert_eq!(metrics(&report)["pebble.prompts"], 2);
-    assert_eq!(metrics(&report)["pebble.usage"]["input"], 20);
+    assert_eq!(metrics(&report)["pebble.usage"]["tokens"]["input"], 20);
     let requests = provider.requests();
     assert_eq!(requests.len(), 2);
     assert!(
@@ -182,7 +182,7 @@ async fn invalid_output_keeps_accounting() {
     assert_eq!(testkit::status_of(&report, "a").as_deref(), Some("failure"));
     assert_eq!(output_of(&report, "a")["failure_class"], "bad_output");
     assert_eq!(metrics(&report)["pebble.prompts"], 2);
-    assert_eq!(metrics(&report)["pebble.usage"]["input"], 20);
+    assert_eq!(metrics(&report)["pebble.usage"]["tokens"]["input"], 20);
 }
 
 #[tokio::test]
@@ -212,7 +212,7 @@ async fn cancellation_settles_the_prompt_and_preserves_usage() {
         .expect("cancel settles")
         .expect("run task");
     assert_ne!(report.status, RunStatus::Success);
-    assert_eq!(metrics(&report)["pebble.usage"]["input"], 10);
+    assert_eq!(metrics(&report)["pebble.usage"]["tokens"]["input"], 10);
     assert_eq!(metrics(&report)["pebble.prompts"], 1);
 }
 
@@ -272,8 +272,11 @@ async fn model_failure_keeps_prior_usage_and_known_cost() {
         output_of(&report, "a")["failure_class"],
         "llm:authentication"
     );
-    assert_eq!(metrics(&report)["pebble.usage"]["input"], 10);
-    assert_eq!(metrics(&report)["pebble.cost_usd_micros"], 123);
+    assert_eq!(metrics(&report)["pebble.usage"]["tokens"]["input"], 10);
+    assert_eq!(
+        metrics(&report)["pebble.usage"]["cost"],
+        json!({"usd_micros": 123, "source": "provider"})
+    );
 }
 
 #[test]
@@ -595,7 +598,7 @@ async fn kill_stops_a_tool_that_ignores_term() {
         testkit::status_of(&report, "a").as_deref(),
         Some("cancelled")
     );
-    assert_eq!(metrics(&report)["pebble.usage"]["input"], 10);
+    assert_eq!(metrics(&report)["pebble.usage"]["tokens"]["input"], 10);
     let status = Command::new("kill")
         .args(["-0", pid.trim()])
         .stderr(Stdio::null())
@@ -819,6 +822,6 @@ async fn the_driver_deadline_cancels_a_native_attempt_through_its_token() {
         testkit::status_of(&report, "a").as_deref(),
         Some("timed_out")
     );
-    assert_eq!(metrics(&report)["pebble.usage"]["input"], 10);
+    assert_eq!(metrics(&report)["pebble.usage"]["tokens"]["input"], 10);
     assert_eq!(metrics(&report)["pebble.prompts"], 1);
 }

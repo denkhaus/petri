@@ -187,12 +187,18 @@ async fn a_parent_delegates_a_workspace_change_to_a_child() {
 
     // Accounting: the stage's metric equals what the events say.
     let metrics = node_metrics(&events, "agent");
-    assert_eq!(metrics["pebble.usage"]["input"], 20, "two parent messages");
+    assert_eq!(
+        metrics["pebble.usage"]["tokens"]["input"], 20,
+        "two parent messages"
+    );
     let subagents = &metrics["pebble.subagents"];
     assert_eq!(subagents["spawned"], 1);
     assert_eq!(subagents["completed"], 1);
     assert_eq!(subagents["closed"], 1);
-    assert_eq!(subagents["usage"]["input"], 20, "two child messages");
+    assert_eq!(
+        subagents["usage"]["tokens"]["input"], 20,
+        "two child messages"
+    );
     assert_eq!(
         subagents["sessions"][&child_session]["parent"],
         parent_session
@@ -205,7 +211,7 @@ async fn a_parent_delegates_a_workspace_change_to_a_child() {
     assert_eq!(from_events.len(), 1);
     assert_eq!(from_events[&child_session], 20);
     assert_eq!(
-        subagents["sessions"][&child_session]["usage"]["input"],
+        subagents["sessions"][&child_session]["usage"]["tokens"]["input"],
         from_events[&child_session]
     );
     finished.assert_no_leaked_processes().await;

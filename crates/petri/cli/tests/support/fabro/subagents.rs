@@ -148,7 +148,9 @@ pub(crate) fn descendant_usage(activities: &[Activity]) -> BTreeMap<String, u64>
             continue;
         }
         *usage.entry(activity.session.clone()).or_default() +=
-            activity.payload()["usage"]["input"].as_u64().unwrap_or(0);
+            activity.payload()["usage"]["tokens"]["input"]
+                .as_u64()
+                .unwrap_or(0);
     }
     usage
 }

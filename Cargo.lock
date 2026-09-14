@@ -1223,7 +1223,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 [[package]]
 name = "lithos-llm"
 version = "0.1.0"
-source = "git+https://github.com/lithoscomputer/lithos-llm?rev=a1e3fd37b7153870411701327ac117606753fe90#a1e3fd37b7153870411701327ac117606753fe90"
+source = "git+https://github.com/lithoscomputer/lithos-llm?rev=55add4596b861a0623d00c3a54aa5c147c8d504b#55add4596b861a0623d00c3a54aa5c147c8d504b"
 dependencies = [
  "async-trait",
  "futures-core",
@@ -1473,7 +1473,7 @@ dependencies = [
 [[package]]
 name = "pebble-agent"
 version = "0.1.0"
-source = "git+https://github.com/lithoscomputer/pebble.git?rev=69969420c9017ca15ac6c175c820a0cb8090866a#69969420c9017ca15ac6c175c820a0cb8090866a"
+source = "git+https://github.com/lithoscomputer/pebble.git?rev=c91810fe51aece80359b9cd8efea971af0c46925#c91810fe51aece80359b9cd8efea971af0c46925"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1490,7 +1490,7 @@ dependencies = [
 [[package]]
 name = "pebble-coding-agent"
 version = "0.1.0"
-source = "git+https://github.com/lithoscomputer/pebble.git?rev=69969420c9017ca15ac6c175c820a0cb8090866a#69969420c9017ca15ac6c175c820a0cb8090866a"
+source = "git+https://github.com/lithoscomputer/pebble.git?rev=c91810fe51aece80359b9cd8efea971af0c46925#c91810fe51aece80359b9cd8efea971af0c46925"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2793,7 +2793,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

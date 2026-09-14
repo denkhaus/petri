@@ -171,7 +171,7 @@ async fn a_prompt_node_makes_one_tool_free_call_and_writes_the_response() {
     assert_eq!(events[1]["outcome"], json!("succeeded"));
     assert_eq!(events[1]["calls"], json!(1));
     assert_eq!(events[1]["response"], json!("A tidy summary."));
-    assert!(events[1]["usage"]["input"].as_u64().is_some());
+    assert!(events[1]["usage"]["tokens"]["input"].as_u64().is_some());
     let metrics = &report
         .state
         .history()
