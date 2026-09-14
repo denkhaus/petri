@@ -11,7 +11,6 @@ pub mod host;
 mod id;
 pub mod inspect;
 pub mod interview;
-mod jsonl;
 mod middleware;
 mod observe;
 pub mod prune;
@@ -21,6 +20,12 @@ mod state;
 mod store;
 pub mod watchdog;
 
+/// The run store seam and the run-directory layout, re-exported for hosts.
+pub use ::store::{
+    Access, COORDINATOR_FILE, EVENTS_FILE, EXECUTIONS_DIR, GRAPHS_DIR, LogId, MemoryRunStore,
+    OwnerId, RESOURCES_FILE, RUN_FILE, Record, RunDirStore, RunKey, RunLogs, RunStore,
+    execution_relative_dir,
+};
 pub use client::{
     ChildStart, CoordinatorInvocationClient, InvocationClient, InvocationHandle, InvocationRequest,
     InvokeError,
@@ -48,12 +53,14 @@ pub use middleware::{
     initial_middleware_state, validate_middleware_state,
 };
 pub use observe::{
-    AddressedObserver, DecodedEngineLog, EngineLogDecodeError, EngineLogError, ExecutionObserver,
-    JsonlEngineLog, StoredEngineRecord, decode_engine_log, encode_engine_log, read_engine_log,
+    AddressedObserver, DecodedEngineFile, DecodedEngineLog, EngineLogDecodeError, EngineLogError,
+    ExecutionLogWriter, ExecutionObserver, StoreWriter, StoredEngineRecord, decode_engine_log,
+    decode_engine_records, encode_engine_log, encode_engine_record, read_engine_log,
+    read_execution_log,
 };
 pub use resource::{
-    HOST_PROVIDER, LeaseState, PendingIntent, ResourceError, ResourceLedger, ResourceStore,
-    SandboxResourceRecord,
+    HOST_PROVIDER, LeaseState, PendingIntent, ResourceError, ResourceLedger, ResourceLogRecord,
+    ResourceStore, SandboxResourceRecord,
 };
 pub use secret::InvocationSecrets;
 pub use state::{
@@ -61,6 +68,6 @@ pub use state::{
     RunNote, StateError,
 };
 pub use store::{
-    COORDINATOR_FILE, CoordinatorStore, DecodedCoordinatorLog, GRAPHS_DIR, INVOCATIONS_DIR,
-    RESOURCES_DIR, RUN_FILE, RunMetadata, StoreError, decode_coordinator_log, hold_run_lease,
+    CoordinatorStore, StoreError, decode_coordinator_records, encode_record, open_run_dir,
+    read_coordinator_log,
 };

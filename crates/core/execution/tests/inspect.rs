@@ -9,12 +9,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime};
 use std::{fs, io};
 
-use execution::inspect::{InspectError, RunInspection, inspect_run};
+use execution::inspect::{InspectError, RunInspection, inspect_run_dir};
 use execution::{
     COORDINATOR_FILE, CallSite, Coordinator, CoordinatorInvocationClient, CoordinatorOptions,
     ExecutionId, GraphDigest, InterviewReceipt, InvocationClient as _, InvocationId,
-    InvocationRequest, RECEIPT_FILE, RECEIPT_VERSION, RUN_FILE, SandboxMode, SecretBindings,
-    StoreError,
+    InvocationRequest, RECEIPT_FILE, RECEIPT_VERSION, SandboxMode, SecretBindings, StoreError,
 };
 use ir::{
     EdgeTransition, GraphBuilder, Outcome, RetryPolicy, RunStatus, Scope, ScopeId, StepRef, Value,
@@ -25,7 +24,7 @@ use serde::Deserialize;
 use serde_json::json;
 use testkit::RunDir;
 
-const ROOT_EVENTS: &str = "invocations/0000000000000000/executions/0000000000000000/events.jsonl";
+const ROOT_EVENTS: &str = "executions/0000000000000000/events.jsonl";
 
 /// Every file under `root`: its bytes and modification time.
 fn snapshot(root: &Path) -> BTreeMap<PathBuf, (SystemTime, Vec<u8>)> {
@@ -57,8 +56,12 @@ async fn run_graph(runtime: &Runtime, dir: &RunDir, graph: &ir::Graph) -> RunSta
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("the coordinator starts");
-    let digest = coordinator.register_graph(graph).expect("graph registers");
+    let digest = coordinator
+        .register_graph(graph)
+        .await
+        .expect("graph registers");
     let result = coordinator
         .run_root(digest, BTreeMap::new())
         .await
@@ -91,8 +94,8 @@ async fn a_finished_run_inspects_complete_with_its_context() {
     assert_eq!(run_graph(&rt, &dir, &two_noops()).await, RunStatus::Success);
 
     let before = snapshot(dir.path());
-    let first = inspect_run(dir.path()).expect("inspects");
-    let second = inspect_run(dir.path()).expect("inspects again");
+    let first = inspect_run_dir(dir.path()).await.expect("inspects");
+    let second = inspect_run_dir(dir.path()).await.expect("inspects again");
     assert_eq!(first, second, "inspection is deterministic");
     assert_eq!(
         snapshot(dir.path()),
@@ -102,7 +105,7 @@ async fn a_finished_run_inspects_complete_with_its_context() {
 
     assert!(first.complete, "{:?}", first.incomplete);
     assert_eq!(first.status.as_deref(), Some("success"));
-    assert_eq!(first.inspect_format_version, 2);
+    assert_eq!(first.inspect_format_version, 3);
     assert_eq!(first.root.final_execution.map(ExecutionId::raw), Some(0));
     assert_eq!(first.invocations.len(), 1);
     assert_eq!(first.executions.len(), 1);
@@ -148,7 +151,7 @@ async fn a_restart_keeps_every_execution_and_names_the_final_one() {
         RunStatus::Success
     );
 
-    let inspection = inspect_run(dir.path()).expect("inspects");
+    let inspection = inspect_run_dir(dir.path()).await.expect("inspects");
     assert!(inspection.complete, "{:?}", inspection.incomplete);
     assert_eq!(
         inspection.root.final_execution.map(ExecutionId::raw),
@@ -232,7 +235,7 @@ async fn retries_show_in_attempts_and_not_in_the_node_record() {
         RunStatus::Success
     );
 
-    let inspection = inspect_run(dir.path()).expect("inspects");
+    let inspection = inspect_run_dir(dir.path()).await.expect("inspects");
     assert!(inspection.complete, "{:?}", inspection.incomplete);
     let engine = inspection.executions[0].engine.as_ref().expect("replayed");
     let record = &engine.context.nodes["flaky"];
@@ -310,6 +313,7 @@ async fn a_nested_invocation_keeps_its_own_context_and_parent_link() {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("the coordinator starts");
 
     let mut child = GraphBuilder::bare();
@@ -317,7 +321,10 @@ async fn a_nested_invocation_keeps_its_own_context_and_parent_link() {
     let inner = child.add_node("inner", scope, StepRef::new("noop", json!("child-output")));
     let mut child = child.build();
     child.result = ir::ResultProjection::NodeOutput(inner);
-    let child_digest = coordinator.register_graph(&child).expect("child registers");
+    let child_digest = coordinator
+        .register_graph(&child)
+        .await
+        .expect("child registers");
 
     let mut root = GraphBuilder::bare();
     let scope = root.add_scope(Scope::new(ScopeId::new(0)));
@@ -328,6 +335,7 @@ async fn a_nested_invocation_keeps_its_own_context_and_parent_link() {
     );
     let root_digest = coordinator
         .register_graph(&root.build())
+        .await
         .expect("root registers");
     let result = coordinator
         .run_root(root_digest, BTreeMap::new())
@@ -336,7 +344,7 @@ async fn a_nested_invocation_keeps_its_own_context_and_parent_link() {
     assert_eq!(result.status, RunStatus::Success);
     coordinator.finish().await;
 
-    let inspection = inspect_run(dir.path()).expect("inspects");
+    let inspection = inspect_run_dir(dir.path()).await.expect("inspects");
     assert!(inspection.complete, "{:?}", inspection.incomplete);
     assert_eq!(inspection.graphs.len(), 2);
     let [root, child] = inspection.invocations.as_slice() else {
@@ -413,7 +421,7 @@ async fn a_run_without_its_finish_record_is_incomplete_not_final() {
     let path = dir.path().join(COORDINATOR_FILE);
     damage(&path, line_count(&path) - 1, b"");
 
-    let inspection = inspect_run(dir.path()).expect("inspects");
+    let inspection = inspect_run_dir(dir.path()).await.expect("inspects");
     assert!(!inspection.complete);
     assert_eq!(inspection.status, None);
     assert!(
@@ -426,8 +434,10 @@ async fn a_run_without_its_finish_record_is_incomplete_not_final() {
     );
 }
 
+/// A torn tail is the run directory's own business: a reader drops it,
+/// leaves the file as found, and reports the complete prefix.
 #[tokio::test]
-async fn a_torn_coordinator_tail_is_reported_and_left_in_place() {
+async fn a_torn_coordinator_tail_is_dropped_and_left_in_place() {
     let dir = finished_run("inspect-torn-coordinator").await;
     let path = dir.path().join(COORDINATOR_FILE);
     let mut bytes = fs::read(&path).expect("reads");
@@ -435,22 +445,14 @@ async fn a_torn_coordinator_tail_is_reported_and_left_in_place() {
     fs::write(&path, &bytes).expect("writes");
 
     let before = snapshot(dir.path());
-    let inspection = inspect_run(dir.path()).expect("inspects");
+    let inspection = inspect_run_dir(dir.path()).await.expect("inspects");
     assert_eq!(snapshot(dir.path()), before, "the torn tail was rewritten");
-    assert!(!inspection.complete);
+    assert!(inspection.complete, "{:?}", inspection.incomplete);
     assert_eq!(inspection.status.as_deref(), Some("success"));
-    assert!(
-        inspection
-            .incomplete
-            .iter()
-            .any(|reason| reason.contains("torn")),
-        "{:?}",
-        inspection.incomplete
-    );
 }
 
 #[tokio::test]
-async fn a_torn_engine_log_is_incomplete_and_a_short_one_is_a_prefix() {
+async fn a_short_engine_log_is_a_prefix_and_a_torn_tail_is_dropped() {
     let dir = finished_run("inspect-torn-events").await;
     let path = dir.path().join(ROOT_EVENTS);
     // Cut right after the first routing decision: the core records it
@@ -464,22 +466,19 @@ async fn a_torn_engine_log_is_incomplete_and_a_short_one_is_a_prefix() {
         + 1;
     damage(&path, keep, b"{\"seq\":");
 
-    let inspection = inspect_run(dir.path()).expect("inspects");
+    let inspection = inspect_run_dir(dir.path()).await.expect("inspects");
     assert!(!inspection.complete);
     let execution = &inspection.executions[0];
-    assert!(execution.log.torn);
     assert_eq!(execution.log.replay, "prefix");
-    assert_eq!(execution.log.records, keep - 1);
-    for expected in ["torn record", "before the core's derived records"] {
-        assert!(
-            inspection
-                .incomplete
-                .iter()
-                .any(|reason| reason.contains(expected)),
-            "{expected}: {:?}",
-            inspection.incomplete
-        );
-    }
+    assert_eq!(execution.log.records, keep);
+    assert!(
+        inspection
+            .incomplete
+            .iter()
+            .any(|reason| reason.contains("before the core's derived records")),
+        "{:?}",
+        inspection.incomplete
+    );
     assert_eq!(
         execution.status, "finished",
         "the coordinator's exit still stands"
@@ -496,7 +495,7 @@ async fn a_missing_engine_log_is_incomplete() {
     let dir = finished_run("inspect-missing-events").await;
     fs::remove_file(dir.path().join(ROOT_EVENTS)).expect("removes");
 
-    let inspection = inspect_run(dir.path()).expect("inspects");
+    let inspection = inspect_run_dir(dir.path()).await.expect("inspects");
     assert!(!inspection.complete);
     assert_eq!(inspection.executions[0].log.replay, "missing");
     assert!(inspection.executions[0].engine.is_none());
@@ -509,7 +508,9 @@ async fn a_complete_undecodable_record_is_an_error() {
     let mut bytes = fs::read(&path).expect("reads");
     bytes.extend_from_slice(b"not-json\n");
     fs::write(&path, &bytes).expect("writes");
-    let error = inspect_run(dir.path()).expect_err("corruption is refused");
+    let error = inspect_run_dir(dir.path())
+        .await
+        .expect_err("corruption is refused");
     assert!(matches!(error, InspectError::EngineLog(_)), "{error}");
 
     let dir = finished_run("inspect-corrupt-coordinator").await;
@@ -517,9 +518,11 @@ async fn a_complete_undecodable_record_is_an_error() {
     let mut bytes = fs::read(&path).expect("reads");
     bytes.extend_from_slice(b"not-json\n");
     fs::write(&path, &bytes).expect("writes");
-    let error = inspect_run(dir.path()).expect_err("corruption is refused");
+    let error = inspect_run_dir(dir.path())
+        .await
+        .expect_err("corruption is refused");
     assert!(
-        matches!(error, InspectError::Store(StoreError::BadRecord { .. })),
+        matches!(error, InspectError::Store(StoreError::Store(_))),
         "{error}"
     );
 }
@@ -544,7 +547,9 @@ async fn a_log_that_diverges_from_replay_is_an_error() {
     assert!(changed, "the first outcome was found");
     fs::write(&path, format!("{}\n", rewritten.join("\n"))).expect("writes");
 
-    let error = inspect_run(dir.path()).expect_err("divergence is refused");
+    let error = inspect_run_dir(dir.path())
+        .await
+        .expect_err("divergence is refused");
     assert!(
         matches!(error, InspectError::ReplayDiverged { .. }),
         "{error}"
@@ -554,16 +559,25 @@ async fn a_log_that_diverges_from_replay_is_an_error() {
 #[tokio::test]
 async fn an_unsupported_format_is_an_error() {
     let dir = finished_run("inspect-unsupported").await;
-    let path = dir.path().join(RUN_FILE);
-    let mut metadata: Value =
-        serde_json::from_slice(&fs::read(&path).expect("reads")).expect("json");
-    metadata["format_version"] = json!(1);
-    fs::write(&path, serde_json::to_vec(&metadata).expect("encodes")).expect("writes");
-    let error = inspect_run(dir.path()).expect_err("an old format is refused");
+    let path = dir.path().join(COORDINATOR_FILE);
+    let text = fs::read_to_string(&path).expect("reads");
+    let mut lines: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("json"))
+        .collect();
+    lines[0]["body"]["format_version"] = json!(1);
+    let rewritten: Vec<String> = lines
+        .iter()
+        .map(|line| serde_json::to_string(line).expect("encodes"))
+        .collect();
+    fs::write(&path, format!("{}\n", rewritten.join("\n"))).expect("writes");
+    let error = inspect_run_dir(dir.path())
+        .await
+        .expect_err("an old format is refused");
     assert!(
         matches!(error, InspectError::UnsupportedFormat {
             found:    1,
-            expected: 4,
+            expected: execution::COORDINATOR_FORMAT_VERSION,
         }),
         "{error}"
     );
@@ -576,27 +590,34 @@ async fn a_missing_registered_graph_is_an_error() {
     for entry in fs::read_dir(&graphs).expect("graphs dir") {
         fs::remove_file(entry.expect("entry").path()).expect("removes");
     }
-    let error = inspect_run(dir.path()).expect_err("a missing graph is refused");
+    let error = inspect_run_dir(dir.path())
+        .await
+        .expect_err("a missing graph is refused");
     assert!(
         matches!(error, InspectError::Store(StoreError::MissingGraph(_))),
         "{error}"
     );
 }
 
-#[test]
-fn a_directory_that_is_not_a_run_is_an_error() {
+#[tokio::test]
+async fn a_directory_that_is_not_a_run_is_an_error() {
     let dir = RunDir::new("inspect-not-a-run");
-    let error = inspect_run(dir.path()).expect_err("no run.json");
-    assert!(matches!(error, InspectError::Io { .. }), "{error}");
+    let error = inspect_run_dir(dir.path()).await.expect_err("no run.json");
+    assert!(matches!(error, InspectError::Store(_)), "{error}");
 }
 
 #[tokio::test]
 async fn the_document_serializes_with_its_version_first_class() {
     let dir = finished_run("inspect-json").await;
-    let inspection: RunInspection = inspect_run(dir.path()).expect("inspects");
+    let inspection: RunInspection = inspect_run_dir(dir.path()).await.expect("inspects");
     let json = serde_json::to_value(&inspection).expect("encodes");
-    assert_eq!(json["inspect_format_version"], json!(2));
-    assert_eq!(json["coordinator_format_version"], json!(4));
+    assert_eq!(json["inspect_format_version"], json!(3));
+    assert_eq!(
+        json["coordinator_format_version"],
+        json!(execution::COORDINATOR_FORMAT_VERSION)
+    );
+    assert!(json["locator"].is_string());
+    assert!(json["run_key"].is_string());
     assert_eq!(json["complete"], json!(true));
     assert_eq!(json["status"], json!("success"));
     assert_eq!(json["root"]["final_execution"], json!(0));
@@ -626,12 +647,14 @@ async fn the_interview_receipt_is_read_back_as_written() {
     };
     let path = dir.path().join(RECEIPT_FILE);
     fs::write(&path, serde_json::to_vec_pretty(&receipt).expect("encodes")).expect("writes");
-    let inspection = inspect_run(dir.path()).expect("inspects");
+    let inspection = inspect_run_dir(dir.path()).await.expect("inspects");
     assert!(inspection.complete, "{:?}", inspection.incomplete);
     assert_eq!(inspection.interviews, Some(receipt));
 
     fs::write(&path, b"{\"version\": \"one\"}\n").expect("writes");
-    let error = inspect_run(dir.path()).expect_err("a bad receipt is an error");
+    let error = inspect_run_dir(dir.path())
+        .await
+        .expect_err("a bad receipt is an error");
     assert!(
         matches!(&error, InspectError::BadReceipt { path: bad, .. } if *bad == path),
         "{error}"

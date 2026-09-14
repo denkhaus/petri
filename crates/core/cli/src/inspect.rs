@@ -1,17 +1,18 @@
 //! `inspect`: print what a run directory's durable files say.
 //!
-//! A thin printer over [`execution::inspect::inspect_run`]. The command reads
-//! `run.json`, `coordinator.jsonl`, the registered graphs, and every
-//! execution's `events.jsonl`, replays them, and prints the versioned
-//! document on stdout. It takes no runtime and no lease, starts nothing, and
-//! writes nothing under the run directory, so it is safe on a run another
-//! process still holds and on a machine with no provider reachable.
+//! A thin printer over [`execution::inspect::inspect_run_dir`]. The command
+//! opens the run directory's store for reading, replays the coordinator log,
+//! the registered graphs and every execution's engine log, and prints the
+//! versioned document on stdout. It takes no runtime and no lease, starts
+//! nothing, and writes nothing under the run directory, so it is safe on a
+//! run another process still holds and on a machine with no provider
+//! reachable.
 
 use std::fmt::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
 
-use execution::inspect::{RunInspection, inspect_run};
+use execution::inspect::{RunInspection, inspect_run_dir};
 
 /// Exit codes: 0 for a complete run, 1 for an incomplete one, 2 when the
 /// files do not support a trustworthy reconstruction.
@@ -23,8 +24,8 @@ use execution::inspect::{RunInspection, inspect_run};
     clippy::print_stderr,
     reason = "the CLI reports what stopped the inspection to the user on stderr"
 )]
-pub(crate) fn inspect(run_dir: &Path, json: bool) -> ExitCode {
-    let inspection = match inspect_run(run_dir) {
+pub(crate) async fn inspect(run_dir: &Path, json: bool) -> ExitCode {
+    let inspection = match inspect_run_dir(run_dir).await {
         Ok(inspection) => inspection,
         Err(error) => {
             eprintln!("error: {}", super::error_chain(&error));

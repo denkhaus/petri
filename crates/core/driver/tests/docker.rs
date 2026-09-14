@@ -117,8 +117,8 @@ sleep 300
         .with_grace(Duration::from_secs(2))
         .with_retention(Retention::Never);
 
-    let (driver, prefix) = docker_driver_named(graph, &dir, config).await;
-    let sandbox = sandbox_name(dir.path(), 0);
+    let (driver, prefix) = docker_driver_named(graph, &dir, config);
+    let sandbox = format!("{prefix}l0");
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
 
@@ -166,7 +166,7 @@ async fn docker_release_leaves_no_container() {
         .with_grace(Duration::from_secs(2))
         .with_retention(Retention::Never);
 
-    let (driver, prefix) = docker_driver_named(graph, &dir, config).await;
+    let (driver, prefix) = docker_driver_named(graph, &dir, config);
     let report = driver.await_run().await;
     assert_eq!(report.status, RunStatus::Success);
     assert!(
@@ -206,8 +206,8 @@ while :; do sleep 0.1; done
         .with_cleanup_grace(Duration::from_secs(300))
         .with_retention(Retention::Never);
 
-    let (driver, prefix) = docker_driver_named(graph, &dir, config).await;
-    let sandbox = sandbox_name(dir.path(), 0);
+    let (driver, prefix) = docker_driver_named(graph, &dir, config);
+    let sandbox = format!("{prefix}l0");
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
 
@@ -276,7 +276,7 @@ sleep 300
     };
 
     let crashed = RoutingExecutor::local(dir.path(), Retention::Always);
-    let prefix = crashed.container_prefix().await.expect("record the run id");
+    let prefix = crashed.container_prefix();
     let spec = executor::ScopeSpec::new(ScopeId::new(0), "scope-0")
         .with_runtime(RuntimeSpec::container(IMAGE));
     let env = crashed
@@ -291,7 +291,7 @@ sleep 300
         ]))
         .await
         .expect("start the crashed run's workload");
-    let sandbox = sandbox_name(dir.path(), 0);
+    let sandbox = format!("{prefix}l0");
     assert!(
         wait_for_container_file(&sandbox, "/workspace/heartbeat", Duration::from_secs(60)).await,
         "the step never started inside the container"
@@ -371,10 +371,7 @@ async fn an_abandoned_acquire_leaves_no_container() {
         let executor = RoutingExecutor::local(dir.path().to_path_buf(), Retention::Never);
         let ledger = Arc::new(MemoryLedger::default());
         executor.set_ledger(ledger.clone());
-        let prefix = executor
-            .container_prefix()
-            .await
-            .expect("the run id is recorded in the run dir");
+        let prefix = executor.container_prefix();
         let ctx = executor::AcquireContext::bare();
 
         let completed = match time::timeout(
@@ -403,8 +400,9 @@ async fn an_abandoned_acquire_leaves_no_container() {
                 // the whole test finishes in under two seconds alone.
                 time::timeout(Duration::from_secs(60), async {
                     loop {
-                        let record =
-                            LeaseLedger::lookup(&*ledger, SandboxLeaseId::new(0)).expect("ledger");
+                        let record = LeaseLedger::lookup(&*ledger, SandboxLeaseId::new(0))
+                            .await
+                            .expect("ledger");
                         if record.is_none_or(|record| record.state == LeaseState::Deleted) {
                             break;
                         }
@@ -686,8 +684,8 @@ while :; do sleep 0.1; done
         .with_grace(Duration::from_secs(1))
         .with_retention(Retention::Never);
 
-    let (driver, prefix) = docker_driver_named(graph, &dir, config).await;
-    let sandbox = sandbox_name(dir.path(), 0);
+    let (driver, prefix) = docker_driver_named(graph, &dir, config);
+    let sandbox = format!("{prefix}l0");
     let handle = driver.handle();
     let run = tokio::spawn(driver.run());
 

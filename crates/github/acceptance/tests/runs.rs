@@ -60,7 +60,6 @@ use frontend_gha::identity;
 use github_actions::{ActionManifestSourceCap, ActionSource, ActionSourceCap, GitActionSource};
 use runtime::driver::ExecutionReport;
 use runtime::engine::{EngineState, Event, EventRecord, FIRING_ENV_CLASS};
-use runtime::executor::sandbox::RUN_ID_FILE;
 use runtime::executor::{MapSecrets, Retention};
 use runtime::ir::{self, Graph};
 use runtime::{RunOptions, Runtime};
@@ -137,6 +136,10 @@ async fn keychain_token() -> Result<String, String> {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[expect(
+    clippy::unused_async,
+    reason = "the macOS variant awaits the Keychain; the caller awaits both alike"
+)]
 async fn keychain_token() -> Result<String, String> {
     Err("Authenticated corpus sweeps require the dedicated macOS Keychain entry".into())
 }
@@ -795,10 +798,10 @@ fn display_tail(lines: &[String]) -> Vec<String> {
 /// Remove the containers a wedged, abandoned run left behind: everything under
 /// the run dir's recorded container-name prefix.
 async fn sweep_leftovers(dir: &Path) {
-    let Ok(id) = fs::read_to_string(dir.join(RUN_ID_FILE)) else {
+    if !dir.join(execution::RUN_FILE).is_file() {
         return;
-    };
-    let prefix = format!("petri-{}-", id.trim());
+    }
+    let prefix = format!("petri-{}-", testkit::recorded_run_id(dir));
     let Ok(listed) = Command::new("docker")
         .args(["ps", "-a", "--format", "{{.Names}}"])
         .output()

@@ -1,40 +1,48 @@
 # The `petri inspect` document
 
-`petri inspect --run-dir <directory> --json` reconstructs a run from the
-durable files in its run directory and prints one JSON document. The library
-form is `execution::inspect::inspect_run`. This file is the field contract for
-`inspect_format_version` 2. Version 2 spells every enum the document
+`petri inspect --run-dir <directory> --json` reconstructs a run from its
+store and prints one JSON document. The library form is
+`execution::inspect::inspect_run`, over a `store::RunLogs` handle opened
+for reading; `inspect_run_dir` opens a run directory and attaches the
+interview receipt beside it. This file is the field contract for
+`inspect_format_version` 3. Version 2 spelled every enum the document
 carries from a record (`Admission`, `RouteDecision`, `EngineExit`,
 `EntryPoint`, `Status`, `RunStatus`) with snake-case tags, as the logs do.
+Version 3 reads the run through its store: `run_dir` became `locator`,
+`run_key` names the run, and a log's `path` and `torn` are gone.
 
 ## Sources
 
-The command reads only these files:
+The command reads only the run's store:
 
-- `run.json`: the run's format version and root invocation id.
-- `coordinator.jsonl`: graph registrations, invocation and execution
+- the coordinator log: the run declaration (format version, run key, root
+  invocation id), graph registrations, invocation and execution
   declarations, exits, results, cancellation requests, pause and unpause
   controls, and the run's finish.
-- `graphs/<digest>.json`: every registered graph, byte-exact.
-- `invocations/<invocation>/executions/<execution>/events.jsonl`: one engine
-  log per execution.
-- `interviews.json`: the interview receipt the standalone host writes when
-  the run had an interviewer (`execution::InterviewReceipt`). Optional.
+- every registered graph, a blob by digest, byte-exact.
+- one engine log per execution.
+- `interviews.json` beside a run directory: the interview receipt the
+  standalone host writes when the run had an interviewer
+  (`execution::InterviewReceipt`). Optional; a file, not a record.
 
-It decodes them under the store's own rules and replays each engine log
-through `engine::replay`. The loaded log must be a byte-prefix of the log
-replay regenerates. Run context is derived on every call and is never stored
-separately.
+It decodes them under Petri's own rules (the format version on the run
+declaration, the registered graph's digest, the coordinator state machine)
+and replays each engine log through `engine::replay`. The loaded log must
+be a byte-prefix of the log replay regenerates. Run context is derived on
+every call and is never stored separately. A torn final line in a run
+directory's log is the store's own business: dropped before the run is
+read, the file left as found, and not reported.
 
 The command does not start a step, acquire a sandbox, contact a provider,
-take the run lease, or write under the run directory. It works on a run
-another process still holds, on a machine with no provider reachable, and
-after the source workflow file has changed or been deleted.
+take the run lease, or write to the store. It works on a run another
+process still holds, on a machine with no provider reachable, and after
+the source workflow file has changed or been deleted.
 
 ## Outcomes
 
 - Exit 0 with a document whose `complete` is `true`: the run recorded its
-  finish, every log decoded whole, and every execution replayed exactly.
+  finish, every execution's log is stored, and every execution replayed
+  exactly.
 - Exit 1 with a document whose `complete` is `false`: the run is interrupted
   or its logs are short. `incomplete` lists every reason. The document still
   reports what the logs support.
@@ -78,9 +86,10 @@ tags. Run statuses are `success`, `failed`, `cancelled`. Node statuses are
 
 | Field | Meaning |
 |---|---|
-| `inspect_format_version` | This document's version. `2`. |
-| `coordinator_format_version` | The run directory's own format, from `run.json`. |
-| `run_dir` | The directory as named on the command line. |
+| `inspect_format_version` | This document's version. `3`. |
+| `coordinator_format_version` | The run's own format, from its run declaration. |
+| `locator` | Where the run lives, as its store names it: a run directory's path, or a database and an id. |
+| `run_key` | The run's identity in its store and on its sandbox providers: the run id every sandbox of the run is labelled with. |
 | `complete` | `true` only when `incomplete` is empty. |
 | `status` | The recorded run status, or `null` until the run finished. |
 | `incomplete` | Every reason `complete` is `false`, in the order found. |
@@ -122,15 +131,15 @@ tags. Run statuses are `success`, `failed`, `cancelled`. Node statuses are
 | `entry_node` | The node a restart successor starts at, or `null` for the graph's own entries. |
 | `start_context` | The context the execution started with. |
 | `exit` | The exit the coordinator recorded, or `null`. `{"kind": "terminal", "status"}` or `{"kind": "restart", "edge", "target", "target_name", "source_firing"}`. |
-| `log` | `path` (relative to the run directory), `records`, `torn`, `replay` (`verified`, `prefix`, or `missing`). |
+| `log` | `records`, `replay` (`verified`, `prefix`, or `missing`). |
 | `engine` | The replayed state, or `null` when there is no log. |
 | `children` | Invocations whose call site is a firing of this execution. |
 
 `log.replay` is `verified` when replay regenerated exactly the log's records,
 `prefix` when the log is a byte-prefix of the regenerated log (a crash landed
 between an external append and the flush of its derived records), and
-`missing` when there is no log or an empty file. `prefix` and `missing` make
-the run incomplete.
+`missing` when nothing is stored for the execution. `prefix` and `missing`
+make the run incomplete.
 
 ### Engine
 

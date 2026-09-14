@@ -11,7 +11,6 @@ use petri::driver::{EventObserver, ExecutionReport};
 use petri::engine::{self, EngineState, EventRecord, InvalidRecords};
 use petri::execution::prune::{PruneError, prune};
 use petri::execution::{self, CoordinatorError};
-use petri::executor::sandbox::RUN_ID_FILE;
 use petri::executor::{MapSecrets, Retention, SecretProvider as _};
 use petri::host::{self, EVENTS_FILE, EventsDecodeError, HostError};
 use petri::ir::{Graph, GraphBuilder, RunStatus, RuntimeSpec, Scope, ScopeId, StepRef};
@@ -30,7 +29,7 @@ fn test_runtime(dir: &RunDir) -> Runtime {
 /// single-execution run writes and resume reads.
 fn root_events(dir: &RunDir) -> PathBuf {
     dir.path()
-        .join("invocations/0000000000000000/executions/0000000000000000")
+        .join("executions/0000000000000000")
         .join(EVENTS_FILE)
 }
 
@@ -122,16 +121,15 @@ fn fabricated_times(log: &engine::EventLog) -> Vec<u64> {
     (0..log.len() as u64).map(|seq| 1_000 + seq).collect()
 }
 
-/// A header from another version is a clean rejection — the standing
-/// no-migrator policy, exactly as `EventLog`'s own deserialization behaves.
+/// The engine log version is the run format's, checked on the run
+/// declaration: a log of another version reaches the decoder as records
+/// whose shape this build does not read, and is refused as such.
 #[test]
-fn a_header_version_mismatch_is_rejected() {
-    let bytes = b"{\"version\":4}\n".to_vec();
+fn a_record_of_another_shape_is_rejected() {
+    let bytes = b"{\"seq\":0,\"recorded_at\":1,\"event\":\"execution.started\"}\n".to_vec();
     match host::decode_events(&bytes) {
-        Err(EventsDecodeError::Invalid(InvalidRecords::Version(v))) => {
-            assert_eq!(v.found, 4);
-        }
-        other => panic!("expected a version rejection, got {other:?}"),
+        Err(EventsDecodeError::BadRecord { line, .. }) => assert_eq!(line, 1),
+        other => panic!("expected a record rejection, got {other:?}"),
     }
 }
 
@@ -187,7 +185,7 @@ async fn a_terminated_undecodable_line_refuses_the_load() {
     bytes.extend(b"not a record\n");
     match host::decode_events(&bytes) {
         Err(EventsDecodeError::BadRecord { line, .. }) => {
-            assert_eq!(line, report.state.log.len() + 2);
+            assert_eq!(line, report.state.log.len() + 1);
         }
         other => panic!("expected a record rejection, got {other:?}"),
     }
@@ -343,9 +341,8 @@ async fn a_killed_run_leaves_complete_files() {
 }
 
 /// Rewrite the root execution's `events.jsonl` — the log resume actually
-/// reads, under the coordinator layout — keeping only the first `keep`
-/// complete lines (header included), plus `extra` raw bytes: the crash
-/// simulator.
+/// reads, under the run-directory layout — keeping only the first `keep`
+/// complete records, plus `extra` raw bytes: the crash simulator.
 fn damage_events(dir: &RunDir, keep: usize, extra: &[u8]) {
     let path = root_events(dir);
     let bytes = fs::read(&path).expect("reads");
@@ -376,7 +373,7 @@ async fn a_crashed_run_resumes_from_the_run_dir() {
 
     // Drop the final record — the second step's finish — at a line boundary:
     // the arbitrary-tail loss window, in its cleanest shape.
-    damage_events(&dir, total, b"");
+    damage_events(&dir, total - 1, b"");
     let resumed = host::resume(&rt).await.expect("resumes");
     assert_eq!(resumed.status, RunStatus::Success);
     assert!(
@@ -402,7 +399,7 @@ async fn a_torn_tail_is_truncated_and_resumed() {
     let report = host::run(&rt, two_step_graph()).await.expect("runs");
     let total = report.state.log.len();
 
-    damage_events(&dir, total, b"{\"seq\":9999,\"source\":\"Ext");
+    damage_events(&dir, total - 1, b"{\"seq\":9999,\"source\":\"Ext");
     let resumed = host::resume(&rt).await.expect("resumes");
     assert_eq!(resumed.status, RunStatus::Success);
 
@@ -423,14 +420,17 @@ async fn an_undecodable_record_refuses_resume() {
 
     damage_events(
         &dir,
-        report.state.log.len(),
+        report.state.log.len() - 1,
         b"corrupted beyond recognition\n",
     );
+    // The run-directory store refuses a complete line that is not JSON
+    // before any record is decoded; a JSON line of another shape is the
+    // decoder's refusal (`a_record_of_another_shape_is_rejected`).
     match host::resume(&rt).await {
         Err(HostError::Coordinator(CoordinatorError::EngineLog(
-            execution::EngineLogError::Decode { source, .. },
+            execution::EngineLogError::Store(source),
         ))) => {
-            assert!(matches!(source, EventsDecodeError::BadRecord { .. }));
+            assert!(source.to_string().contains("not JSON"), "{source}");
         }
         Ok(_) => panic!("a corrupted file resumed"),
         Err(other) => panic!("expected the record refusal, got {other}"),
@@ -511,7 +511,11 @@ sleep 300
     let run = tokio::spawn(async move { host::run(&rt, graph).await });
     // The root invocation's scope 0 is the run's first lease.
     assert!(
-        wait_for_file(&dir.path().join(RUN_ID_FILE), Duration::from_secs(60)).await,
+        wait_for_file(
+            &dir.path().join(execution::RUN_FILE),
+            Duration::from_secs(60)
+        )
+        .await,
         "the run never started"
     );
     let sandbox = testkit::sandbox_name(dir.path(), 0);
@@ -598,7 +602,8 @@ async fn prune_deletes_a_kept_sandbox_and_records_the_tombstone() {
             && !testkit::container_is_running(&sandbox).await,
         "retention kept the sandbox, stopped"
     );
-    let records = execution::ResourceStore::load(dir.path().join(execution::RESOURCES_DIR))
+    let records = execution::ResourceStore::load(&testkit::read_run_dir(dir.path()).await)
+        .await
         .expect("records load");
     let record = records
         .resolve(execution::SandboxLeaseId::new(0))
@@ -628,7 +633,8 @@ async fn prune_deletes_a_kept_sandbox_and_records_the_tombstone() {
         testkit::container_id(&sandbox).await.is_none(),
         "prune deleted the sandbox"
     );
-    let records = execution::ResourceStore::load(dir.path().join(execution::RESOURCES_DIR))
+    let records = execution::ResourceStore::load(&testkit::read_run_dir(dir.path()).await)
+        .await
         .expect("records load");
     assert_eq!(
         records
@@ -644,7 +650,7 @@ async fn prune_deletes_a_kept_sandbox_and_records_the_tombstone() {
     assert!(again.deleted.is_empty() && again.is_clean(), "{again:?}");
 
     // A held run is refused.
-    let held = execution::hold_run_lease(dir.path()).expect("hold the run");
+    let held = testkit::write_run_dir(dir.path()).await;
     let error = prune(&prune_rt)
         .await
         .expect_err("a held run is not pruned");

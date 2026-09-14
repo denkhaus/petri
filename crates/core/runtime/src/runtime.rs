@@ -24,6 +24,7 @@ use frontend::{CompileInputs, DirFiles, Frontend, Lowered, REPOSITORY_VAR, Span}
 use ir::Graph;
 use serde_json::Value;
 use smol_str::SmolStr;
+use store::{Access, OwnerId, RunDirStore, RunKey, RunLogs, RunStore, StoreError};
 use tracing::field::Empty;
 
 /// The knobs a run gets, with the defaults the driver documents.
@@ -47,6 +48,10 @@ pub struct RunOptions {
     /// canary; on by default.
     pub verify_replay:       bool,
     pub sandbox:             SandboxOptions,
+    /// The run's identity in its store and on its sandbox providers. A host
+    /// with a run id of its own passes it; a resume of a stored run finds
+    /// the stored one; otherwise Petri mints one when the run is prepared.
+    pub run_key:             Option<RunKey>,
 }
 
 impl RunOptions {
@@ -60,6 +65,7 @@ impl RunOptions {
             echo:                false,
             verify_replay:       true,
             sandbox:             SandboxOptions::default(),
+            run_key:             None,
         }
     }
 }
@@ -104,6 +110,9 @@ pub struct Runtime {
     frontends:    Vec<Box<dyn Frontend>>,
     steps:        ::steps::Registry,
     executor:     Option<Arc<dyn Executor>>,
+    /// The store runs live in; `None` is the run directory under
+    /// `RunOptions::run_dir`.
+    store:        Option<Arc<dyn RunStore>>,
     secrets:      Arc<dyn SecretProvider>,
     observers:    Vec<Arc<dyn EventObserver>>,
     progress:     Option<Arc<dyn ProgressSink>>,
@@ -137,6 +146,7 @@ impl Runtime {
             frontends:    vec![Box::new(frontend_native::Native)],
             steps:        crate::steps::standard(),
             executor:     None,
+            store:        None,
             secrets:      Arc::new(MapSecrets::empty()),
             observers:    Vec::new(),
             progress:     None,
@@ -156,6 +166,7 @@ impl Runtime {
             frontends:    Vec::new(),
             steps:        ::steps::Registry::new(),
             executor:     None,
+            store:        None,
             secrets:      Arc::new(MapSecrets::empty()),
             observers:    Vec::new(),
             progress:     None,
@@ -195,6 +206,18 @@ impl Runtime {
     #[must_use]
     pub fn executor(mut self, executor: impl Executor + 'static) -> Self {
         self.executor = Some(Arc::new(executor));
+        self
+    }
+
+    /// Keep every run's durable record in `store` instead of the run
+    /// directory: a host's database, or [`store::MemoryRunStore`] for a run
+    /// that leaves no files of record. The run directory still holds what
+    /// is a file by nature (workspaces, step output). A resume through a
+    /// host store needs `RunOptions::run_key`, since the directory no
+    /// longer names the run.
+    #[must_use]
+    pub fn store(mut self, store: Arc<dyn RunStore>) -> Self {
+        self.store = Some(store);
         self
     }
 
@@ -446,13 +469,50 @@ impl Runtime {
     /// Prepare resources that are shared by every execution in one root run.
     pub fn prepare_run(&self, run_dir: impl Into<PathBuf>) -> RunRuntime {
         let run_dir = run_dir.into();
-        let (executor, router) = self.executor_for_run(&run_dir);
-        self.provision_run(run_dir, executor, router)
+        let key = self.run_key_for(&run_dir);
+        let (executor, router) = self.executor_for_run(&run_dir, &key);
+        self.provision_run(run_dir, key, executor, router)
+    }
+
+    /// The run's key: the one the options name, else the one the run
+    /// directory already stores (a resume over the run-directory store),
+    /// else a fresh one.
+    pub fn run_key_for(&self, run_dir: &Path) -> RunKey {
+        self.options
+            .run_key
+            .clone()
+            .or_else(|| {
+                self.store
+                    .is_none()
+                    .then(|| RunDirStore::new(run_dir).stored_key().ok().flatten())
+                    .flatten()
+            })
+            .unwrap_or_else(RunKey::mint)
+    }
+
+    /// The store runs under `run_dir` live in: the installed one, else the
+    /// run directory itself.
+    pub fn store_for(&self, run_dir: &Path) -> Arc<dyn RunStore> {
+        self.store
+            .clone()
+            .unwrap_or_else(|| Arc::new(RunDirStore::new(run_dir)))
+    }
+
+    /// Open the run under `run_dir` in the runtime's store: what a host does
+    /// to inspect, replay or prune a run without preparing it.
+    pub async fn open_run(
+        &self,
+        run_dir: &Path,
+        access: Access,
+    ) -> Result<Arc<dyn RunLogs>, StoreError> {
+        let key = self.run_key_for(run_dir);
+        self.store_for(run_dir).open(&key, access).await
     }
 
     fn executor_for_run(
         &self,
         run_dir: &Path,
+        key: &RunKey,
     ) -> (Arc<dyn Executor>, Option<Arc<RoutingExecutor>>) {
         // The standard router is kept by its own type too: the coordinator
         // hands it the lease ledger and releases leases through it. A
@@ -460,7 +520,7 @@ impl Runtime {
         if let Some(executor) = self.executor.clone() {
             (executor, None)
         } else {
-            let router = self.default_router_for(run_dir);
+            let router = self.default_router_for(run_dir, key);
             (router.clone(), Some(router))
         }
     }
@@ -468,12 +528,16 @@ impl Runtime {
     fn provision_run(
         &self,
         run_dir: PathBuf,
+        key: RunKey,
         executor: Arc<dyn Executor>,
         router: Option<Arc<RoutingExecutor>>,
     ) -> RunRuntime {
         let (caps, guards) = self.provision(&run_dir);
         RunRuntime {
+            store: self.store_for(&run_dir),
             run_dir,
+            key,
+            owner: OwnerId::mint(),
             options: self.options.clone(),
             executor,
             router,
@@ -509,7 +573,8 @@ impl Runtime {
         graph: Graph,
         log: EventLog,
     ) -> Result<(Driver, ResumeInfo), ResumeError> {
-        let (executor, router) = self.executor_for_run(&self.options.run_dir);
+        let key = self.run_key_for(&self.options.run_dir);
+        let (executor, router) = self.executor_for_run(&self.options.run_dir, &key);
         let (driver, info) = Driver::resume(
             graph,
             log,
@@ -518,7 +583,7 @@ impl Runtime {
             self.secrets.clone(),
             self.run_config(),
         )?;
-        let run = self.provision_run(self.options.run_dir.clone(), executor, router);
+        let run = self.provision_run(self.options.run_dir.clone(), key, executor, router);
         Ok((run.equip_standalone(driver), info))
     }
 
@@ -570,21 +635,39 @@ impl Runtime {
     pub fn sandbox_router_for(&self, run_dir: &Path) -> Option<Arc<RoutingExecutor>> {
         self.executor
             .is_none()
-            .then(|| self.default_router_for(run_dir))
+            .then(|| self.default_router_for(run_dir, &self.run_key_for(run_dir)))
     }
 
-    fn default_router_for(&self, run_dir: &Path) -> Arc<RoutingExecutor> {
-        Arc::new(RoutingExecutor::with_options(
-            run_dir,
-            self.options.retention,
-            self.options.sandbox.clone(),
-        ))
+    fn default_router_for(&self, run_dir: &Path, key: &RunKey) -> Arc<RoutingExecutor> {
+        Arc::new(
+            RoutingExecutor::with_options(
+                run_dir,
+                self.options.retention,
+                self.options.sandbox.clone(),
+            )
+            .with_run_id(key.as_str()),
+        )
     }
+}
+
+/// How a [`RunRuntime`] opens its run: the access modes of
+/// [`store::Access`] under the run's own key and owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunAccess {
+    Create,
+    Write,
+    Read,
 }
 
 /// Shared runtime services and configuration for all executions in one run.
 pub struct RunRuntime {
+    /// The store the run's durable record lives in.
+    store:     Arc<dyn RunStore>,
     run_dir:   PathBuf,
+    /// The run's identity in its store and on its providers.
+    key:       RunKey,
+    /// This coordinator instance, for the store's writer lease.
+    owner:     OwnerId,
     options:   RunOptions,
     executor:  Arc<dyn Executor>,
     /// The standard router, when the executor is one.
@@ -614,6 +697,39 @@ impl RunRuntime {
         &self.run_dir
     }
 
+    /// The run's key: its identity in its store, and the run id every
+    /// sandbox of the run is labelled with.
+    pub fn run_key(&self) -> &RunKey {
+        &self.key
+    }
+
+    /// This coordinator instance's owner id, minted when the run was
+    /// prepared: what the store's writer lease is taken for.
+    pub fn owner(&self) -> &OwnerId {
+        &self.owner
+    }
+
+    /// The store the run's durable record lives in.
+    pub fn store(&self) -> &Arc<dyn RunStore> {
+        &self.store
+    }
+
+    /// Open this run in its store: `Create` for a fresh run, `Write` to
+    /// continue one, both under this instance's owner; `Read` takes no
+    /// lease.
+    pub async fn open(&self, access: RunAccess) -> Result<Arc<dyn RunLogs>, StoreError> {
+        let access = match access {
+            RunAccess::Create => Access::Create {
+                owner: self.owner.clone(),
+            },
+            RunAccess::Write => Access::Write {
+                owner: self.owner.clone(),
+            },
+            RunAccess::Read => Access::Read,
+        };
+        self.store.open(&self.key, access).await
+    }
+
     /// The standard routing executor, when this run uses it: the host that
     /// prunes sandboxes reaches the run's lease manager through it.
     pub fn sandbox_router(&self) -> Option<&Arc<RoutingExecutor>> {
@@ -626,6 +742,21 @@ impl RunRuntime {
     pub fn attach_lease_ledger(&self, ledger: Arc<dyn LeaseLedger>) {
         if let Some(router) = &self.router {
             router.set_ledger(ledger);
+        }
+    }
+
+    /// Reconcile the run's recorded leases with their providers before any
+    /// create: the takeover step of a resume. `host` names the leases on the
+    /// host provider and `container` the rest. A no-op under a
+    /// caller-supplied executor.
+    pub async fn reconcile_leases(
+        &self,
+        host: &[executor_sandbox::RecordedLease],
+        container: &[executor_sandbox::RecordedLease],
+    ) -> executor_sandbox::ReconcileReport {
+        match &self.router {
+            Some(router) => router.reconcile(host, container).await,
+            None => executor_sandbox::ReconcileReport::default(),
         }
     }
 

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use execution::host::{self, HostRun};
-use execution::inspect::inspect_run;
+use execution::inspect::inspect_run_dir;
 use fabro_acceptance::runs::fresh_run_dir;
 use frontend::{CompileInputs, Lowered, MapFiles, NoFiles};
 use frontend_fabro::load;
@@ -93,7 +93,7 @@ async fn a_manager_loop_runs_one_child_and_returns_its_context_changes() {
         "{output}"
     );
     assert_eq!(report.state.run_context().get("n"), Some(&json!("1")));
-    let inspection = inspect_run(&dir).expect("the run inspects");
+    let inspection = inspect_run_dir(&dir).await.expect("the run inspects");
     assert_eq!(
         inspection.invocations.len(),
         2,

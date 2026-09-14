@@ -13,10 +13,10 @@ use std::time::{Duration, Instant};
 use petri::engine::{EngineState, Event, EventRecord, RunError};
 use petri::execution::controls::{ControlError, ControlService};
 use petri::execution::events::{
-    CollectingSink, EventProjector, EventSource, ViewEvent, replay_run,
+    CollectingSink, EventProjector, EventSource, ViewEvent, replay_run_dir,
 };
 use petri::execution::host::{self, HostRun};
-use petri::execution::inspect::inspect_run;
+use petri::execution::inspect::inspect_run_dir;
 use petri::execution::watchdog::StallWatchdog;
 use petri::execution::{
     CancelReason, CoordinatorEvent, CoordinatorRecord, ExecutionId, ExecutionObserver,
@@ -150,7 +150,7 @@ async fn a_repeated_deterministic_failure_trips_the_breaker_across_restarts() {
     );
     assert!(reason.contains("repeated 3 times (limit 3)"), "{reason}");
     // Three executions ran (two restarts), one `work` each.
-    let document = inspect_run(dir.path()).expect("inspects");
+    let document = inspect_run_dir(dir.path()).await.expect("inspects");
     assert_eq!(document.executions.len(), 3, "{document:?}");
 }
 
@@ -175,7 +175,7 @@ async fn a_success_between_failures_does_not_clear_the_count() {
         .await
         .expect("the run completes");
     assert_eq!(report.status, RunStatus::Failed);
-    let document = inspect_run(dir.path()).expect("inspects");
+    let document = inspect_run_dir(dir.path()).await.expect("inspects");
     assert_eq!(document.executions.len(), 4, "fail, fail, success, fail");
 }
 
@@ -236,7 +236,7 @@ async fn a_restart_edge_admits_only_transient_failures() {
         "{:?}",
         report.state.errors()
     );
-    let document = inspect_run(dir.path()).expect("inspects");
+    let document = inspect_run_dir(dir.path()).await.expect("inspects");
     assert_eq!(document.executions.len(), 2, "one restart, then success");
 }
 
@@ -277,7 +277,7 @@ async fn node_visit_totals_survive_a_restart_while_context_resets() {
         "{:?}",
         report.state.errors()
     );
-    let document = inspect_run(dir.path()).expect("inspects");
+    let document = inspect_run_dir(dir.path()).await.expect("inspects");
     assert_eq!(document.executions.len(), 3);
     // The final execution started with an empty context: the restart
     // replaced it, and `seen` was written again by nothing.
@@ -313,11 +313,7 @@ async fn the_breaker_state_is_restored_on_resume() {
 
     // Crash the last execution right after `work`'s final StepFinished:
     // the block decision is not in the log any more.
-    let executions = dir
-        .path()
-        .join("invocations")
-        .join(format!("{:016x}", 0))
-        .join("executions");
+    let executions = dir.path().join("executions");
     let mut dirs: Vec<_> = fs::read_dir(&executions)
         .expect("executions")
         .map(|e| e.expect("entry").path())
@@ -425,7 +421,7 @@ async fn an_idle_run_is_cancelled_by_the_watchdog() {
         )),
         "the cancel names its reason: {events:#?}"
     );
-    let replayed = replay_run(dir.path()).expect("replays");
+    let replayed = replay_run_dir(dir.path()).await.expect("replays");
     assert!(
         replayed
             .iter()
@@ -606,7 +602,7 @@ async fn pause_holds_admission_and_unpause_releases_it() {
         .position(|e| matches!(e.coordinator(), Some(CoordinatorEvent::RunUnpaused)))
         .expect("unpaused");
     assert!(unpaused < first_attempt, "{events:#?}");
-    let replayed = replay_run(dir.path()).expect("replays");
+    let replayed = replay_run_dir(dir.path()).await.expect("replays");
     let durable: Vec<_> = replayed
         .iter()
         .filter(|e| {
@@ -818,7 +814,7 @@ async fn crash_while_paused(dir: &RunDir) -> Vec<String> {
 
 /// What a resumed run admitted during its first `wait`, and whether its
 /// control service came back paused.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ResumeObservation {
     admitted: Vec<String>,
     paused:   bool,
@@ -856,7 +852,7 @@ async fn a_pause_survives_resume_and_holds_admission_until_unpaused() {
     )
     .await
     .expect("resumes");
-    let observed = observed.lock().expect("not poisoned");
+    let observed = observed.lock().expect("not poisoned").clone();
     assert!(
         observed.paused,
         "the resumed control service starts paused: the last recorded control was a pause"
@@ -879,7 +875,7 @@ async fn a_pause_survives_resume_and_holds_admission_until_unpaused() {
     }
     // Both controls are durable coordinator records: the pause from the
     // first process, the unpause from the second.
-    let replayed = replay_run(dir.path()).expect("replays");
+    let replayed = replay_run_dir(dir.path()).await.expect("replays");
     let controls_seen: Vec<_> = replayed
         .iter()
         .filter(|e| {
@@ -904,7 +900,7 @@ async fn a_pause_survives_resume_and_holds_admission_until_unpaused() {
             .all(|e| e.id.source == EventSource::Coordinator),
         "{controls_seen:#?}"
     );
-    let inspection = inspect_run(dir.path()).expect("inspects");
+    let inspection = inspect_run_dir(dir.path()).await.expect("inspects");
     assert!(!inspection.paused);
 }
 
@@ -914,7 +910,7 @@ async fn a_pause_survives_resume_and_holds_admission_until_unpaused() {
 async fn a_paused_resumed_run_can_be_cancelled() {
     let dir = RunDir::new("controls-pause-resume-cancel");
     crash_while_paused(&dir).await;
-    let inspection = inspect_run(dir.path()).expect("inspects");
+    let inspection = inspect_run_dir(dir.path()).await.expect("inspects");
     assert!(inspection.paused, "the run directory records the pause");
 
     let controls = ControlService::new();

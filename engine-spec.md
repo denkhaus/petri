@@ -542,12 +542,22 @@ driver's path is unchanged.
 **Persistence surface.** The core's whole persistence surface is `EventLog`'s
 serde plus `EventLog::try_from_records(version, records)` (version checked
 under the standing no-migrator policy; seqs contiguous from 0). How records
-are framed and stored is the host's business; the stock run-dir file
-convention is one `coordinator.jsonl`, content-addressed `graphs/`, durable
-`resources/`, and one `events.jsonl` per execution (a `LOG_VERSION` header,
-then one `{"seq", "origin", "recorded_at", "body"}` line per record, the
-same line a public event carries under `record`). It is the
-standalone petri host's own and is documented with it, not here.
+are framed and stored is the host's business. Above the core, a run's
+durable record goes through the `petri-store` seam (`store::RunStore` opens
+a run by key, `store::RunLogs` appends and reads records per log and puts
+and gets blobs by digest): the coordinator log, one engine log per
+execution and the sandbox resource log are append-only logs of records, and
+registered graphs are content-addressed blobs. The stored unit is the
+record, `{"seq", "origin", "recorded_at", "body"}`, the same value a public
+event carries under `record`; a backend stores it opaquely, and every
+decode and version check stays on Petri's side. Two backends ship in tree:
+`RunDirStore`, the run directory (`run.json`, `coordinator.jsonl`,
+`resources.jsonl`, `graphs/<digest>.json`, one
+`executions/<execution>/events.jsonl` per execution, one record per line
+and no header), and `MemoryRunStore` for tests. The engine log version is
+pinned by the run format version, checked on the run declaration. The
+layout is the standalone petri host's own and is documented with it, not
+here.
 
 **Resume.** `engine::resume(graph, &log)` rebuilds a crashed run by replay and
 reconciles what is still owed. The loaded log must be a **byte-prefix** of the
@@ -675,14 +685,16 @@ recorded match, stops it once (ending whatever a dead execution or a dead
 plugin generation left running, one-shot containers included) and starts it
 once before any holder resumes; more than one match is an `env_acquire`
 error, never an arbitrary choice. A fresh create happens only when
-reconciliation finds no match. The run id is recorded in the run dir
-(`sandbox-run-id`) before the run's first container exists, so any executor
-over the same run dir computes the same labels. Every provider is reached
+reconciliation finds no match. The run id is the run's store key, carried
+by the run declaration and handed to every executor of the run, so any
+executor over the same run computes the same labels; a driver with no
+coordinator names its run after its run directory. Every provider is reached
 through sandbox-driver's JSON-RPC plugin, including Host, Docker, and Daytona: a plugin
 process that dies fails every in-flight call routably, is never asked to
 replay an ambiguous call, and is relaunched single-flight by the next call, and
 a generation change forces the recovery fence before any holder resumes. The
-durable resource record (`resources/<lease>.json`) is the crash-safe authority:
+durable resource record (one line per transition in the run's resource log,
+the latest per lease current) is the crash-safe authority:
 it carries the allocation state (`allocating`, `live`, `stopped`, `deleted`),
 a pending intent (`stop`, `delete`) written before the provider call and
 cleared only after it succeeds, the real provider kind and resource id, and a

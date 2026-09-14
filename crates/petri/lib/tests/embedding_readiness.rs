@@ -29,7 +29,7 @@ use petri::driver::lifecycle::{
 };
 use petri::engine::Event;
 use petri::execution::events::{
-    CollectingSink, Derived, EventProjector, Parsed, RunEvent, ViewEvent, replay_run,
+    CollectingSink, Derived, EventProjector, Parsed, RunEvent, ViewEvent, replay_run_dir,
 };
 use petri::execution::host::{self, HostRun};
 use petri::execution::{
@@ -1117,7 +1117,7 @@ async fn the_combined_workflow_runs_through_the_embedding_boundary() {
     }
 
     // Replay yields the same public stream, identity for identity.
-    let mut replayed = replay_run(dir.path()).expect("replays");
+    let mut replayed = replay_run_dir(dir.path()).await.expect("replays");
     replayed.sort_by_key(|e| e.id);
     let live = normalized(&events);
     for (index, (from_replay, from_live)) in replayed.iter().zip(&live).enumerate() {

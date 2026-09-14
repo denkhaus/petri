@@ -418,7 +418,7 @@ async fn resume_of_a_missing_or_corrupt_run_dir_exits_2_with_the_cause() {
     let missing = case.resume_with(&["--quiet"], Launch::default()).await;
     missing.assert_code(2);
     assert!(
-        missing.stderr.contains("error:") && missing.stderr.contains("coordinator.jsonl"),
+        missing.stderr.contains("error:") && missing.stderr.contains("run.json"),
         "{}",
         missing.stderr
     );
@@ -446,7 +446,7 @@ async fn resume_of_a_missing_or_corrupt_run_dir_exits_2_with_the_cause() {
     let refused = corrupt.resume_with(&["--quiet"], Launch::default()).await;
     refused.assert_code(2);
     assert!(
-        refused.stderr.contains("error:") && refused.stderr.contains("invalid coordinator record"),
+        refused.stderr.contains("error:") && refused.stderr.contains("is not JSON"),
         "{}",
         refused.stderr
     );

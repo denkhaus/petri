@@ -103,9 +103,10 @@ by `event`.
 ## Sources and identity
 
 Every `RunEvent` is derived from one durable record: a coordinator record
-(`coordinator.jsonl`) or an engine record (one execution's `events.jsonl`) with
-the post-apply engine state beside it. The derivation is the same live (the
-`EventProjector` observer) and over a finished run dir (`replay_run`). Every
+(the run's coordinator log) or an engine record (one execution's engine log)
+with the post-apply engine state beside it. The derivation is the same live
+(the `EventProjector` observer) and over a run's store (`replay_run` over a
+`store::RunLogs` handle; `replay_run_dir` over a run directory). Every
 record carries the time it was appended (`recorded_at`, milliseconds since the
 Unix epoch), read at the recording boundary — the driver's append for an
 engine record, the coordinator store's for a coordinator record, never inside
@@ -170,8 +171,9 @@ Every stored record is one event, `index` 0, with the record under `record`.
 The identifier is the `body.event` tag, which is also the tag in the stored
 line. Rust field types are as the engine and coordinator declare them.
 
-Coordinator records, one `coordinator.jsonl` per run, origin always
-external. Log identity `{ "log": "coordinator" }`.
+Coordinator records, one coordinator log per run (`coordinator.jsonl` in a
+run directory), origin always external. Log identity
+`{ "log": "coordinator" }`.
 
 | `event` | Body type | Fields and derived values |
 | --- | --- | --- |
@@ -186,7 +188,8 @@ external. Log identity `{ "log": "coordinator" }`.
 | `run.note.recorded` | `RunNoteRecorded` | `execution` (the one whose driver ran the point, when known), `kind`, `payload`: a note from a run-level hook point (`run_finished`, `scope_released`), appended from the execution's report before `run.finished`. Derived: `parsed`, the same reading a firing's note gets |
 | `run.finished` | `RunFinished` | `status`. Nothing derived |
 
-Engine records, one `events.jsonl` per execution. Log identity
+Engine records, one engine log per execution
+(`executions/<execution>/events.jsonl` in a run directory). Log identity
 `{ "log": "execution", "execution": <id> }`. Each is attributed to a subject
 where one exists.
 
@@ -346,7 +349,9 @@ cancellation, and this contract does not claim it does.
   crash kept off disk) before dispatching pending work, with the same
   identities; delivery is at-least-once, deduplicated by `EventId`. A
   projector attached at resume is built with `EventProjector::primed`, which
-  folds the on-disk prefix into its state without delivering it.
+  folds the stored prefix into its state without delivering it.
+  `replay_since` is the incremental form of `replay_run`: the events past a
+  set of held `EventId`s per log, for a consumer that already holds a prefix.
 - A step's progress event is queued or acknowledged. `StepCtx::logs.send`
   resolves once the event is queued: it is ordered behind the attempt's
   earlier sends and ahead of its outcome, because the driver's completion
@@ -354,9 +359,10 @@ cancellation, and this contract does not claim it does.
   outcome implies its earlier events are durable. Queueing alone is not
   durability: a crash between the queue and the append loses the event.
   `send_acked` resolves only after the driver appended the record and every
-  observer's durable storage confirmed it (`EventObserver::durable`; the run
-  dir's writer answers once the record is written and flushed to
-  `events.jsonl`), and a store's write failure is the sender's error. The
+  observer's durable storage confirmed it (`EventObserver::durable`; the
+  run's store writer answers once the record's append returned from the
+  store, past the point where a process crash can lose it), and a store's
+  write failure is the sender's error. The
   native agent backend records every Pebble event acknowledged, so Pebble's
   own acknowledgement means the event is in Petri's log. What a crash still
   repeats is the attempt: an attempt whose finish never landed is
@@ -377,21 +383,24 @@ values stores the logs: the coordinator log whole, and each execution's
 engine log whole. The record commit is the only durability boundary; view
 events are recomputed from records by `Projection`, live or after the fact.
 
-`execution::events::verify_export` is the proof, run over a run dir: it
-projects the run, takes the `record` values out of the stream, and checks
-that they equal the stored records as JSON values, that they reload through
-the existing log readers into the same logs, and that the stored external
-records replay to the stored logs, whole for an execution the coordinator
-recorded as finished and as a prefix for a crash log. The standalone host
-runs it at the end of every run beside `engine::verify_replay`
-(`RunOptions::verify_replay`, on by default), so every run in the test suites
-is an export case.
+`execution::events::verify_export` is the proof, run over a run's store
+(`verify_export_run_dir` over a run directory): it projects the run, takes
+the `record` values out of the stream, and checks that they equal the stored
+records as JSON values, that they reload through the record decoders into the
+same logs, and that the stored external records replay to the stored logs,
+whole for an execution the coordinator recorded as finished and as a prefix
+for a crash log. The standalone host runs it at the end of every run beside
+`engine::verify_replay` (`RunOptions::verify_replay`, on by default), so
+every run in the test suites is an export case. The store is what a host
+keeps: a host with a database of its own implements `store::RunStore` and
+`store::RunLogs` over it (`crates/core/store`), Petri's coordinator writes
+the same records there, and `verify_export` holds over that store too.
 
 Crash recovery: read-only projection publishes what is stored. `replay_run`
-regenerates the core records a crash kept off disk, so its state is right,
-but publishes no event attached to them. A resume writes those records
-through the normal storage path, with normal recording times, before its
-observers see them: the driver hands the regenerated suffix to the log
+regenerates the core records a crash kept out of the store, so its state is
+right, but publishes no event attached to them. A resume writes those
+records through the normal storage path, with normal recording times, before
+its observers see them: the driver hands the regenerated suffix to the store
 writer first and to every other observer after it, before it dispatches
 pending work. Existing records keep their times. Live and replayed views
 agree at the same durable positions.
@@ -405,7 +414,7 @@ post-mask: a secret reference stays `{"$secret": ...}`, a masked value stays
 ## Terminal output
 
 The CLI's terminal rendering (`[node#firing] line`, status lines) is a
-presentation over these events and the run dir. It is not part of the
+presentation over these events and the run's store. It is not part of the
 contract; a host consumes `RunEvent`s and never parses terminal text.
 
 ## Event-coverage matrix

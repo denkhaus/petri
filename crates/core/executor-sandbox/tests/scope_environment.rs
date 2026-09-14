@@ -35,7 +35,7 @@ async fn inherited_holders_keep_scope_options_and_process_environment_precedence
         return;
     }
     let dir = RunDir::new("shared-sandbox-environment");
-    let router = RoutingExecutor::local(dir.path(), Retention::Never);
+    let router = RoutingExecutor::local(dir.path(), Retention::Never).with_run_id(dir.run_id());
     let mut runtime = RuntimeSpec::container("alpine:3.20");
     if let RuntimeTarget::Container { options, .. } = &mut runtime.target {
         options.env = vec![
@@ -74,7 +74,7 @@ async fn inherited_holders_keep_scope_options_and_process_environment_precedence
             .line,
         "waiting"
     );
-    let name = testkit::sandbox_name(dir.path(), lease.raw());
+    let name = dir.sandbox_name(lease.raw());
     let sandbox_id = testkit::container_id(&name).await.expect("parent sandbox");
     let child = router.acquire(&child, &ctx).await.expect("child");
     assert_eq!(

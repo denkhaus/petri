@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use execution::host::EVENTS_FILE;
@@ -15,8 +15,10 @@ use executor::{
 };
 use ir::{GraphBuilder, Outcome, RunStatus, RuntimeSpec, Scope, ScopeId, StepRef};
 use runtime::steps::{Step, StepCtx};
+use runtime::store::{RunKey, RunStore as _};
 use runtime::{RunOptions, Runtime};
 use testkit::{RunDir, container_id, container_is_running, is_docker_ready, sandbox_name};
+use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 struct HandleChildFailure;
@@ -76,6 +78,7 @@ async fn check_failed_child_retention(runtime_spec: RuntimeSpec) {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("coordinator starts");
     let mut child = GraphBuilder::bare();
     let mut scope = Scope::new(ScopeId::new(0));
@@ -91,6 +94,7 @@ async fn check_failed_child_retention(runtime_spec: RuntimeSpec) {
     );
     let child = coordinator
         .register_graph(&child.build())
+        .await
         .expect("child graph");
     let mut parent = GraphBuilder::new();
     parent.add_node(
@@ -100,13 +104,15 @@ async fn check_failed_child_retention(runtime_spec: RuntimeSpec) {
     );
     let parent = coordinator
         .register_graph(&parent.build())
+        .await
         .expect("parent graph");
     let result = coordinator
         .run_root(parent, BTreeMap::new())
         .await
         .expect("run");
     assert_eq!(result.status, RunStatus::Success);
-    let store = execution::ResourceStore::load(directory.path().join(execution::RESOURCES_DIR))
+    let store = execution::ResourceStore::load(&testkit::read_run_dir(directory.path()).await)
+        .await
         .expect("resources");
     let child = store
         .records()
@@ -173,10 +179,14 @@ async fn invocation_finish_releases_its_host_action_sandbox() {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("coordinator starts");
     let mut graph = GraphBuilder::new();
     graph.add_step("action", ScopeId::new(0), HostAction::NAME);
-    let graph = coordinator.register_graph(&graph.build()).expect("graph");
+    let graph = coordinator
+        .register_graph(&graph.build())
+        .await
+        .expect("graph");
     let result = coordinator
         .run_root(graph, BTreeMap::new())
         .await
@@ -201,6 +211,7 @@ async fn an_execution_restart_keeps_the_container_identity_and_workspace() {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .unwrap();
     let mut graph = GraphBuilder::bare();
     let mut scope = Scope::new(ScopeId::new(0));
@@ -229,7 +240,7 @@ async fn an_execution_restart_keeps_the_container_identity_and_workspace() {
     graph.mark_entry(start);
     graph.link(start, after);
     graph.node_mut(start).routing.groups[0].arms[0].transition = ir::EdgeTransition::Restart;
-    let graph = coordinator.register_graph(&graph.build()).unwrap();
+    let graph = coordinator.register_graph(&graph.build()).await.unwrap();
     let result = timeout(
         Duration::from_secs(60),
         coordinator.run_root(graph, BTreeMap::new()),
@@ -238,11 +249,7 @@ async fn an_execution_restart_keeps_the_container_identity_and_workspace() {
     .unwrap_or_else(|_| {
         let logs = [0, 1].map(|index| {
             let path = coordinator
-                .store()
-                .execution_dir(
-                    execution::InvocationId::ROOT,
-                    execution::ExecutionId::new(index),
-                )
+                .execution_dir(execution::ExecutionId::new(index))
                 .join(EVENTS_FILE);
             fs::read_to_string(path)
         });
@@ -254,7 +261,9 @@ async fn an_execution_restart_keeps_the_container_identity_and_workspace() {
     .unwrap();
     assert_eq!(result.status, RunStatus::Success);
     assert_eq!(result.final_execution.raw(), 1);
-    let records = execution::ResourceStore::load(directory.path().join("resources")).unwrap();
+    let records = execution::ResourceStore::load(&testkit::read_run_dir(directory.path()).await)
+        .await
+        .unwrap();
     assert_eq!(
         records.records().count(),
         1,
@@ -283,6 +292,7 @@ async fn a_failed_host_scope_is_retained_and_pruned_through_a_fresh_plugin() {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("coordinator");
     let mut graph = GraphBuilder::new();
     graph.add_node(
@@ -293,14 +303,18 @@ async fn a_failed_host_scope_is_retained_and_pruned_through_a_fresh_plugin() {
             serde_json::json!({ "run": "echo retained > proof; exit 1", "shell": "sh" }),
         ),
     );
-    let graph = coordinator.register_graph(&graph.build()).expect("graph");
+    let graph = coordinator
+        .register_graph(&graph.build())
+        .await
+        .expect("graph");
     let result = coordinator
         .run_root(graph, BTreeMap::new())
         .await
         .expect("run");
     coordinator.finish().await;
     assert_eq!(result.status, RunStatus::Failed);
-    let store = execution::ResourceStore::load(directory.path().join(execution::RESOURCES_DIR))
+    let store = execution::ResourceStore::load(&testkit::read_run_dir(directory.path()).await)
+        .await
         .expect("resources");
     let record = store.records().next().expect("host lease");
     assert_eq!(record.provider.as_str(), "host");
@@ -331,7 +345,8 @@ async fn a_failed_host_scope_is_retained_and_pruned_through_a_fresh_plugin() {
         !workspace.exists(),
         "provider deletion removes its managed workspace"
     );
-    let store = execution::ResourceStore::load(directory.path().join(execution::RESOURCES_DIR))
+    let store = execution::ResourceStore::load(&testkit::read_run_dir(directory.path()).await)
+        .await
         .expect("resources");
     assert_eq!(
         store.records().next().expect("tombstone").state,
@@ -346,14 +361,23 @@ async fn prune_removes_crashed_host_action_containers_including_tombstoned_lease
     }
     for tombstoned in [false, true] {
         let directory = RunDir::new("host-action-prune");
+        let key = RunKey::new(directory.run_id());
+        // The run manifest: a run declaration under a writer this test
+        // holds, released before prune takes the run.
+        let logs = execution::RunDirStore::new(directory.path())
+            .open(&key, execution::Access::Create {
+                owner: execution::OwnerId::mint(),
+            })
+            .await
+            .expect("the run is created");
         drop(
-            execution::CoordinatorStore::create(directory.path(), Vec::new())
+            execution::CoordinatorStore::create(logs.clone(), key, Vec::new())
+                .await
                 .expect("run manifest"),
         );
         let runtime = Runtime::standard().options(RunOptions::new(directory.path()));
         let scope = ScopeSpec::new(ScopeId::new(0), "scope-0");
-        let mut resources = ResourceStore::load(directory.path().join(execution::RESOURCES_DIR))
-            .expect("resource store");
+        let mut resources = ResourceStore::load(&logs).await.expect("resource store");
         let lease = resources
             .ensure_record(
                 SandboxAllocationKey {
@@ -365,6 +389,7 @@ async fn prune_removes_crashed_host_action_containers_including_tombstoned_lease
                 scope.runtime.clone(),
                 None,
             )
+            .await
             .expect("host reservation")
             .lease;
         let ledger = Arc::new(ResourceLedger::new(Arc::new(Mutex::new(resources))));
@@ -385,7 +410,7 @@ async fn prune_removes_crashed_host_action_containers_including_tombstoned_lease
         let mut lines = process.lines().expect("action lines");
         while lines.recv().await.is_some() {}
         assert!(process.wait().await.expect("action finishes").is_success());
-        let prefix = router.container_prefix().await.expect("prefix");
+        let prefix = router.container_prefix();
         assert_eq!(testkit::list_containers(&prefix).await.len(), 1);
         // A fresh router has only durable records, just as after a crash.
         router.shutdown().await;
@@ -403,13 +428,19 @@ async fn prune_removes_crashed_host_action_containers_including_tombstoned_lease
                     .is_clean()
             );
             cleanup.shutdown().await;
+            drop(cleanup);
+        } else {
+            drop(ledger);
         }
+        // The test's own writer handle goes before prune takes the run.
+        drop(logs);
 
         let report = prune(&runtime).await.expect("prune");
         assert!(report.is_clean(), "{report:?}");
         assert_eq!(report.deleted.len(), 1);
         assert!(testkit::list_containers(&prefix).await.is_empty());
-        let resources = ResourceStore::load(directory.path().join(execution::RESOURCES_DIR))
+        let resources = ResourceStore::load(&testkit::read_run_dir(directory.path()).await)
+            .await
             .expect("persisted tombstone");
         assert_eq!(
             resources.resolve(lease).unwrap().state,

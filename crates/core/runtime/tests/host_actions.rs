@@ -11,7 +11,7 @@ use executor::{
 };
 use executor_sandbox::{MemoryLedger, PluginSettings, PluginSource, RoutingExecutor};
 use ir::ScopeId;
-use testkit::{RunDir, container_id, is_docker_ready, list_containers, recorded_run_id};
+use testkit::{RunDir, container_id, is_docker_ready, list_containers};
 use tokio::fs;
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -107,7 +107,7 @@ async fn inherited_host_scopes_share_the_helper_and_keep_their_own_env() {
         return;
     }
     let dir = RunDir::new("host-actions-inherited");
-    let router = RoutingExecutor::local(dir.path(), Retention::Always);
+    let router = RoutingExecutor::local(dir.path(), Retention::Always).with_run_id(dir.run_id());
     let lease = SandboxLeaseId::new(7);
     let ledger = Arc::new(MemoryLedger::default());
     router.set_ledger(ledger);
@@ -120,7 +120,7 @@ async fn inherited_host_scopes_share_the_helper_and_keep_their_own_env() {
     let parent = router.acquire(&parent_spec, &ctx).await.expect("parent");
     let parent_runner = parent.container_runner().expect("runner");
     assert_eq!(action_env(&*parent_runner).await, "parent");
-    let name = format!("petri-{}-a-shared", recorded_run_id(dir.path()));
+    let name = format!("{}a-shared", dir.container_prefix());
     let original = container_id(&name).await.expect("action host");
 
     let mut child_spec =
@@ -158,7 +158,7 @@ async fn inherited_host_scopes_share_the_helper_and_keep_their_own_env() {
     let report = router.release_lease(lease, ScopeOutcome::Succeeded).await;
     assert!(report.is_clean(), "{report:?}");
     assert!(report.released_any("action host"));
-    let prefix = format!("petri-{}-", recorded_run_id(dir.path()));
+    let prefix = dir.container_prefix();
     assert!(list_containers(&prefix).await.is_empty());
 }
 
@@ -188,7 +188,7 @@ async fn releasing_a_host_lease_needs_no_container_provider() {
     );
     let report = router.release_lease(lease, ScopeOutcome::Succeeded).await;
     assert!(report.is_clean(), "{report:?}");
-    assert!(dir.path().join(executor_sandbox::RUN_ID_FILE).is_file());
+    assert!(!router.container_prefix().is_empty());
 }
 
 #[tokio::test]

@@ -23,9 +23,9 @@
 //!   apply produced it at `index` 1 and up.
 //!
 //! The same derivation runs live (as an [`ExecutionObserver`]) and over a
-//! finished run dir ([`replay_run`]), so a host that lost its live
+//! run's stored logs ([`replay_run`]), so a host that lost its live
 //! subscription rebuilds the same events, in the same order, with the same
-//! identities, from the files alone. Nothing here reads a clock inside the
+//! identities, from the records alone. Nothing here reads a clock inside the
 //! state machine: `recorded_at` is the time the record was appended to its
 //! log, read at that boundary and persisted beside the record, so it is the
 //! same live and on replay; `observed_at` is stamped by the projector when
@@ -92,11 +92,11 @@
 //! here is post-mask: a secret reference stays `{"$secret": ...}` and a
 //! masked value stays `***`.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::{fs, io};
 
 use driver::lifecycle::{BUDGET_PAUSED_KIND, BUDGET_RESUMED_KIND, BudgetNote, Note};
 use driver::{BranchMap, BranchRef, BranchRole};
@@ -112,23 +112,22 @@ use ir::{
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 use steps::{ANSWER_KEY, Answer, Question, QuestionExpired};
+use store::{Access, RunLogs};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use crate::hooks::{HOOK_ACTIVITY_NOTE_KIND, HookActivity};
-use crate::host::EVENTS_FILE;
-use crate::store::execution_relative_dir;
+use crate::store::{decode_graph, graph_bytes, read_coordinator_log};
 use crate::{
-    COORDINATOR_FILE, CancelReason, CoordinatorEvent, CoordinatorRecord, CoordinatorState,
-    DecodedCoordinatorLog, DecodedEngineLog, EngineLogError, ExecutionId, ExecutionObserver,
-    GRAPHS_DIR, InvocationId, ParentCallKey, StateError, StoreError, StoredEngineRecord,
-    decode_coordinator_log, read_engine_log,
+    CancelReason, CoordinatorEvent, CoordinatorRecord, CoordinatorState, DecodedEngineLog,
+    EngineLogError, ExecutionId, ExecutionObserver, InvocationId, ParentCallKey, StateError,
+    StoreError, StoredEngineRecord, open_run_dir, read_execution_log,
 };
 
 pub mod export;
 
-pub use export::{ExportError, verify_export};
+pub use export::{ExportError, verify_export, verify_export_run_dir};
 
 /// The version of this contract. Bump when an existing field changes meaning
 /// or a variant is removed; adding a variant or an optional field does not.
@@ -664,6 +663,31 @@ type View = (Option<Subject>, ViewEvent);
 
 /// The stateless-by-record derivation, with the little state it needs across
 /// records. One per run; fed both logs.
+///
+/// The fold is pure: it reads records and the post-apply engine state, does
+/// no I/O, and hands back owned events. A record's own event carries the
+/// record unchanged under `record`:
+///
+/// ```
+/// use engine::{EngineState, Event, EventOrigin, EventRecord};
+/// use execution::ExecutionId;
+/// use execution::events::{Projection, Record};
+/// use ir::{CancelScopeId, Graph};
+///
+/// let record = EventRecord {
+///     seq:    0,
+///     origin: EventOrigin::External,
+///     event:  Event::cancel_scope(CancelScopeId::ROOT),
+/// };
+/// let state = EngineState::new(Graph::new());
+/// let events = Projection::new().engine(ExecutionId::new(0), &record, 1_000, &state);
+/// let Some(Record::Engine(stored)) = &events[0].record else {
+///     panic!("a record's own event carries the record");
+/// };
+/// assert_eq!(stored.seq, 0);
+/// assert_eq!(stored.recorded_at, 1_000);
+/// assert_eq!(stored.body, record.event);
+/// ```
 #[derive(Default)]
 pub struct Projection {
     executions:  BTreeMap<ExecutionId, ExecutionTrack>,
@@ -1571,31 +1595,42 @@ impl EventProjector {
         Self::with_projection(sink, Projection::new(), options)
     }
 
-    /// A projector for a run being resumed from `run_dir`: the records on
-    /// disk are folded into its state first, and nothing is delivered for
-    /// them. The resumed driver then delivers the regenerated suffix and
-    /// every new record with the identities a fresh run would have given
-    /// them.
+    /// A projector for a run being resumed: the stored records are folded
+    /// into its state first, and nothing is delivered for them. The resumed
+    /// driver then delivers the regenerated suffix and every new record
+    /// with the identities a fresh run would have given them.
     ///
     /// # Errors
     ///
-    /// The run dir's logs do not decode or replay.
-    pub fn primed(sink: Arc<dyn RunEventSink>, run_dir: &Path) -> Result<Arc<Self>, ReplayError> {
-        Self::primed_with_options(sink, run_dir, ProjectorOptions::default())
+    /// The run's logs do not decode or replay.
+    pub async fn primed(
+        sink: Arc<dyn RunEventSink>,
+        logs: &dyn RunLogs,
+    ) -> Result<Arc<Self>, ReplayError> {
+        Self::primed_with_options(sink, logs, ProjectorOptions::default()).await
+    }
+
+    /// [`Self::primed`] over the run directory at `run_dir`.
+    pub async fn primed_run_dir(
+        sink: Arc<dyn RunEventSink>,
+        run_dir: &Path,
+    ) -> Result<Arc<Self>, ReplayError> {
+        let logs = open_run_dir(run_dir, Access::Read).await?;
+        Self::primed(sink, &*logs).await
     }
 
     /// [`Self::primed`] with the given queue capacity and stall budget.
     ///
     /// # Errors
     ///
-    /// The run dir's logs do not decode or replay.
-    pub fn primed_with_options(
+    /// The run's logs do not decode or replay.
+    pub async fn primed_with_options(
         sink: Arc<dyn RunEventSink>,
-        run_dir: &Path,
+        logs: &dyn RunLogs,
         options: ProjectorOptions,
     ) -> Result<Arc<Self>, ReplayError> {
         let mut projection = Projection::new();
-        project_run(run_dir, &mut projection)?;
+        project_run(logs, &mut projection).await?;
         Ok(Self::with_projection(sink, projection, options))
     }
 
@@ -1809,7 +1844,7 @@ impl RunEventSink for CollectingSink {
 
 // ── Replay ─────────────────────────────────────────────────────────────────
 
-/// Why a run dir could not be projected.
+/// Why a run could not be projected from its store.
 #[derive(Debug, thiserror::Error)]
 pub enum ReplayError {
     #[error(transparent)]
@@ -1818,39 +1853,70 @@ pub enum ReplayError {
     State(#[from] StateError),
     #[error(transparent)]
     EngineLog(#[from] EngineLogError),
-    #[error("could not read `{}`", path.display())]
-    Io {
-        path:   PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error("graph {digest} does not decode: {source}")]
-    Graph {
-        digest: String,
-        #[source]
-        source: serde_json::Error,
-    },
 }
 
-/// Project every event of a run from its run dir: the coordinator log first,
+impl From<store::StoreError> for ReplayError {
+    fn from(error: store::StoreError) -> Self {
+        Self::Store(error.into())
+    }
+}
+
+/// Project every event of a run from its store: the coordinator log first,
 /// then each execution's engine log in declaration order, each replayed
 /// external event by external event so the derivation sees the same
 /// post-apply states the live observer saw. Identities equal the live ones.
-pub fn replay_run(run_dir: &Path) -> Result<Vec<RunEvent>, ReplayError> {
+pub async fn replay_run(logs: &dyn RunLogs) -> Result<Vec<RunEvent>, ReplayError> {
     let mut projection = Projection::new();
-    project_run(run_dir, &mut projection)
+    project_run(logs, &mut projection).await
+}
+
+/// [`replay_run`] over the run directory at `run_dir`.
+pub async fn replay_run_dir(run_dir: &Path) -> Result<Vec<RunEvent>, ReplayError> {
+    let logs = open_run_dir(run_dir, Access::Read).await?;
+    replay_run(&*logs).await
+}
+
+/// The events after a set of per-log positions: the incremental form of
+/// [`replay_run`], for a consumer that already holds a prefix of the stream
+/// and asks for the rest. `held` names the last [`EventId`] the consumer
+/// has from each log; a log it names nothing for is replayed whole. The
+/// fold still runs over the whole run, since a suffix cannot be derived
+/// without the state the prefix built; only the delivery is trimmed.
+pub async fn replay_since(
+    logs: &dyn RunLogs,
+    held: &BTreeMap<EventSource, EventId>,
+) -> Result<Vec<RunEvent>, ReplayError> {
+    let events = replay_run(logs).await?;
+    Ok(events_after(events, held))
+}
+
+/// Keep the events past each log's held position.
+pub(crate) fn events_after(
+    events: Vec<RunEvent>,
+    held: &BTreeMap<EventSource, EventId>,
+) -> Vec<RunEvent> {
+    events
+        .into_iter()
+        .filter(|event| {
+            held.get(&event.id.source)
+                .is_none_or(|last| event.id > *last)
+        })
+        .collect()
 }
 
 /// [`replay_run`] through a caller's projection state.
-fn project_run(run_dir: &Path, projection: &mut Projection) -> Result<Vec<RunEvent>, ReplayError> {
-    Ok(project_loaded(&load_run(run_dir)?, projection))
+async fn project_run(
+    logs: &dyn RunLogs,
+    projection: &mut Projection,
+) -> Result<Vec<RunEvent>, ReplayError> {
+    Ok(project_loaded(&load_run(logs).await?, projection))
 }
 
 /// Project a loaded run: the coordinator log first, then each execution's
 /// engine log in declaration order.
 pub(crate) fn project_loaded(loaded: &LoadedRun, projection: &mut Projection) -> Vec<RunEvent> {
     let mut events = Vec::new();
-    for record in &loaded.coordinator.records {
+    for record in &loaded.coordinator {
         events.extend(projection.lifecycle(record));
     }
     for execution in &loaded.executions {
@@ -1865,11 +1931,11 @@ pub(crate) fn project_loaded(loaded: &LoadedRun, projection: &mut Projection) ->
     events
 }
 
-/// One run's durable logs as a run dir holds them: the coordinator log and,
+/// One run's durable logs as its store holds them: the coordinator log and,
 /// for each execution in declaration order that started, its graph and its
 /// engine log.
 pub(crate) struct LoadedRun {
-    pub(crate) coordinator: DecodedCoordinatorLog,
+    pub(crate) coordinator: Vec<CoordinatorRecord>,
     pub(crate) executions:  Vec<LoadedExecution>,
 }
 
@@ -1883,45 +1949,33 @@ pub(crate) struct LoadedExecution {
     pub(crate) finished:  bool,
 }
 
-/// Read a run dir's logs and the graphs its executions ran.
-pub(crate) fn load_run(run_dir: &Path) -> Result<LoadedRun, ReplayError> {
-    let coordinator = run_dir.join(COORDINATOR_FILE);
-    let bytes = fs::read(&coordinator).map_err(|source| ReplayError::Io {
-        path: coordinator.clone(),
-        source,
-    })?;
-    let decoded = decode_coordinator_log(&coordinator, &bytes)?;
-    let state = CoordinatorState::replay(&decoded.records)?;
+/// Read a run's logs and the graphs its executions ran.
+pub(crate) async fn load_run(logs: &dyn RunLogs) -> Result<LoadedRun, ReplayError> {
+    let coordinator = read_coordinator_log(logs).await?;
+    let state = CoordinatorState::replay(&coordinator)?;
+    let mut graphs: BTreeMap<crate::GraphDigest, Graph> = BTreeMap::new();
     let mut executions = Vec::new();
     for (execution, declared) in &state.executions {
         let invocation = declared.declaration.invocation;
         let digest = state.invocations[&invocation].declaration.graph;
-        let graph_path = run_dir.join(GRAPHS_DIR).join(format!("{digest}.json"));
-        let graph_bytes = fs::read(&graph_path).map_err(|source| ReplayError::Io {
-            path: graph_path.clone(),
-            source,
-        })?;
-        let graph: Graph =
-            serde_json::from_slice(&graph_bytes).map_err(|source| ReplayError::Graph {
-                digest: digest.to_hex(),
-                source,
-            })?;
-        let log_path = run_dir
-            .join(execution_relative_dir(invocation, *execution))
-            .join(EVENTS_FILE);
-        if !log_path.exists() {
+        if let Entry::Vacant(entry) = graphs.entry(digest) {
+            let bytes = graph_bytes(logs, digest).await?;
+            entry.insert(decode_graph(digest, &bytes)?);
+        }
+        let log = read_execution_log(logs, *execution).await?;
+        if log.log.is_empty() {
+            // Declared, and nothing stored yet: the execution never started.
             continue;
         }
-        let log = read_engine_log(&log_path)?;
         executions.push(LoadedExecution {
             execution: *execution,
-            graph,
+            graph: graphs[&digest].clone(),
             log,
             finished: declared.exit.is_some(),
         });
     }
     Ok(LoadedRun {
-        coordinator: decoded,
+        coordinator,
         executions,
     })
 }

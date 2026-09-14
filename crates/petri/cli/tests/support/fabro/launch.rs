@@ -509,7 +509,7 @@ pub(crate) fn sanitized_path(root: &Path) -> Option<String> {
 /// recorded under the run dir once the sandbox exists, and `docker cp` reads
 /// from a running or stopped container.
 async fn container_has(run_dir: &Path, file: &str) -> bool {
-    if !run_dir.join("sandbox-run-id").exists() {
+    if !run_dir.join("run.json").exists() {
         return false;
     }
     let name = testkit::sandbox_name(run_dir, 0);

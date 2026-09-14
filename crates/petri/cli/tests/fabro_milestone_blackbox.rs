@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use petri::execution::ExecutionId;
-use petri::execution::events::replay_run;
+use petri::execution::events::replay_run_dir;
 use serde_json::{Value, json};
 use support::fabro::interview;
 use support::fabro::launch::{Case, Finished, Launch};
@@ -330,7 +330,7 @@ async fn the_milestone_workflow_runs_end_to_end_through_the_binary() {
         read(&case.workspace().join("run-end.log")),
         "run_complete\nsandbox_cleanup\n"
     );
-    assert_run_level_notes(&finished, &["run_finished", "scope_released"]);
+    assert_run_level_notes(&finished, &["run_finished", "scope_released"]).await;
     finished.assert_no_leaked_processes().await;
     twin.stop();
 }
@@ -339,8 +339,10 @@ async fn the_milestone_workflow_runs_end_to_end_through_the_binary() {
 /// `host_note {kind: "hook"}` per run-level point that ran a hook, with no
 /// subject (no firing owns it) and the root execution named, in the order
 /// the points ran; `petri inspect` lists the same reports under `notes`.
-fn assert_run_level_notes(finished: &Finished, points: &[&str]) {
-    let events = replay_run(&finished.run_dir).expect("the run replays");
+async fn assert_run_level_notes(finished: &Finished, points: &[&str]) {
+    let events = replay_run_dir(&finished.run_dir)
+        .await
+        .expect("the run replays");
     let reports: Vec<&Value> = events
         .iter()
         .filter(|event| event.subject.is_none())
@@ -437,7 +439,7 @@ async fn the_milestone_workflow_reports_a_failure_and_keeps_its_work() {
         read(&case.workspace().join("run-end.log")),
         "run_failed\nsandbox_cleanup\n"
     );
-    assert_run_level_notes(&finished, &["run_finished", "scope_released"]);
+    assert_run_level_notes(&finished, &["run_finished", "scope_released"]).await;
     assert_eq!(finished.reported_workspaces(), [case.workspace()]);
     finished.assert_no_leaked_processes().await;
     twin.stop();
@@ -489,7 +491,7 @@ async fn the_milestone_workflow_is_cancelled_and_keeps_its_work() {
         "sandbox_cleanup\n",
         "no run_complete or run_failed on a cancelled run"
     );
-    assert_run_level_notes(&finished, &["scope_released"]);
+    assert_run_level_notes(&finished, &["scope_released"]).await;
     let document = finished.inspect();
     assert_eq!(document["status"], json!("cancelled"));
     assert_eq!(finished.reported_workspaces(), [case.workspace()]);

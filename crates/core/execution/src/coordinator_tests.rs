@@ -11,27 +11,56 @@ use testkit::RunDir;
 use tokio::sync::Notify;
 use tokio::time::timeout;
 
-use super::{Coordinator, CoordinatorOptions};
+use super::{Coordinator, CoordinatorError, CoordinatorOptions};
 use crate::{
-    CallSite, CoordinatorInvocationClient, CoordinatorStore, ExecutionId, GraphDigest,
-    InvocationClient as _, InvocationRequest, SandboxMode, SecretBindings, StoreError,
+    CallSite, CoordinatorInvocationClient, ExecutionId, GraphDigest, InvocationClient as _,
+    InvocationRequest, SandboxMode, SecretBindings, StoreError,
 };
 
-#[test]
-fn scope_identity_schema_rejects_version_one_run_directories() {
-    let directory = RunDir::new("coordinator-old-resource-schema");
-    drop(CoordinatorStore::create(directory.path(), Vec::new()).unwrap());
-    let path = directory.path().join("run.json");
-    let mut metadata: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    metadata["format_version"] = Value::from(1);
-    fs::write(path, serde_json::to_vec(&metadata).unwrap()).unwrap();
-    assert!(matches!(
-        CoordinatorStore::resume(directory.path()),
-        Err(StoreError::UnsupportedFormat {
-            found:    1,
-            expected: 4,
-        })
-    ));
+/// A run of another format is refused at resume by its run declaration,
+/// before any record is decoded: the no-migration policy.
+#[tokio::test]
+async fn a_run_of_another_format_is_refused_at_resume() {
+    let directory = RunDir::new("coordinator-old-format");
+    let runtime = Runtime::standard().options(RunOptions::new(directory.path()));
+    let coordinator = Coordinator::create(
+        runtime.prepare_run(directory.path()),
+        Vec::new(),
+        CoordinatorOptions::default(),
+    )
+    .await
+    .unwrap();
+    drop(coordinator);
+    let path = directory.path().join(crate::COORDINATOR_FILE);
+    let text = fs::read_to_string(&path).unwrap();
+    let mut lines: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    lines[0]["body"]["format_version"] = Value::from(1);
+    let rewritten: Vec<String> = lines
+        .iter()
+        .map(|line| serde_json::to_string(line).unwrap())
+        .collect();
+    fs::write(&path, format!("{}\n", rewritten.join("\n"))).unwrap();
+    let error = Coordinator::resume(
+        runtime.prepare_run(directory.path()),
+        Vec::new(),
+        CoordinatorOptions::default(),
+    )
+    .await
+    .err()
+    .expect("an old format is refused");
+    assert!(
+        matches!(
+            error,
+            CoordinatorError::Store(StoreError::UnsupportedFormat {
+                found:    1,
+                expected: crate::COORDINATOR_FORMAT_VERSION,
+            })
+        ),
+        "{error}"
+    );
 }
 
 #[derive(Default)]
@@ -100,19 +129,20 @@ async fn child_lease_release_does_not_block_parent_control_or_cancellation() {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .unwrap();
     let gate = Arc::new(ReleaseGate::default());
     coordinator.release_gate = Some(gate.clone());
     let mut child = GraphBuilder::new();
     child.add_step("child", ScopeId::new(0), "noop");
-    let child = coordinator.register_graph(&child.build()).unwrap();
+    let child = coordinator.register_graph(&child.build()).await.unwrap();
     let mut root = GraphBuilder::new();
     root.add_node(
         "parent",
         ScopeId::new(0),
         StepRef::new(WaitForChild::NAME, serde_json::json!(child)),
     );
-    let root = coordinator.register_graph(&root.build()).unwrap();
+    let root = coordinator.register_graph(&root.build()).await.unwrap();
     let handle = coordinator.handle();
     let (result, ()) = tokio::join!(coordinator.run_root(root, BTreeMap::new()), async {
         timeout(Duration::from_secs(10), gate.started.notified())

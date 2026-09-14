@@ -489,7 +489,7 @@ coverage matrix are `crates/core/execution/EVENTS.md`. The evidence file is
 - Local replay and sandbox recovery, preserved and passing:
   `inspect_cli::inspect_reconstructs_a_restarted_run_with_children_after_the_process_exits`,
   `inspect_cli::inspect_reports_torn_logs_as_incomplete_and_corrupt_logs_as_errors`,
-  `petri-execution::inspect::a_torn_coordinator_tail_is_reported_and_left_in_place`,
+  `petri-execution::inspect::a_torn_coordinator_tail_is_dropped_and_left_in_place`,
   `embedding::recovery_redelivers_with_stable_identities`,
   `petri::host::a_crashed_run_resumes_from_the_run_dir`,
   `petri-driver::resume` (`a_torn_tail_is_truncated_and_resumed`,

@@ -193,6 +193,7 @@ impl CoordinatorState {
         match event {
             CoordinatorEvent::RunStarted {
                 format_version,
+                key: _,
                 root,
                 middleware_chain: _,
             } => {
@@ -356,6 +357,7 @@ impl CoordinatorState {
         match event {
             CoordinatorEvent::RunStarted {
                 format_version: _,
+                key: _,
                 root,
                 middleware_chain,
             } => {

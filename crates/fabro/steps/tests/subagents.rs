@@ -18,7 +18,7 @@ use std::time::Duration;
 use std::{env, fs, thread};
 
 use execution::host::{self, HostRun};
-use execution::inspect::inspect_run;
+use execution::inspect::inspect_run_dir;
 use fabro_steps::pebble::PebbleClient;
 use fabro_steps::register;
 use fabro_steps::skills::FabroHome;
@@ -513,7 +513,11 @@ async fn agent_children_do_not_consume_the_invocation_ceiling() {
         Some(3)
     );
     assert_eq!(
-        inspect_run(dir.path()).expect("inspects").invocations.len(),
+        inspect_run_dir(dir.path())
+            .await
+            .expect("inspects")
+            .invocations
+            .len(),
         1,
         "no child is a workflow invocation"
     );
@@ -938,7 +942,11 @@ async fn a_resumed_run_restarts_the_stage_and_keeps_an_unfinished_childs_files()
         "Finished after the restart."
     );
     assert_eq!(
-        inspect_run(dir.path()).expect("inspects").invocations.len(),
+        inspect_run_dir(dir.path())
+            .await
+            .expect("inspects")
+            .invocations
+            .len(),
         1
     );
     let events = pebble_events(&resumed);

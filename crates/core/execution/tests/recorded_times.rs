@@ -6,7 +6,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use execution::CoordinatorEvent;
-use execution::events::{EventId, EventProjector, RunEvent, RunEventSink, SinkError, replay_run};
+use execution::events::{
+    EventId, EventProjector, RunEvent, RunEventSink, SinkError, replay_run_dir,
+};
 use execution::host::{self, HostRun};
 use ir::{GraphBuilder, RunStatus, ScopeId};
 use runtime::driver::recorded_now;
@@ -120,7 +122,9 @@ async fn replay_recovers_the_recorded_times_and_observed_at_stays_live_only() {
     assert!(last_finished <= run_finished);
 
     // Replay: the same times, read back from the logs; no observation time.
-    let replayed = replay_run(dir.path()).expect("the run dir projects");
+    let replayed = replay_run_dir(dir.path())
+        .await
+        .expect("the run dir projects");
     let live_times: BTreeMap<EventId, u64> = live
         .iter()
         .map(|event| (event.id, event.recorded_at))

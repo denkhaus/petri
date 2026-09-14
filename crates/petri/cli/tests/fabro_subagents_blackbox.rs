@@ -129,7 +129,7 @@ async fn a_parent_delegates_a_workspace_change_to_a_child() {
     );
 
     // The public events.
-    let events = public_events(&case.run_dir);
+    let events = public_events(&case.run_dir).await;
     let agent = activities(&events);
     assert!(!agent.is_empty());
     let parent_session = agent[0].session.clone();
@@ -391,7 +391,7 @@ async fn a_childs_failure_is_the_parents_tool_result_and_the_run_succeeds() {
         context["response.agent"],
         json!("The child failed; nothing was changed.")
     );
-    let events = public_events(&case.run_dir);
+    let events = public_events(&case.run_dir).await;
     let agent = activities(&events);
     let failed = of_kind(&agent, "SubAgentFailed");
     assert_eq!(failed.len(), 1);
@@ -508,7 +508,7 @@ async fn concurrent_children_share_the_workspace_and_no_child_is_an_invocation()
     );
     let inspection = finished.inspect();
     assert_eq!(inspection["invocations"].as_array().map(Vec::len), Some(1));
-    let events = public_events(&case.run_dir);
+    let events = public_events(&case.run_dir).await;
     let agent = activities(&events);
     assert_eq!(of_kind(&agent, "SubAgentSpawned").len(), 2);
     assert_eq!(of_kind(&agent, "SubAgentCompleted").len(), 2);
@@ -610,7 +610,7 @@ async fn a_child_delegates_to_a_grandchild() {
         "child-done",
         "synthesize"
     ]);
-    let events = public_events(&case.run_dir);
+    let events = public_events(&case.run_dir).await;
     let agent = activities(&events);
     let root = agent[0].session.clone();
     let spawned = of_kind(&agent, "SubAgentSpawned");
@@ -688,7 +688,7 @@ async fn interrupting_the_run_stops_the_child_and_leaks_nothing() {
         finished.stderr
     );
     assert_eq!(twin.consumed(), ["delegate", "child-blocks"]);
-    let events = public_events(&case.run_dir);
+    let events = public_events(&case.run_dir).await;
     let agent = activities(&events);
     assert_eq!(of_kind(&agent, "SubAgentSpawned").len(), 1);
     assert_eq!(
@@ -812,7 +812,7 @@ async fn a_retained_thread_carries_a_childs_result_to_the_next_node() {
     );
     let context = finished.final_context();
     assert_eq!(context["response.confirm"], json!("Confirmed."));
-    let events = public_events(&case.run_dir);
+    let events = public_events(&case.run_dir).await;
     let agent = activities(&events);
     let spawned = of_kind(&agent, "SubAgentSpawned");
     assert_eq!(spawned.len(), 2);
@@ -936,7 +936,7 @@ async fn a_child_calls_an_inherited_mcp_tool() {
         "started\ninitialize\ncall write_file\nshutdown\n",
         "one server, one call from the child, a clean shutdown"
     );
-    let events = public_events(&case.run_dir);
+    let events = public_events(&case.run_dir).await;
     let agent = activities(&events);
     let parent_session = agent[0].session.clone();
     let child_call = agent

@@ -108,7 +108,7 @@ async fn ordinary_actions_run_without_advertising_an_unreachable_results_service
             PluginSettings::from_env("docker", Some(true)).unwrap(),
         )),
         Arc::new(MemoryLedger::default()),
-        Arc::new(RunIdentity::new(dir.path().to_path_buf())),
+        Arc::new(RunIdentity::for_run_dir(dir.path().to_path_buf())),
         Retention::Never,
         None,
         SandboxOptions {

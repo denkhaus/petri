@@ -1,35 +1,34 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs::OpenOptions;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::{fmt, io};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::{fmt, fs, io};
 
-use driver::{
-    EventObserver as _, ExecutionSlot, SandboxAssignment, ScopeLease, ScopeLeaseAllocator,
-    ScopeLeases,
-};
+use driver::{ExecutionSlot, SandboxAssignment, ScopeLease, ScopeLeaseAllocator, ScopeLeases};
 use engine::{EngineExit, EngineStart, EntryPoint, Event, MiddlewareKey};
-use executor_sandbox::{CONTAINER_KIND, RoutingExecutor};
+use executor_sandbox::{CONTAINER_KIND, RecordedLease, RoutingExecutor};
 use ir::{
     Control, FailureClass, FailureInfo, FiringId, Graph, ResultProjection, RunStatus,
     RuntimeTarget, ScopeId, Value,
 };
-use runtime::RunRuntime;
+use runtime::{RunAccess, RunRuntime};
 use smol_str::SmolStr;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
-use tokio::task::{AbortHandle, JoinError, JoinSet, spawn_blocking};
+use store::{RunLogs, execution_relative_dir};
+use tokio::sync::{
+    Mutex as AsyncMutex, MutexGuard, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch,
+};
+use tokio::task::{AbortHandle, JoinError, JoinSet};
 
 use crate::client::StartRequest;
-use crate::host::EVENTS_FILE;
 use crate::middleware::derive_fold_event;
 use crate::{
     CancelReason, CancelRequest, CoordinatorEvent, CoordinatorInvocationClient, CoordinatorRecord,
-    CoordinatorStore, EngineLogError, ExecutionId, ExecutionObserver, GraphDigest, HOST_PROVIDER,
-    InvocationHandle, InvocationId, InvocationResult, InvocationSecrets, InvocationStatus,
-    InvokeError, JsonlEngineLog, Middleware, MiddlewarePipeline, MiddlewareState, ParentCallKey,
-    ResourceError, ResourceLedger, ResourceStore, SandboxAllocationKey, SandboxBinding,
-    SandboxMode, SecretBindings, StoreError, initial_middleware_state, read_engine_log,
+    CoordinatorStore, EngineLogError, ExecutionId, ExecutionLogWriter, ExecutionObserver,
+    GraphDigest, HOST_PROVIDER, InvocationHandle, InvocationId, InvocationResult,
+    InvocationSecrets, InvocationStatus, InvokeError, Middleware, MiddlewarePipeline,
+    MiddlewareState, ParentCallKey, ResourceError, ResourceLedger, ResourceStore,
+    SandboxAllocationKey, SandboxBinding, SandboxMode, SecretBindings, StoreError, StoreWriter,
+    initial_middleware_state, read_execution_log,
 };
 
 pub const DEFAULT_MAX_INVOCATIONS: u32 = 1024;
@@ -90,6 +89,9 @@ impl Default for CoordinatorOptions {
 pub enum CoordinatorError {
     #[error(transparent)]
     Store(#[from] StoreError),
+    /// The run could not be opened in its store.
+    #[error(transparent)]
+    Open(#[from] store::StoreError),
     #[error(transparent)]
     EngineLog(#[from] EngineLogError),
     #[error(transparent)]
@@ -178,10 +180,10 @@ type ExecutionLeases = Arc<Mutex<BTreeMap<ScopeId, crate::SandboxLeaseId>>>;
 struct InvocationLeaseAllocator {
     invocation: InvocationId,
     execution:  ExecutionId,
-    resources:  Arc<Mutex<ResourceStore>>,
+    resources:  Arc<AsyncMutex<ResourceStore>>,
     acquired:   ExecutionLeases,
     router:     Option<Arc<RoutingExecutor>>,
-    writer:     Arc<JsonlEngineLog>,
+    writer:     Arc<ExecutionLogWriter>,
 }
 
 impl fmt::Debug for InvocationLeaseAllocator {
@@ -207,12 +209,10 @@ impl ScopeLeaseAllocator for InvocationLeaseAllocator {
         let introduced_by =
             matches!(identity, engine::ScopeIdentity::Spliced(_)).then_some(self.execution);
         // The scope's introducing outcome must be durable before its lease.
-        // This queues a sync behind all records already observed by the driver.
+        // This queues a marker behind all records already observed by the
+        // driver.
         if introduced_by.is_some() {
-            self.writer
-                .finish()
-                .await
-                .map_err(|source| error(&source))?;
+            self.writer.flush().await.map_err(|source| error(&source))?;
         }
         let provider = self
             .router
@@ -229,22 +229,21 @@ impl ScopeLeaseAllocator for InvocationLeaseAllocator {
             invocation: self.invocation,
             scope:      identity,
         };
-        let resources = self.resources.clone();
         let runtime = spec.runtime.clone();
-        let assignment = spawn_blocking(move || {
-            let mut resources = resources.lock().unwrap_or_else(PoisonError::into_inner);
-            let record = resources.reserve_scope(allocation, &provider, runtime, introduced_by)?;
+        let assignment = {
+            let mut resources = self.resources.lock().await;
+            let record = resources
+                .reserve_scope(allocation, &provider, runtime, introduced_by)
+                .await
+                .map_err(|source| error(&source))?;
             if record.state == crate::LeaseState::Deleted {
-                return Err(ResourceError::DeletedLease(record.lease));
+                return Err(error(&ResourceError::DeletedLease(record.lease)));
             }
-            Ok(ScopeLease {
+            ScopeLease {
                 lease:     record.lease,
                 workspace: record.workspace.clone(),
-            })
-        })
-        .await
-        .map_err(|source| error(&source))?
-        .map_err(|source| error(&source))?;
+            }
+        };
         self.acquired
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -406,6 +405,8 @@ struct AdmittedSlot {
 /// Owns one run's lifecycle log, engines, resource boundary, and observers.
 pub struct Coordinator {
     store:            CoordinatorStore,
+    /// The run's store writer: every execution's records go through it.
+    writer:           Arc<StoreWriter>,
     runtime:          RunRuntime,
     options:          CoordinatorOptions,
     observers:        Vec<Arc<dyn ExecutionObserver>>,
@@ -426,7 +427,7 @@ pub struct Coordinator {
     last_root_report: Option<driver::ExecutionReport>,
     /// The durable lease records, shared with the executor's lease manager
     /// as its ledger.
-    resources:        Arc<Mutex<ResourceStore>>,
+    resources:        Arc<AsyncMutex<ResourceStore>>,
     execution_leases: BTreeMap<ExecutionId, ExecutionLeases>,
     /// Fork gates by parent execution and gate name: the slots every child
     /// invocation declared under that name shares, and the children queued
@@ -443,29 +444,31 @@ pub struct Coordinator {
 impl Coordinator {
     /// Start a fresh run. `middleware` may be empty; the configured chain's
     /// keys are recorded durably either way.
-    pub fn create(
+    pub async fn create(
         runtime: RunRuntime,
         middleware: Vec<Arc<dyn Middleware>>,
         options: CoordinatorOptions,
     ) -> Result<Self, CoordinatorError> {
         CoordinatorOptions::check_limit(options.max_invocations)?;
         let keys = middleware.iter().map(|item| item.key()).collect();
-        let store = CoordinatorStore::create(runtime.run_dir(), keys)?;
-        let resources = ResourceStore::load(runtime.run_dir().join(crate::RESOURCES_DIR))?;
+        let logs = runtime.open(RunAccess::Create).await?;
+        let store = CoordinatorStore::create(logs.clone(), runtime.run_key().clone(), keys).await?;
+        let resources = ResourceStore::load(&logs).await?;
         Ok(Self::assemble(
             store, resources, runtime, middleware, options, false,
         ))
     }
 
     /// Resume a crashed run. `middleware` must match the recorded chain.
-    pub fn resume(
+    pub async fn resume(
         runtime: RunRuntime,
         middleware: Vec<Arc<dyn Middleware>>,
         options: CoordinatorOptions,
-    ) -> Result<(Self, bool), CoordinatorError> {
+    ) -> Result<Self, CoordinatorError> {
         CoordinatorOptions::check_limit(options.max_invocations)?;
-        let (mut store, torn) = CoordinatorStore::resume(runtime.run_dir())?;
-        let resources = ResourceStore::load(runtime.run_dir().join(crate::RESOURCES_DIR))?;
+        let logs = runtime.open(RunAccess::Write).await?;
+        let mut store = CoordinatorStore::resume(logs.clone(), runtime.run_key().clone()).await?;
+        let resources = ResourceStore::load(&logs).await?;
         let keys: Vec<MiddlewareKey> = middleware.iter().map(|item| item.key()).collect();
         if store.state().middleware_chain != keys {
             return Err(StoreError::State(crate::StateError::MiddlewareChain).into());
@@ -477,7 +480,7 @@ impl Coordinator {
                 limit: options.max_invocations,
             });
         }
-        validate_resources(&mut store, &resources)?;
+        validate_resources(&mut store, &resources).await?;
         for lease in store.state().invocations.values().filter_map(|invocation| {
             match invocation.declaration.sandbox {
                 SandboxBinding::Inherited { lease } => Some(lease),
@@ -486,10 +489,43 @@ impl Coordinator {
         }) {
             resources.resolve(lease)?;
         }
-        Ok((
-            Self::assemble(store, resources, runtime, middleware, options, true),
-            torn,
-        ))
+        let coordinator = Self::assemble(store, resources, runtime, middleware, options, true);
+        coordinator.reconcile_leases().await?;
+        Ok(coordinator)
+    }
+
+    /// The takeover step of a resume: before any create, adopt what a lost
+    /// create left on a provider and remove what no record names. Runs
+    /// with the ledger attached, so an adopted lease is recorded live.
+    async fn reconcile_leases(&self) -> Result<(), CoordinatorError> {
+        let (host, container): (Vec<_>, Vec<_>) = self
+            .resources()
+            .await
+            .records()
+            .filter(|record| record.state != crate::LeaseState::Deleted)
+            .map(|record| {
+                (record.provider == HOST_PROVIDER, RecordedLease {
+                    lease:        record.lease,
+                    workspace_id: record.workspace.as_str().to_owned(),
+                })
+            })
+            .partition::<Vec<_>, _>(|(host, _)| *host);
+        let host: Vec<RecordedLease> = host.into_iter().map(|(_, lease)| lease).collect();
+        let container: Vec<RecordedLease> = container.into_iter().map(|(_, lease)| lease).collect();
+        if host.is_empty() && container.is_empty() {
+            return Ok(());
+        }
+        let report = self.runtime.reconcile_leases(&host, &container).await;
+        for (lease, sandbox) in &report.adopted {
+            tracing::info!(lease = lease.raw(), sandbox = %sandbox, "adopted a lost create");
+        }
+        for sandbox in &report.removed {
+            tracing::warn!(sandbox = %sandbox, "removed a sandbox no lease record names");
+        }
+        for problem in &report.problems {
+            tracing::warn!(problem, "sandbox lease reconciliation problem");
+        }
+        Ok(())
     }
 
     fn assemble(
@@ -507,10 +543,12 @@ impl Coordinator {
         let (admit_tx, admit_rx) = mpsc::unbounded_channel();
         // The records are the executor's ledger from here on: every
         // container scope it allocates is written here before it exists.
-        let resources = Arc::new(Mutex::new(resources));
+        let resources = Arc::new(AsyncMutex::new(resources));
         runtime.attach_lease_ledger(Arc::new(ResourceLedger::new(resources.clone())));
+        let writer = StoreWriter::start(store.logs());
         Self {
             store,
+            writer,
             runtime,
             options,
             observers: Vec::new(),
@@ -564,8 +602,19 @@ impl Coordinator {
     }
 
     /// A registered graph, decoded and validated once and cached by digest.
-    pub fn load_graph(&mut self, digest: GraphDigest) -> Result<Arc<Graph>, CoordinatorError> {
-        Ok(self.store.load_graph(digest)?)
+    pub async fn load_graph(
+        &mut self,
+        digest: GraphDigest,
+    ) -> Result<Arc<Graph>, CoordinatorError> {
+        Ok(self.store.load_graph(digest).await?)
+    }
+
+    /// The directory an execution's own files live under: its step output
+    /// and, in the run-directory store, its engine log.
+    pub fn execution_dir(&self, execution: ExecutionId) -> PathBuf {
+        self.runtime
+            .run_dir()
+            .join(execution_relative_dir(execution))
     }
 
     pub fn take_root_report(&mut self) -> Option<driver::ExecutionReport> {
@@ -580,10 +629,10 @@ impl Coordinator {
         }
     }
 
-    pub fn register_graph(&mut self, graph: &Graph) -> Result<GraphDigest, CoordinatorError> {
+    pub async fn register_graph(&mut self, graph: &Graph) -> Result<GraphDigest, CoordinatorError> {
         let encoded = serde_json::to_string(graph).map_err(CoordinatorError::EncodeDurableData)?;
         self.refuse_secret_bytes(&encoded)?;
-        let (digest, record) = self.store.register_graph_bytes(encoded.as_bytes())?;
+        let (digest, record) = self.store.register_graph_bytes(encoded.as_bytes()).await?;
         if let Some(record) = record {
             for observer in &self.observers {
                 observer.on_lifecycle(&record);
@@ -620,7 +669,8 @@ impl Coordinator {
                 secret_bindings: SecretBindings::None,
                 sandbox: SandboxBinding::Isolated,
                 admission: None,
-            })?;
+            })
+            .await?;
         }
 
         if let Some(result) = self.store.state().invocations[&InvocationId::ROOT]
@@ -631,22 +681,24 @@ impl Coordinator {
             let declaration = self.store.state().executions[&execution]
                 .declaration
                 .clone();
-            let registered = self.store.load_graph(graph)?;
+            let registered = self.store.load_graph(graph).await?;
             let recorded = self.store.state().executions[&execution]
                 .exit
                 .clone()
                 .ok_or(CoordinatorError::MissingExit(execution))?;
-            let PreparedExecution { driver, .. } = self.prepare_execution(
-                InvocationId::ROOT,
-                execution,
-                &declaration.start,
-                declaration.middleware_state,
-                &registered,
-                None,
-            )?;
+            let PreparedExecution { driver, .. } = self
+                .prepare_execution(
+                    InvocationId::ROOT,
+                    execution,
+                    &declaration.start,
+                    declaration.middleware_state,
+                    &registered,
+                    None,
+                )
+                .await?;
             let report = driver.run().await;
             Self::check_report(execution, &report)?;
-            self.append_run_notes(execution, &report)?;
+            self.append_run_notes(execution, &report).await?;
             if report.exit != recorded {
                 return Err(CoordinatorError::ConflictingExit { execution });
             }
@@ -664,15 +716,18 @@ impl Coordinator {
         if self.store.state().run_status.is_none() {
             self.append(CoordinatorEvent::RunFinished {
                 status: result.status,
-            })?;
+            })
+            .await?;
         }
         Ok(result)
     }
 
     /// End the run: release every lease still holding a sandbox — an
     /// invocation that finished before a crash, or one that never finished
-    /// — with the run's own status, then tear the run services down.
-    pub async fn finish(self) {
+    /// — with the run's own status, tear the run services down and stop the
+    /// store writer. The run's store handle comes back, still holding the
+    /// lease, so the caller can read the finished run through it.
+    pub async fn finish(self) -> Arc<dyn RunLogs> {
         let status = self
             .store
             .state()
@@ -680,6 +735,7 @@ impl Coordinator {
             .unwrap_or(RunStatus::Cancelled);
         let remaining: Vec<_> = self
             .resources()
+            .await
             .records()
             .filter(|record| record.needs_release())
             .map(|record| {
@@ -697,12 +753,14 @@ impl Coordinator {
             self.release_lease(lease, owner_status).await;
         }
         self.runtime.finish().await;
+        if let Err(error) = self.writer.shutdown().await {
+            tracing::warn!(%error, "the store writer stopped with an error");
+        }
+        self.store.logs().clone()
     }
 
-    fn resources(&self) -> MutexGuard<'_, ResourceStore> {
-        self.resources
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+    async fn resources(&self) -> MutexGuard<'_, ResourceStore> {
+        self.resources.lock().await
     }
 
     /// Stop a lease's sandbox, then keep or delete it by retention for the
@@ -728,7 +786,7 @@ impl Coordinator {
     /// Release the leases `invocation` allocated, now that it has finished.
     /// An inherited invocation allocated none: its caller's lease outlives
     /// it.
-    fn release_invocation_leases(
+    async fn release_invocation_leases(
         &mut self,
         invocation: InvocationId,
         status: RunStatus,
@@ -736,6 +794,7 @@ impl Coordinator {
     ) {
         let owned: Vec<crate::SandboxLeaseId> = self
             .resources()
+            .await
             .records()
             .filter(|record| record.allocation.invocation == invocation && record.needs_release())
             .map(|record| record.lease)
@@ -795,7 +854,7 @@ impl Coordinator {
         {
             self.settle_descendants(InvocationId::ROOT, running).await?;
         } else {
-            self.start_invocation(InvocationId::ROOT, running)?;
+            self.start_invocation(InvocationId::ROOT, running).await?;
         }
 
         loop {
@@ -812,14 +871,14 @@ impl Coordinator {
                     self.active_handles.remove(&done.execution);
                     self.execution_leases.remove(&done.execution);
                     Self::check_report(done.execution, &done.report)?;
-                    self.append_run_notes(done.execution, &done.report)?;
+                    self.append_run_notes(done.execution, &done.report).await?;
                     self.settle_descendants(done.invocation, running).await?;
                     self.drop_idle_gates();
                     completed.insert(done.invocation, done);
                 }
                 admitted = self.admit_rx.recv() => {
                     if let Some(admitted) = admitted {
-                        self.dispatch_admitted(admitted, running)?;
+                        self.dispatch_admitted(admitted, running).await?;
                     }
                 }
                 result = releasing.join_next(), if !releasing.is_empty() => {
@@ -835,7 +894,7 @@ impl Coordinator {
                     if let Some(request) = request
                         && let Some(invocation) = self.handle_start(request).await?
                     {
-                        self.start_invocation(invocation, running)?;
+                        self.start_invocation(invocation, running).await?;
                     }
                 }
                 cancelled = self.cancel_rx.recv() => {
@@ -850,7 +909,7 @@ impl Coordinator {
                 }
                 request = self.pause_rx.recv() => {
                     if let Some(request) = request {
-                        self.handle_pause(request)?;
+                        self.handle_pause(request).await?;
                     }
                 }
             }
@@ -862,7 +921,7 @@ impl Coordinator {
                 })
             }) {
                 let done = completed.remove(&invocation).expect("completed invocation");
-                self.complete_execution(done, running, releasing)?;
+                self.complete_execution(done, running, releasing).await?;
             }
         }
     }
@@ -894,7 +953,7 @@ impl Coordinator {
         self.cancel_invocations(uncancelled, InvocationId::ROOT, None, false)
             .await?;
         for (descendant, _) in descendants {
-            self.start_invocation(descendant, running)?;
+            self.start_invocation(descendant, running).await?;
         }
         Ok(())
     }
@@ -903,7 +962,7 @@ impl Coordinator {
     /// child (one declared under a gate) is queued for a slot instead, so the
     /// fork has at most `max_parallel` live children; its declaration is
     /// durable already, and only its driver waits.
-    fn start_invocation(
+    async fn start_invocation(
         &mut self,
         invocation: InvocationId,
         running: &mut JoinSet<CompletedExecution>,
@@ -922,12 +981,12 @@ impl Coordinator {
             gate.wait_for_slot(key, self.admit_tx.clone());
             return Ok(());
         }
-        self.dispatch_invocation(invocation, None, running)
+        self.dispatch_invocation(invocation, None, running).await
     }
 
     /// A fork gate's waiter took a slot: the child at the head of the queue
     /// starts on it, and the gate waits again for the next one.
-    fn dispatch_admitted(
+    async fn dispatch_admitted(
         &mut self,
         admitted: AdmittedSlot,
         running: &mut JoinSet<CompletedExecution>,
@@ -942,11 +1001,12 @@ impl Coordinator {
         };
         gate.wait_for_slot(key, self.admit_tx.clone());
         self.dispatch_invocation(invocation, Some(permit), running)
+            .await
     }
 
     /// Declare the invocation's first execution when it has none, then run
     /// its driver. `slot` is the fork slot a gated child was admitted on.
-    fn dispatch_invocation(
+    async fn dispatch_invocation(
         &mut self,
         invocation: InvocationId,
         slot: Option<OwnedSemaphorePermit>,
@@ -954,7 +1014,7 @@ impl Coordinator {
     ) -> Result<(), CoordinatorError> {
         let state = &self.store.state().invocations[&invocation];
         if state.executions.is_empty() {
-            self.declare_first_execution(invocation)?;
+            self.declare_first_execution(invocation).await?;
         }
         let execution = *self.store.state().invocations[&invocation]
             .executions
@@ -966,24 +1026,29 @@ impl Coordinator {
         let declaration = self.store.state().executions[&execution]
             .declaration
             .clone();
-        let graph = self.store.load_graph(
-            self.store.state().invocations[&invocation]
-                .declaration
-                .graph,
-        )?;
+        let graph = self
+            .store
+            .load_graph(
+                self.store.state().invocations[&invocation]
+                    .declaration
+                    .graph,
+            )
+            .await?;
         let PreparedExecution {
             driver,
             pipeline,
             cancel_before_run,
             slot,
-        } = self.prepare_execution(
-            invocation,
-            execution,
-            &declaration.start,
-            declaration.middleware_state,
-            &graph,
-            slot,
-        )?;
+        } = self
+            .prepare_execution(
+                invocation,
+                execution,
+                &declaration.start,
+                declaration.middleware_state,
+                &graph,
+                slot,
+            )
+            .await?;
         let handle = driver.handle();
         self.active.insert(invocation);
         self.active_handles
@@ -1005,7 +1070,7 @@ impl Coordinator {
         Ok(())
     }
 
-    fn complete_execution(
+    async fn complete_execution(
         &mut self,
         done: CompletedExecution,
         running: &mut JoinSet<CompletedExecution>,
@@ -1028,7 +1093,8 @@ impl Coordinator {
             self.append(CoordinatorEvent::ExecutionFinished {
                 execution,
                 exit: exit.clone(),
-            })?;
+            })
+            .await?;
         }
         // The fork slot goes back only now, after the end is recorded, so the
         // next queued child's `ExecutionDeclared` follows this
@@ -1051,9 +1117,10 @@ impl Coordinator {
                             .filter(|(node, _)| graph.node(*node).is_some())
                             .collect(),
                         middleware_state,
-                    )?;
+                    )
+                    .await?;
                 }
-                self.start_invocation(invocation, running)?;
+                self.start_invocation(invocation, running).await?;
             }
             EngineExit::Terminal { status } => {
                 let result = project_result(execution, status, &graph, &report.state);
@@ -1061,8 +1128,10 @@ impl Coordinator {
                 self.append(CoordinatorEvent::InvocationFinished {
                     invocation,
                     result: result.clone(),
-                })?;
-                self.release_invocation_leases(invocation, result.status, releasing);
+                })
+                .await?;
+                self.release_invocation_leases(invocation, result.status, releasing)
+                    .await;
                 if invocation == InvocationId::ROOT {
                     self.last_root_report = Some(report);
                 }
@@ -1073,7 +1142,7 @@ impl Coordinator {
 
     /// Record what the execution's run-level hook points noted, in their
     /// order, before the run's own finish is recorded.
-    fn append_run_notes(
+    async fn append_run_notes(
         &mut self,
         execution: ExecutionId,
         report: &driver::ExecutionReport,
@@ -1083,7 +1152,8 @@ impl Coordinator {
                 execution: Some(execution),
                 kind:      note.kind.clone(),
                 payload:   note.payload.clone(),
-            })?;
+            })
+            .await?;
         }
         Ok(())
     }
@@ -1101,29 +1171,31 @@ impl Coordinator {
         Ok(())
     }
 
-    fn declare_first_execution(
+    async fn declare_first_execution(
         &mut self,
         invocation: InvocationId,
     ) -> Result<ExecutionId, CoordinatorError> {
         let execution = self.store.state().next_execution_id();
         let declaration = &self.store.state().invocations[&invocation].declaration;
+        let start = EngineStart {
+            entry:           EntryPoint::GraphEntries,
+            context:         declaration.context.clone(),
+            prior_firings:   BTreeMap::new(),
+            execution_index: 0,
+            max_executions:  self.options.max_executions,
+        };
         self.append(CoordinatorEvent::ExecutionDeclared {
             execution,
             invocation,
             predecessor: None,
-            start: EngineStart {
-                entry:           EntryPoint::GraphEntries,
-                context:         declaration.context.clone(),
-                prior_firings:   BTreeMap::new(),
-                execution_index: 0,
-                max_executions:  self.options.max_executions,
-            },
+            start,
             middleware_state: initial_middleware_state(&self.middleware),
-        })?;
+        })
+        .await?;
         Ok(execution)
     }
 
-    fn declare_successor(
+    async fn declare_successor(
         &mut self,
         invocation: InvocationId,
         predecessor: ExecutionId,
@@ -1149,11 +1221,12 @@ impl Coordinator {
                 max_executions: self.options.max_executions,
             },
             middleware_state,
-        })?;
+        })
+        .await?;
         Ok(execution)
     }
 
-    fn prepare_execution(
+    async fn prepare_execution(
         &mut self,
         invocation: InvocationId,
         execution: ExecutionId,
@@ -1163,8 +1236,12 @@ impl Coordinator {
         slot: Option<OwnedSemaphorePermit>,
     ) -> Result<PreparedExecution, CoordinatorError> {
         let mut cancel_before_run = self.store.state().invocations[&invocation].cancelled;
-        let directory = self.store.create_execution_dir(invocation, execution)?;
-        let events = directory.join(EVENTS_FILE);
+        let directory = self.execution_dir(execution);
+        fs::create_dir_all(&directory).map_err(|source| CoordinatorError::Io {
+            action: "create",
+            path: directory.clone(),
+            source,
+        })?;
         let secrets = self.invocation_secrets(invocation);
         let pipeline = Arc::new(
             MiddlewarePipeline::new(
@@ -1178,18 +1255,24 @@ impl Coordinator {
                 message: error.to_string(),
             })?,
         );
-        let (driver, writer): (driver::Driver, Arc<JsonlEngineLog>) = if events.exists()
-            && events
-                .metadata()
-                .map_err(|source| CoordinatorError::Io {
-                    action: "inspect",
-                    path: events.clone(),
-                    source,
-                })?
-                .len()
-                > 0
+        let decoded = read_execution_log(&**self.store.logs(), execution).await?;
+        let (driver, writer): (driver::Driver, Arc<ExecutionLogWriter>) = if decoded.log.is_empty()
         {
-            let decoded = read_engine_log(&events)?;
+            let writer = Arc::new(ExecutionLogWriter::new(self.writer.clone(), execution, 0));
+            let sandbox = self
+                .prepare_sandbox(invocation, execution, writer.clone())
+                .await?;
+            let driver = self.runtime.driver(
+                (*graph).clone(),
+                start.clone(),
+                &directory,
+                execution.environment_prefix(),
+                invocation.workspace_prefix(),
+                sandbox,
+                secrets,
+            );
+            (driver, writer)
+        } else {
             // Replaying an existing root cancellation already restores it.
             // Sending it again would ask the driver to escalate to a kill.
             cancel_before_run &= !decoded.log.events().any(|event| {
@@ -1202,22 +1285,6 @@ impl Coordinator {
                         if *scope == ir::CancelScopeId::ROOT
                 )
             });
-            if decoded.torn {
-                let file = OpenOptions::new()
-                    .write(true)
-                    .open(&events)
-                    .map_err(|source| CoordinatorError::Io {
-                        action: "open",
-                        path: events.clone(),
-                        source,
-                    })?;
-                file.set_len(decoded.clean_len as u64)
-                    .map_err(|source| CoordinatorError::Io {
-                        action: "truncate",
-                        path: events.clone(),
-                        source,
-                    })?;
-            }
             if !pipeline.is_empty() {
                 rebuild_middleware(&pipeline, graph, &decoded.log).map_err(|error| {
                     CoordinatorError::EventWriter {
@@ -1227,8 +1294,14 @@ impl Coordinator {
                 })?;
             }
             let high_water = decoded.log.len() as u64;
-            let writer = Arc::new(JsonlEngineLog::append(&events, high_water)?);
-            let sandbox = self.prepare_sandbox(invocation, execution, writer.clone())?;
+            let writer = Arc::new(ExecutionLogWriter::new(
+                self.writer.clone(),
+                execution,
+                high_water,
+            ));
+            let sandbox = self
+                .prepare_sandbox(invocation, execution, writer.clone())
+                .await?;
             let (driver, _) = self.runtime.resume_driver(
                 (*graph).clone(),
                 decoded.log,
@@ -1239,19 +1312,6 @@ impl Coordinator {
                 secrets,
             )?;
             (driver.with_engine_start(start.clone()), writer)
-        } else {
-            let writer = Arc::new(JsonlEngineLog::create(&events)?);
-            let sandbox = self.prepare_sandbox(invocation, execution, writer.clone())?;
-            let driver = self.runtime.driver(
-                (*graph).clone(),
-                start.clone(),
-                &directory,
-                execution.environment_prefix(),
-                invocation.workspace_prefix(),
-                sandbox,
-                secrets,
-            );
-            (driver, writer)
         };
         let client = CoordinatorInvocationClient::new(execution, self.start_tx.clone());
         let fold = Arc::new(pipeline.fold_observer());
@@ -1303,11 +1363,11 @@ impl Coordinator {
     /// lease per stable scope identity, reserved before any executor sees
     /// it; an inherited one runs every scope in its caller's sandbox — the
     /// caller's workspace, the caller's runtime target, one shared lease.
-    fn prepare_sandbox(
+    async fn prepare_sandbox(
         &mut self,
         invocation: InvocationId,
         execution: ExecutionId,
-        writer: Arc<JsonlEngineLog>,
+        writer: Arc<ExecutionLogWriter>,
     ) -> Result<SandboxAssignment, CoordinatorError> {
         match self.store.state().invocations[&invocation]
             .declaration
@@ -1315,7 +1375,7 @@ impl Coordinator {
         {
             SandboxBinding::Inherited { lease } => {
                 let (workspace, runtime) = {
-                    let resources = self.resources();
+                    let resources = self.resources().await;
                     let record = resources
                         .resolve_usable(lease)
                         .map_err(|error| match error {
@@ -1506,7 +1566,7 @@ impl Coordinator {
         let invocation = self.store.state().next_invocation_id();
         let sandbox = match request.request.sandbox {
             SandboxMode::Isolated => SandboxBinding::Isolated,
-            SandboxMode::Inherit { scope } => match self.inherited_binding(key, scope) {
+            SandboxMode::Inherit { scope } => match self.inherited_binding(key, scope).await {
                 Ok(binding) => binding,
                 Err(CoordinatorError::NoInheritableSandbox) => {
                     return Err(InvokeError::NoInheritableSandbox);
@@ -1515,7 +1575,8 @@ impl Coordinator {
             },
         };
         if let SandboxBinding::Inherited { lease } = sandbox {
-            self.check_inherited_container(lease, request.request.graph)?;
+            self.check_inherited_container(lease, request.request.graph)
+                .await?;
         }
         self.append(CoordinatorEvent::InvocationDeclared {
             invocation,
@@ -1526,6 +1587,7 @@ impl Coordinator {
             sandbox,
             admission: request.request.admission.clone(),
         })
+        .await
         .map_err(invoke_error)?;
         Ok(StartOutcome::Attach {
             invocation,
@@ -1537,14 +1599,15 @@ impl Coordinator {
     /// tell the requester. The reply is sent after the append and after
     /// every observer saw the record, so an observer-derived event is queued
     /// before the requester acts on it.
-    fn handle_pause(&mut self, request: PauseRequest) -> Result<(), CoordinatorError> {
+    async fn handle_pause(&mut self, request: PauseRequest) -> Result<(), CoordinatorError> {
         let PauseRequest { paused, reply } = request;
         if self.store.state().paused != paused {
             self.append(if paused {
                 CoordinatorEvent::RunPaused
             } else {
                 CoordinatorEvent::RunUnpaused
-            })?;
+            })
+            .await?;
         }
         let _ = reply.send(());
         Ok(())
@@ -1591,7 +1654,8 @@ impl Coordinator {
                 self.append(CoordinatorEvent::InvocationCancelRequested {
                     invocation: *invocation,
                     reason:     (*invocation == requested).then(|| reason.clone()).flatten(),
-                })?;
+                })
+                .await?;
             }
         }
 
@@ -1647,7 +1711,7 @@ impl Coordinator {
     /// parent invocation, and the caller names its own scope, so no engine log
     /// is read. The driver registers every acquired scope, including dynamic
     /// ones, before a step can invoke a child.
-    fn inherited_binding(
+    async fn inherited_binding(
         &mut self,
         call: &ParentCallKey,
         scope: ir::ScopeId,
@@ -1664,7 +1728,7 @@ impl Coordinator {
             .declaration
             .sandbox
         {
-            self.resources().resolve_usable(lease)?;
+            self.resources().await.resolve_usable(lease)?;
             return Ok(SandboxBinding::Inherited { lease });
         }
         let lease = self
@@ -1678,7 +1742,7 @@ impl Coordinator {
                     .copied()
             })
             .ok_or(CoordinatorError::NoInheritableSandbox)?;
-        self.resources().resolve_usable(lease)?;
+        self.resources().await.resolve_usable(lease)?;
         Ok(SandboxBinding::Inherited { lease })
     }
 
@@ -1687,17 +1751,18 @@ impl Coordinator {
     /// caller's target) or equal. A different image or option set is a
     /// deterministic refusal at declaration; a child that needs its own
     /// image uses an isolated binding.
-    fn check_inherited_container(
+    async fn check_inherited_container(
         &mut self,
         lease: crate::SandboxLeaseId,
         child: GraphDigest,
     ) -> Result<(), InvokeError> {
         let parent = self
             .resources()
+            .await
             .resolve(lease)
             .map(|record| record.runtime.clone())
             .map_err(invoke_error)?;
-        let graph = self.store.load_graph(child).map_err(invoke_error)?;
+        let graph = self.store.load_graph(child).await.map_err(invoke_error)?;
         for scope in &graph.scopes {
             let declares_container =
                 matches!(scope.runtime.target, RuntimeTarget::Container { .. });
@@ -1747,8 +1812,11 @@ impl Coordinator {
         });
     }
 
-    fn append(&mut self, event: CoordinatorEvent) -> Result<CoordinatorRecord, CoordinatorError> {
-        let record = self.store.append(event)?;
+    async fn append(
+        &mut self,
+        event: CoordinatorEvent,
+    ) -> Result<CoordinatorRecord, CoordinatorError> {
+        let record = self.store.append(event).await?;
         for observer in &self.observers {
             observer.on_lifecycle(&record);
         }
@@ -1768,7 +1836,7 @@ impl Coordinator {
     }
 }
 
-fn validate_resources(
+async fn validate_resources(
     store: &mut CoordinatorStore,
     resources: &ResourceStore,
 ) -> Result<(), CoordinatorError> {
@@ -1788,7 +1856,7 @@ fn validate_resources(
             });
         }
         let digest = invocation.declaration.graph;
-        let graph = store.load_graph(digest)?;
+        let graph = store.load_graph(digest).await?;
         match &record.allocation.scope {
             engine::ScopeIdentity::Declared(scope) => {
                 if record.introduced_by.is_some()
@@ -1812,10 +1880,7 @@ fn validate_resources(
                     return Err(invalid());
                 }
                 if let Entry::Vacant(entry) = replayed.entry(execution) {
-                    let events = store
-                        .execution_dir(record.allocation.invocation, execution)
-                        .join(EVENTS_FILE);
-                    let log = read_engine_log(&events)?;
+                    let log = read_execution_log(&**store.logs(), execution).await?;
                     let point =
                         engine::resume((*graph).clone(), &log.log).map_err(|_| invalid())?;
                     entry.insert(point.state);

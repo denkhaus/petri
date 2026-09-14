@@ -1,11 +1,12 @@
-//! The shared line framing for the crate's append-only JSONL files.
+//! The line framing of the run directory's append-only JSONL files: one
+//! JSON value per newline-terminated line.
 
 use std::slice::SplitInclusive;
 
 /// Split bytes into complete (newline-terminated) lines under the strict
 /// torn-tail rule: only an EOF-torn final line is dropped, and `clean_len` is
 /// where a resumer truncates before appending.
-pub(crate) fn clean_lines(bytes: &[u8]) -> CleanLines<'_> {
+pub fn clean_lines(bytes: &[u8]) -> CleanLines<'_> {
     let clean_len = bytes
         .iter()
         .rposition(|byte| *byte == b'\n')
@@ -18,8 +19,11 @@ pub(crate) fn clean_lines(bytes: &[u8]) -> CleanLines<'_> {
     }
 }
 
-pub(crate) struct CleanLines<'a> {
+/// The complete lines of a JSONL file, without their newlines.
+pub struct CleanLines<'a> {
+    /// The length of the complete prefix.
     pub clean_len: usize,
+    /// Whether bytes followed the last newline.
     pub torn:      bool,
     lines:         SplitInclusive<'a, u8, fn(&u8) -> bool>,
 }
