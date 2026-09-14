@@ -37,7 +37,11 @@ use serde_json::{Value, json};
 /// completed, failed, closed, usage, cost_usd_micros, sessions }`, where
 /// `usage` and `cost_usd_micros` sum every descendant session's committed
 /// assistant messages and `sessions` maps each child session to `{ parent,
-/// usage, cost_usd_micros, messages, compactions }`.
+/// provider, model, usage, cost_usd_micros, messages, compactions }`.
+/// `provider` and `model` are the route the child runs on, as its
+/// `SessionStarted` reported it (or the model of its first answer), so a
+/// host prices the child's tokens at the child's own model; null when the
+/// stream named neither.
 pub const METRIC: &str = "pebble.subagents";
 
 /// Give the node's agent the sub-agent tools its configuration asks for.
@@ -104,6 +108,8 @@ impl Ledger {
                     session.clone(),
                     json!({
                         "parent": account.parent,
+                        "provider": account.provider,
+                        "model": account.model,
                         "usage": account.usage,
                         "cost_usd_micros": account.cost_usd_micros,
                         "messages": account.messages,

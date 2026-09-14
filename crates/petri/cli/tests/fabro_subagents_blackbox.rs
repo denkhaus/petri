@@ -197,6 +197,10 @@ async fn a_parent_delegates_a_workspace_change_to_a_child() {
         subagents["sessions"][&child_session]["parent"],
         parent_session
     );
+    // The child's route, for a host to price its tokens at: the parent's
+    // model, inherited.
+    assert_eq!(subagents["sessions"][&child_session]["provider"], "openai");
+    assert_eq!(subagents["sessions"][&child_session]["model"], model);
     let from_events = descendant_usage(&agent);
     assert_eq!(from_events.len(), 1);
     assert_eq!(from_events[&child_session], 20);

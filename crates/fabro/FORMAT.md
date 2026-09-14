@@ -754,9 +754,13 @@ own and the `pebble.subagents` metric is the tree's: `{ spawned,
 turns_started, completed, failed, closed, usage, cost_usd_micros, sessions }`,
 where `usage` and `cost_usd_micros` sum every descendant session's committed
 assistant messages and `sessions` maps each child session to `{ parent,
-usage, cost_usd_micros, messages, compactions }` (a child compacts under the
-parent's settings; its `CompactionStarted`/`CompactionCompleted` events carry
-the child's session, and `compactions` counts them). A public consumer reconstructs the same
+provider, model, usage, cost_usd_micros, messages, compactions }`. `provider`
+and `model` are the route the child runs on, as its `SessionStarted` reported
+it (or the model of its first answer), so a host prices the child's tokens at
+the child's own model; both are null when the stream named neither. A child
+compacts under the parent's settings; its
+`CompactionStarted`/`CompactionCompleted` events carry the child's session,
+and `compactions` counts them. A public consumer reconstructs the same
 totals from the backend envelopes in `step.progress.recorded`
 (`AssistantMessage` payloads of sessions with a parent).
 
