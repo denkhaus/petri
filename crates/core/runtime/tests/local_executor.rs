@@ -14,8 +14,7 @@ use executor::{
 use executor_sandbox::{HostExecutor, RoutingExecutor};
 use ir::{RuntimeSpec, ScopeId};
 use testkit::{
-    RunDir, container_id, is_docker_ready, list_containers, list_one_shots, recorded_run_id,
-    wait_for_file,
+    RunDir, container_id, is_docker_ready, list_containers, list_one_shots, wait_for_file,
 };
 use tokio::time;
 
@@ -30,7 +29,7 @@ fn container_spec() -> ScopeSpec {
 }
 
 fn local(dir: &RunDir) -> RoutingExecutor {
-    RoutingExecutor::local(dir.path(), Retention::default())
+    RoutingExecutor::local(dir.path(), Retention::default()).with_run_id(dir.run_id())
 }
 
 /// Every log line of a one-shot handle, drained to completion.
@@ -47,7 +46,7 @@ async fn drain(handle: &mut Box<dyn executor::ProcessHandle>) -> Vec<String> {
 /// The action host's container name for scope 0 of the run under `dir`:
 /// the run's prefix, `a-`, and the workspace id.
 fn action_host(dir: &RunDir) -> String {
-    format!("petri-{}-a-scope-0", recorded_run_id(dir.path()))
+    format!("{}a-scope-0", dir.container_prefix())
 }
 
 /// Services require a containerized job: a bare host process has no route to a
@@ -286,7 +285,7 @@ async fn crash_leftovers_are_fenced_by_acquire_and_swept_by_release() {
         list_one_shots(&host).await.is_empty() && container_id(&action_host(&dir)).await.is_none(),
         "release swept the action host and the abandoned one-shot"
     );
-    let prefix = format!("petri-{}-", recorded_run_id(dir.path()));
+    let prefix = dir.container_prefix();
     assert!(
         list_containers(&prefix).await.is_empty(),
         "nothing of the run is left"

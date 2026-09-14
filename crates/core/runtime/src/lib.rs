@@ -18,6 +18,7 @@
 pub use driver;
 pub use engine;
 pub use ir;
+pub use store;
 
 /// The executor interface, with the sandbox-driver adapter — the executors the
 /// standard runtime uses — as a submodule.

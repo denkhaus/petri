@@ -75,7 +75,7 @@ pub(crate) async fn remove_recorded(
     let ids = if let Some(id) = known {
         vec![id.clone()]
     } else {
-        let label = identity.workspace_label(workspace_id).await?;
+        let label = identity.workspace_label(workspace_id);
         let mut filter = SandboxFilter::default();
         filter.labels.insert(ACTIONS_LABEL.to_owned(), label);
         provider
@@ -153,9 +153,9 @@ impl ActionHost {
 
     async fn create(&self) -> Result<LiveSandbox, EnvError> {
         let (provider, generation) = self.source.current().await?;
-        let label = self.identity.workspace_label(&self.workspace_id).await?;
-        let run_id = self.identity.run_id().await?;
-        let prefix = self.identity.container_prefix().await?;
+        let label = self.identity.workspace_label(&self.workspace_id);
+        let run_id = self.identity.run_id();
+        let prefix = self.identity.container_prefix();
         let marker = self.marker();
         write_record(marker, self.source.fingerprint().as_bytes().to_vec()).await?;
         let image = env::var(IMAGE_VAR)
@@ -363,7 +363,7 @@ mod tests {
     #[tokio::test]
     async fn a_changed_action_provider_preserves_the_resource_and_marker() {
         let dir = testkit::RunDir::new("action-host-changed-provider");
-        let identity = RunIdentity::new(dir.path().to_path_buf());
+        let identity = RunIdentity::for_run_dir(dir.path().to_path_buf());
         let provider = Arc::new(DelayedProvider {
             kind:         ProviderKind::try_new("docker").expect("kind"),
             capabilities: Capabilities::minimal(Isolation::Container),
@@ -412,7 +412,7 @@ mod tests {
         });
         let host = Arc::new(ActionHost::new(
             Arc::new(FixedProvider::new(provider.clone())),
-            Arc::new(RunIdentity::new(dir.path().to_path_buf())),
+            Arc::new(RunIdentity::for_run_dir(dir.path().to_path_buf())),
             dir.workspace(),
             "scope-0".to_owned(),
             DOCKER_HOST_ALIAS.to_owned(),

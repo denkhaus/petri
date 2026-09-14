@@ -19,6 +19,7 @@ use runtime::engine::{
     RouteDecision,
 };
 use runtime::steps::{Step, StepCtx};
+use runtime::store::RunKey;
 use runtime::{RunOptions, Runtime};
 use serde::Deserialize;
 use testkit::RunDir;
@@ -75,7 +76,8 @@ async fn a_declared_execution_with_only_a_log_header_starts_from_its_declaration
     let context = BTreeMap::from([("input".into(), serde_json::json!("kept"))]);
 
     let digest = {
-        let mut store = CoordinatorStore::create(directory.path(), Vec::new()).expect("store");
+        let mut store = CoordinatorStore::create(directory.path(), RunKey::new("test"), Vec::new())
+            .expect("store");
         let (digest, _) = store.register_graph(&graph).expect("graph registers");
         store
             .append(CoordinatorEvent::InvocationDeclared {
@@ -116,6 +118,7 @@ async fn a_declared_execution_with_only_a_log_header_starts_from_its_declaration
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("the coordinator resumes");
     let result = coordinator
         .run_root(digest, context)
@@ -197,6 +200,7 @@ async fn resume_folds_a_final_outcome_before_reissuing_pending_routing() {
         middleware,
         CoordinatorOptions::default(),
     )
+    .await
     .expect("the coordinator resumes");
     let result = coordinator
         .run_root(digest, BTreeMap::new())
@@ -876,6 +880,7 @@ async fn assert_terminal_parent_recovers_child(cancel_recorded: bool) {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("the coordinator resumes");
     let result = timeout(
         Duration::from_secs(5),

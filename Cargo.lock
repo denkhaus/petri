@@ -1866,6 +1866,7 @@ dependencies = [
  "petri-frontend-native",
  "petri-ir",
  "petri-steps",
+ "petri-store",
  "petri-testkit",
  "serde_json",
  "smol_str",

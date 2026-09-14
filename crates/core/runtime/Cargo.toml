@@ -16,6 +16,7 @@ name = "runtime"
 
 [dependencies]
 ir = { workspace = true }
+store = { workspace = true }
 engine = { workspace = true }
 executor = { workspace = true }
 executor-sandbox = { workspace = true }

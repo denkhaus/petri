@@ -20,6 +20,8 @@ mod env;
 mod host;
 pub mod lease;
 pub mod plugin;
+#[cfg(test)]
+mod reconcile_tests;
 mod routing;
 mod run;
 mod snapshots;
@@ -46,12 +48,12 @@ use crate::env::{OneShotRunner, SandboxEnv};
 pub use crate::host::HostExecutor;
 pub use crate::lease::{
     LeaseLedger, LeaseRecord, LeaseState, LedgerError, MemoryLedger, PendingIntent,
-    SandboxLeaseManager,
+    ReconcileReport, RecordedLease, SandboxLeaseManager,
 };
 pub use crate::plugin::{FixedProvider, PluginError, PluginSettings, PluginSource, ProviderSource};
 pub use crate::routing::{CONTAINER_KIND, RoutingExecutor};
 use crate::run::workspace_dir;
-pub use crate::run::{LEASE_LABEL, RUN_ID_FILE, RUN_LABEL, RunIdentity, WORKSPACE_LABEL};
+pub use crate::run::{LEASE_LABEL, RUN_LABEL, RunIdentity, WORKSPACE_LABEL};
 use crate::snapshots::{RunnerSnapshot, RunnerSnapshots};
 
 /// The container path every scope's workspace lives at.
@@ -115,8 +117,8 @@ impl SandboxExecutor {
 
     /// The name prefix every sandbox this run owns starts with,
     /// `petri-<run id>-`, for a leak check after release.
-    pub async fn container_prefix(&self) -> Result<String, EnvError> {
-        self.identity.container_prefix().await
+    pub fn container_prefix(&self) -> String {
+        self.identity.container_prefix()
     }
 
     async fn acquire_inner(
@@ -130,7 +132,7 @@ impl SandboxExecutor {
             Some(lease) => (lease, false),
             None => (SandboxLeaseId::new(u64::from(scope.id.raw())), true),
         };
-        let name = self.identity.container_name(lease).await?;
+        let name = self.identity.container_name(lease);
         let acquired = self
             .manager
             .acquire(

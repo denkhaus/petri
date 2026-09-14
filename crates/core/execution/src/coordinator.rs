@@ -10,7 +10,7 @@ use driver::{
     ScopeLeases,
 };
 use engine::{EngineExit, EngineStart, EntryPoint, Event, MiddlewareKey};
-use executor_sandbox::{CONTAINER_KIND, RoutingExecutor};
+use executor_sandbox::{CONTAINER_KIND, RecordedLease, RoutingExecutor};
 use ir::{
     Control, FailureClass, FailureInfo, FiringId, Graph, ResultProjection, RunStatus,
     RuntimeTarget, ScopeId, Value,
@@ -450,7 +450,7 @@ impl Coordinator {
     ) -> Result<Self, CoordinatorError> {
         CoordinatorOptions::check_limit(options.max_invocations)?;
         let keys = middleware.iter().map(|item| item.key()).collect();
-        let store = CoordinatorStore::create(runtime.run_dir(), keys)?;
+        let store = CoordinatorStore::create(runtime.run_dir(), runtime.run_key().clone(), keys)?;
         let resources = ResourceStore::load(runtime.run_dir().join(crate::RESOURCES_DIR))?;
         Ok(Self::assemble(
             store, resources, runtime, middleware, options, false,
@@ -458,7 +458,7 @@ impl Coordinator {
     }
 
     /// Resume a crashed run. `middleware` must match the recorded chain.
-    pub fn resume(
+    pub async fn resume(
         runtime: RunRuntime,
         middleware: Vec<Arc<dyn Middleware>>,
         options: CoordinatorOptions,
@@ -486,10 +486,42 @@ impl Coordinator {
         }) {
             resources.resolve(lease)?;
         }
-        Ok((
-            Self::assemble(store, resources, runtime, middleware, options, true),
-            torn,
-        ))
+        let coordinator = Self::assemble(store, resources, runtime, middleware, options, true);
+        coordinator.reconcile_leases().await?;
+        Ok((coordinator, torn))
+    }
+
+    /// The takeover step of a resume: before any create, adopt what a lost
+    /// create left on a provider and remove what no record names. Runs
+    /// with the ledger attached, so an adopted lease is recorded live.
+    async fn reconcile_leases(&self) -> Result<(), CoordinatorError> {
+        let (host, container): (Vec<_>, Vec<_>) = self
+            .resources()
+            .records()
+            .filter(|record| record.state != crate::LeaseState::Deleted)
+            .map(|record| {
+                (record.provider == HOST_PROVIDER, RecordedLease {
+                    lease:        record.lease,
+                    workspace_id: record.workspace.as_str().to_owned(),
+                })
+            })
+            .partition::<Vec<_>, _>(|(host, _)| *host);
+        let host: Vec<RecordedLease> = host.into_iter().map(|(_, lease)| lease).collect();
+        let container: Vec<RecordedLease> = container.into_iter().map(|(_, lease)| lease).collect();
+        if host.is_empty() && container.is_empty() {
+            return Ok(());
+        }
+        let report = self.runtime.reconcile_leases(&host, &container).await;
+        for (lease, sandbox) in &report.adopted {
+            tracing::info!(lease = lease.raw(), sandbox = %sandbox, "adopted a lost create");
+        }
+        for sandbox in &report.removed {
+            tracing::warn!(sandbox = %sandbox, "removed a sandbox no lease record names");
+        }
+        for problem in &report.problems {
+            tracing::warn!(problem, "sandbox lease reconciliation problem");
+        }
+        Ok(())
     }
 
     fn assemble(

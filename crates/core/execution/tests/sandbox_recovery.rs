@@ -12,7 +12,7 @@ use executor_sandbox::{
     LeaseLedger, LeaseRecord, LeaseState, LedgerError, PendingIntent, RoutingExecutor,
 };
 use ir::{RuntimeSpec, ScopeId};
-use testkit::{RunDir, container_id, container_write, is_docker_ready, sandbox_name};
+use testkit::{RunDir, container_id, container_write, is_docker_ready};
 
 const LEASE: SandboxLeaseId = SandboxLeaseId::new(0);
 
@@ -45,42 +45,47 @@ impl InterruptedLedger {
     }
 }
 
+#[async_trait::async_trait]
 impl LeaseLedger for InterruptedLedger {
-    fn lookup(&self, lease: SandboxLeaseId) -> Result<Option<LeaseRecord>, LedgerError> {
-        self.inner.lookup(lease)
+    async fn lookup(&self, lease: SandboxLeaseId) -> Result<Option<LeaseRecord>, LedgerError> {
+        self.inner.lookup(lease).await
     }
 
-    fn allocating(
+    async fn allocating(
         &self,
         lease: SandboxLeaseId,
         provider: &str,
         fingerprint: &str,
     ) -> Result<(), LedgerError> {
-        self.inner.allocating(lease, provider, fingerprint)?;
+        self.inner.allocating(lease, provider, fingerprint).await?;
         self.interrupt(Crash::Reserved)
     }
 
-    fn live(&self, lease: SandboxLeaseId, resource_id: &str) -> Result<(), LedgerError> {
+    async fn live(&self, lease: SandboxLeaseId, resource_id: &str) -> Result<(), LedgerError> {
         self.interrupt(Crash::Created)?;
-        self.inner.live(lease, resource_id)
+        self.inner.live(lease, resource_id).await
     }
 
-    fn pending(&self, lease: SandboxLeaseId, intent: PendingIntent) -> Result<(), LedgerError> {
-        self.inner.pending(lease, intent)?;
+    async fn pending(
+        &self,
+        lease: SandboxLeaseId,
+        intent: PendingIntent,
+    ) -> Result<(), LedgerError> {
+        self.inner.pending(lease, intent).await?;
         self.interrupt(match intent {
             PendingIntent::Stop => Crash::StopIntent,
             PendingIntent::Delete => Crash::DeleteIntent,
         })
     }
 
-    fn stopped(&self, lease: SandboxLeaseId) -> Result<(), LedgerError> {
+    async fn stopped(&self, lease: SandboxLeaseId) -> Result<(), LedgerError> {
         self.interrupt(Crash::Stopped)?;
-        self.inner.stopped(lease)
+        self.inner.stopped(lease).await
     }
 
-    fn deleted(&self, lease: SandboxLeaseId) -> Result<(), LedgerError> {
+    async fn deleted(&self, lease: SandboxLeaseId) -> Result<(), LedgerError> {
         self.interrupt(Crash::Deleted)?;
-        self.inner.deleted(lease)
+        self.inner.deleted(lease).await
     }
 }
 
@@ -117,7 +122,8 @@ impl Fixture {
 
     fn router(&self, retention: Retention, crash: Option<Crash>) -> RoutingExecutor {
         let ledger = ResourceLedger::new(Arc::new(Mutex::new(self.store())));
-        let router = RoutingExecutor::local(self.directory.path(), retention);
+        let router = RoutingExecutor::local(self.directory.path(), retention)
+            .with_run_id(self.directory.run_id());
         router.set_ledger(Arc::new(InterruptedLedger {
             inner: ledger,
             crash: Mutex::new(crash),
@@ -140,7 +146,7 @@ impl Fixture {
         assert_eq!(self.record().state, LeaseState::Deleted);
         assert_eq!(self.record().pending, None);
         assert!(
-            container_id(&sandbox_name(self.directory.path(), LEASE.raw()))
+            container_id(&self.directory.sandbox_name(LEASE.raw()))
                 .await
                 .is_none()
         );
@@ -158,7 +164,7 @@ async fn allocation_crashes_recover_without_replacing_the_workspace() {
         let ctx = AcquireContext::bare().with_lease(LEASE);
         assert!(router.acquire(&fixture.scope, &ctx).await.is_err());
         assert_eq!(fixture.record().state, LeaseState::Allocating);
-        let name = sandbox_name(fixture.directory.path(), LEASE.raw());
+        let name = fixture.directory.sandbox_name(LEASE.raw());
         let created = container_id(&name).await;
         if crash == Crash::Created {
             assert!(created.is_some());
@@ -346,7 +352,7 @@ async fn release_reconciles_an_allocation_without_a_recorded_resource_id() {
             let resumed = fixture.router(retention, None);
             let report = resumed.release_lease(LEASE, ScopeOutcome::Failed).await;
             assert!(report.is_clean(), "{report:?}");
-            let name = sandbox_name(fixture.directory.path(), LEASE.raw());
+            let name = fixture.directory.sandbox_name(LEASE.raw());
             if crash == Crash::Created && retention == Retention::Always {
                 assert_eq!(fixture.record().state, LeaseState::Stopped);
                 assert!(container_id(&name).await.is_some());

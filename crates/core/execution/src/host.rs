@@ -267,7 +267,7 @@ pub async fn resume_configured(
         .map_or(Ok(CoordinatorOptions::default()), coordinator_options)?;
     let run_runtime = rt.prepare_run(&run_dir);
     let secrets = run_runtime.secret_provider();
-    let (mut coordinator, torn) = Coordinator::resume(run_runtime, chain, options)?;
+    let (mut coordinator, torn) = Coordinator::resume(run_runtime, chain, options).await?;
     if torn {
         tracing::warn!("truncated an EOF-torn coordinator record before resume");
     }

@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use driver::DeliverDisposition;
 use ir::{Control, FiringId, GraphBuilder, Outcome, RunStatus, ScopeId, StepRef, Value};
+use runtime::store::RunKey;
 use runtime::{RunOptions, Runtime};
 use steps::{Step, StepCtx};
 use testkit::RunDir;
@@ -20,7 +21,7 @@ use crate::{
 #[test]
 fn scope_identity_schema_rejects_version_one_run_directories() {
     let directory = RunDir::new("coordinator-old-resource-schema");
-    drop(CoordinatorStore::create(directory.path(), Vec::new()).unwrap());
+    drop(CoordinatorStore::create(directory.path(), RunKey::new("old"), Vec::new()).unwrap());
     let path = directory.path().join("run.json");
     let mut metadata: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     metadata["format_version"] = Value::from(1);

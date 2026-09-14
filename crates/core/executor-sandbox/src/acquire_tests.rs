@@ -188,7 +188,7 @@ impl Fixture {
         let executor = Arc::new(SandboxExecutor::new(
             Arc::new(FixedProvider::new(provider.clone())),
             ledger.clone(),
-            Arc::new(RunIdentity::new(dir.path().to_path_buf())),
+            Arc::new(RunIdentity::for_run_dir(dir.path().to_path_buf())),
             Retention::Always,
             Some(crate::DOCKER_HOST_ALIAS.to_owned()),
             crate::SandboxOptions::default(),
@@ -222,6 +222,7 @@ impl Fixture {
         let record = self
             .ledger
             .lookup(LEASE)
+            .await
             .expect("the ledger reads")
             .expect("the lease exists");
         assert_eq!(record.state, LeaseState::Deleted);

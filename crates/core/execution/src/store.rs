@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use ir::Graph;
 use serde::{Deserialize, Serialize};
+use store::RunKey;
 
 use crate::jsonl::clean_lines;
 use crate::{
@@ -19,10 +20,12 @@ pub const GRAPHS_DIR: &str = "graphs";
 pub const RESOURCES_DIR: &str = "resources";
 pub const INVOCATIONS_DIR: &str = "invocations";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunMetadata {
     pub format_version: u32,
     pub root:           InvocationId,
+    /// The run's identity in its store and on its sandbox providers.
+    pub key:            RunKey,
 }
 
 #[derive(Debug)]
@@ -99,6 +102,7 @@ pub struct CoordinatorStore {
 impl CoordinatorStore {
     pub fn create(
         root: impl Into<PathBuf>,
+        key: RunKey,
         middleware_chain: Vec<engine::MiddlewareKey>,
     ) -> Result<Self, StoreError> {
         let root = root.into();
@@ -117,7 +121,8 @@ impl CoordinatorStore {
         acquire_lease(&lease, &root)?;
         let metadata = RunMetadata {
             format_version: COORDINATOR_FORMAT_VERSION,
-            root:           InvocationId::ROOT,
+            root: InvocationId::ROOT,
+            key,
         };
         write_json(&mut lease, &metadata, &metadata_path)?;
 
@@ -525,6 +530,7 @@ fn io_error(action: &'static str, path: &Path, source: io::Error) -> StoreError 
 mod tests {
     use std::fs::{self, File, OpenOptions};
 
+    use store::RunKey;
     use testkit::RunDir;
 
     use super::{COORDINATOR_FILE, CoordinatorStore, StoreError, decode_coordinator_log};
@@ -549,7 +555,8 @@ mod tests {
     #[test]
     fn a_rejected_event_leaves_the_state_and_the_log_untouched() {
         let directory = RunDir::new("store-rejected");
-        let mut store = CoordinatorStore::create(directory.path(), Vec::new()).expect("store");
+        let mut store = CoordinatorStore::create(directory.path(), RunKey::new("test"), Vec::new())
+            .expect("store");
         let digest = GraphDigest::from_bytes([7; 32]);
         store
             .append(CoordinatorEvent::GraphRegistered { digest })
@@ -589,7 +596,8 @@ mod tests {
     #[test]
     fn a_failed_write_leaves_the_state_unchanged_and_is_reported() {
         let directory = RunDir::new("store-unwritable");
-        let mut store = CoordinatorStore::create(directory.path(), Vec::new()).expect("store");
+        let mut store = CoordinatorStore::create(directory.path(), RunKey::new("test"), Vec::new())
+            .expect("store");
         let log_path = store.root().join(COORDINATOR_FILE);
         let before = snapshot(&store);
 

@@ -13,9 +13,7 @@ use executor::{
     Sig,
 };
 use executor_sandbox::RoutingExecutor;
-use testkit::{
-    RunDir, container_id, container_is_running, is_docker_ready, list_containers, sandbox_name,
-};
+use testkit::{RunDir, container_id, container_is_running, is_docker_ready, list_containers};
 use tokio::time;
 
 const TEST_IMAGE: &str = "buildpack-deps:noble";
@@ -26,7 +24,7 @@ const SCOPE: ir::ScopeId = ir::ScopeId::new(1);
 const INSTANCE: &str = "env-1";
 
 fn executor(dir: &RunDir, retention: Retention) -> RoutingExecutor {
-    RoutingExecutor::local(dir.path(), retention)
+    RoutingExecutor::local(dir.path(), retention).with_run_id(dir.run_id())
 }
 
 fn container_scope(image: &str) -> ScopeSpec {
@@ -35,7 +33,7 @@ fn container_scope(image: &str) -> ScopeSpec {
 
 /// The sandbox's container name for this battery's scope.
 fn name(dir: &RunDir) -> String {
-    sandbox_name(dir.path(), 1)
+    dir.sandbox_name(1)
 }
 
 /// Runs `script` under bash and returns (lines, status).
@@ -115,7 +113,7 @@ async fn a_container_step_runs_and_its_workspace_lives_in_the_sandbox() {
         "no host workspace directory is created for a container scope"
     );
 
-    let prefix = format!("petri-{}-", testkit::recorded_run_id(dir.path()));
+    let prefix = dir.container_prefix();
     let report = executor.release(handle, ScopeOutcome::Failed).await;
     assert!(report.is_clean(), "{report:?}");
     assert!(

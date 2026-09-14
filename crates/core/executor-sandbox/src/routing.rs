@@ -17,7 +17,7 @@ use tokio::fs;
 use tokio::sync::OnceCell;
 
 use crate::actions::{ActionHost, ActionHostRunner, remove_recorded};
-use crate::lease::{LeaseLedger, MemoryLedger};
+use crate::lease::{LeaseLedger, MemoryLedger, ReconcileReport, RecordedLease};
 use crate::plugin::{FixedProvider, PluginSettings, PluginSource, ProviderSource};
 use crate::run::{RunIdentity, workspace_dir};
 use crate::{SandboxBackend, SandboxExecutor, SandboxOptions, SandboxTeardown};
@@ -121,10 +121,22 @@ impl RoutingExecutor {
             container: OnceCell::new(),
             action_hosts: Mutex::new(BTreeMap::new()),
             ledger: OnceLock::new(),
-            identity: Arc::new(RunIdentity::new(run_dir)),
+            identity: Arc::new(RunIdentity::for_run_dir(run_dir)),
             retention,
             options: SandboxOptions::default(),
         }
+    }
+
+    /// Name the run on its providers: the run's store key, so a resume
+    /// reaches the crashed run's sandboxes. A router built without one is
+    /// named after its run directory ([`RunIdentity::for_run_dir`]).
+    #[must_use]
+    pub fn with_run_id(mut self, run_id: impl Into<smol_str::SmolStr>) -> Self {
+        self.identity = Arc::new(RunIdentity::new(
+            self.identity.run_dir().to_path_buf(),
+            run_id,
+        ));
+        self
     }
 
     /// The durable ledger container leases are recorded in. A coordinator
@@ -241,6 +253,7 @@ impl RoutingExecutor {
         if let Some(ledger) = self.ledger.get() {
             let record = ledger
                 .lookup(lease)
+                .await
                 .map_err(|e| EnvError::backend("sandbox", "lookup", e.to_string()))?;
             if record.is_some_and(|record| record.provider.as_deref() == Some("host")) {
                 return self.host().await;
@@ -276,8 +289,8 @@ impl RoutingExecutor {
 
     /// The name prefix every sandbox this run owns starts with,
     /// `petri-<run id>-`, for a leak check after release.
-    pub async fn container_prefix(&self) -> Result<String, EnvError> {
-        self.identity.container_prefix().await
+    pub fn container_prefix(&self) -> String {
+        self.identity.container_prefix()
     }
 
     fn action_host(
@@ -375,6 +388,36 @@ impl RoutingExecutor {
                 report = report.problem(format!(
                     "no container executor to release lease {lease}: {error}"
                 ));
+            }
+        }
+        report
+    }
+
+    /// Reconcile the run's recorded leases with their providers before any
+    /// create: the takeover step a coordinator runs when it opens a stored
+    /// run for writing. `host` names the leases the host provider holds and
+    /// `container` the rest; a provider with no lease recorded on it is not
+    /// launched.
+    pub async fn reconcile(
+        &self,
+        host: &[RecordedLease],
+        container: &[RecordedLease],
+    ) -> ReconcileReport {
+        let mut report = ReconcileReport::default();
+        if !host.is_empty() {
+            match self.host().await {
+                Ok(executor) => report.merge(executor.manager().reconcile(host).await),
+                Err(error) => report
+                    .problems
+                    .push(format!("no host executor to reconcile with: {error}")),
+            }
+        }
+        if !container.is_empty() {
+            match self.container().await {
+                Ok(executor) => report.merge(executor.manager().reconcile(container).await),
+                Err(error) => report
+                    .problems
+                    .push(format!("no container executor to reconcile with: {error}")),
             }
         }
         report

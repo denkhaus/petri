@@ -21,7 +21,7 @@ use steps::PROCESS_KIND;
 use tokio::process::Command;
 use tokio::time;
 
-pub mod store;
+pub mod run_store;
 
 /// A process-unique counter, for run ids and directory names.
 pub fn unique_id() -> u64 {
@@ -65,6 +65,24 @@ impl RunDir {
 
     pub fn logs(&self) -> PathBuf {
         self.path.join("logs")
+    }
+
+    /// The run id a router with no coordinator uses over this directory.
+    pub fn run_id(&self) -> String {
+        executor_sandbox::RunIdentity::for_run_dir(self.path.clone())
+            .run_id()
+            .to_owned()
+    }
+
+    /// `petri-<run id>-`, for a router built with [`RunDir::run_id`].
+    pub fn container_prefix(&self) -> String {
+        format!("petri-{}-", self.run_id())
+    }
+
+    /// The sandbox name of `lease` for a router built with
+    /// [`RunDir::run_id`].
+    pub fn sandbox_name(&self, lease: u64) -> String {
+        sandbox_name_of(&self.run_id(), lease)
     }
 }
 
@@ -309,11 +327,19 @@ pub async fn is_docker_available() -> bool {
     ready
 }
 
-/// The run id an executor recorded under `run_dir`, once one has.
+/// The run id every sandbox of the run under `run_dir` is labelled with:
+/// the run key the coordinator recorded in `run.json`, or, for a driver
+/// with no coordinator, the id its router derives from the directory.
 pub fn recorded_run_id(run_dir: &Path) -> String {
-    fs::read_to_string(run_dir.join(executor_sandbox::RUN_ID_FILE))
-        .expect("the run id is recorded under the run dir")
-        .trim()
+    if let Ok(bytes) = fs::read(run_dir.join(store::RUN_FILE)) {
+        let run: serde_json::Value = serde_json::from_slice(&bytes).expect("run.json is JSON");
+        return run["key"]
+            .as_str()
+            .expect("run.json names the run key")
+            .to_owned();
+    }
+    executor_sandbox::RunIdentity::for_run_dir(run_dir.to_path_buf())
+        .run_id()
         .to_owned()
 }
 
@@ -322,7 +348,12 @@ pub fn recorded_run_id(run_dir: &Path) -> String {
 /// sandbox by the scope id, so scope 0 is lease 0; a coordinator mints
 /// leases in scope order from 0.
 pub fn sandbox_name(run_dir: &Path, lease: u64) -> String {
-    format!("petri-{}-l{lease}", recorded_run_id(run_dir))
+    sandbox_name_of(&recorded_run_id(run_dir), lease)
+}
+
+/// The name of the container sandbox for `lease` of the run with `run_id`.
+pub fn sandbox_name_of(run_id: &str, lease: u64) -> String {
+    format!("petri-{run_id}-l{lease}")
 }
 
 /// Runs a Docker inspection command, bounding daemon waits and ending the

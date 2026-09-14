@@ -1,12 +1,14 @@
 use std::fs;
 
 use execution::{COORDINATOR_FILE, CoordinatorStore, StoreError, decode_coordinator_log};
+use runtime::store::RunKey;
 use testkit::RunDir;
 
 #[test]
 fn the_run_directory_has_one_exclusive_lease() {
     let directory = RunDir::new("coordinator-lease");
-    let store = CoordinatorStore::create(directory.path(), Vec::new()).expect("first lease");
+    let store = CoordinatorStore::create(directory.path(), RunKey::new("test"), Vec::new())
+        .expect("first lease");
     let Err(error) = CoordinatorStore::resume(directory.path()) else {
         panic!("second lease must be refused");
     };
@@ -19,7 +21,8 @@ fn the_run_directory_has_one_exclusive_lease() {
 fn a_torn_final_coordinator_record_drops_to_the_complete_prefix() {
     let directory = RunDir::new("coordinator-torn");
     let path = directory.path().join(COORDINATOR_FILE);
-    let store = CoordinatorStore::create(directory.path(), Vec::new()).expect("store");
+    let store =
+        CoordinatorStore::create(directory.path(), RunKey::new("test"), Vec::new()).expect("store");
     drop(store);
     let mut bytes = fs::read(&path).expect("log");
     bytes.extend_from_slice(b"{\"seq\":1,\"event\":");
@@ -32,7 +35,8 @@ fn a_torn_final_coordinator_record_drops_to_the_complete_prefix() {
 fn a_complete_invalid_coordinator_record_is_corruption() {
     let directory = RunDir::new("coordinator-corrupt");
     let path = directory.path().join(COORDINATOR_FILE);
-    let store = CoordinatorStore::create(directory.path(), Vec::new()).expect("store");
+    let store =
+        CoordinatorStore::create(directory.path(), RunKey::new("test"), Vec::new()).expect("store");
     drop(store);
     let mut bytes = fs::read(&path).expect("log");
     bytes.extend_from_slice(b"not-json\n");

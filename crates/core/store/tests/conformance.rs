@@ -10,7 +10,7 @@ use store::{
     RunStore, StoreError,
 };
 use testkit::RunDir;
-use testkit::store::{conformance, record, stale_owner_conformance};
+use testkit::run_store::{conformance, record, stale_owner_conformance};
 
 #[tokio::test]
 async fn the_memory_store_conforms() {

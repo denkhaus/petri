@@ -303,8 +303,9 @@ impl ResourceLedger {
     }
 }
 
+#[async_trait::async_trait]
 impl LeaseLedger for ResourceLedger {
-    fn lookup(&self, lease: SandboxLeaseId) -> Result<Option<LeaseRecord>, LedgerError> {
+    async fn lookup(&self, lease: SandboxLeaseId) -> Result<Option<LeaseRecord>, LedgerError> {
         let store = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let Ok(record) = store.resolve(lease) else {
             return Ok(None);
@@ -318,7 +319,7 @@ impl LeaseLedger for ResourceLedger {
         }))
     }
 
-    fn allocating(
+    async fn allocating(
         &self,
         lease: SandboxLeaseId,
         provider: &str,
@@ -332,7 +333,7 @@ impl LeaseLedger for ResourceLedger {
         })
     }
 
-    fn live(&self, lease: SandboxLeaseId, resource_id: &str) -> Result<(), LedgerError> {
+    async fn live(&self, lease: SandboxLeaseId, resource_id: &str) -> Result<(), LedgerError> {
         self.update(lease, |record| {
             record.state = LeaseState::Live;
             record.pending = None;
@@ -340,18 +341,22 @@ impl LeaseLedger for ResourceLedger {
         })
     }
 
-    fn pending(&self, lease: SandboxLeaseId, intent: PendingIntent) -> Result<(), LedgerError> {
+    async fn pending(
+        &self,
+        lease: SandboxLeaseId,
+        intent: PendingIntent,
+    ) -> Result<(), LedgerError> {
         self.update(lease, |record| record.pending = Some(intent))
     }
 
-    fn stopped(&self, lease: SandboxLeaseId) -> Result<(), LedgerError> {
+    async fn stopped(&self, lease: SandboxLeaseId) -> Result<(), LedgerError> {
         self.update(lease, |record| {
             record.state = LeaseState::Stopped;
             record.pending = None;
         })
     }
 
-    fn deleted(&self, lease: SandboxLeaseId) -> Result<(), LedgerError> {
+    async fn deleted(&self, lease: SandboxLeaseId) -> Result<(), LedgerError> {
         self.update(lease, |record| {
             record.state = LeaseState::Deleted;
             record.pending = None;

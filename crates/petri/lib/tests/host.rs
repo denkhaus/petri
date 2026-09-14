@@ -11,7 +11,6 @@ use petri::driver::{EventObserver, ExecutionReport};
 use petri::engine::{self, EngineState, EventRecord, InvalidRecords};
 use petri::execution::prune::{PruneError, prune};
 use petri::execution::{self, CoordinatorError};
-use petri::executor::sandbox::RUN_ID_FILE;
 use petri::executor::{MapSecrets, Retention, SecretProvider as _};
 use petri::host::{self, EVENTS_FILE, EventsDecodeError, HostError};
 use petri::ir::{Graph, GraphBuilder, RunStatus, RuntimeSpec, Scope, ScopeId, StepRef};
@@ -511,7 +510,11 @@ sleep 300
     let run = tokio::spawn(async move { host::run(&rt, graph).await });
     // The root invocation's scope 0 is the run's first lease.
     assert!(
-        wait_for_file(&dir.path().join(RUN_ID_FILE), Duration::from_secs(60)).await,
+        wait_for_file(
+            &dir.path().join(execution::RUN_FILE),
+            Duration::from_secs(60)
+        )
+        .await,
         "the run never started"
     );
     let sandbox = testkit::sandbox_name(dir.path(), 0);

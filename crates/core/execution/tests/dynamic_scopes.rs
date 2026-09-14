@@ -138,6 +138,7 @@ async fn a_dynamic_scope_resumes_its_durable_lease_and_rejects_corrupt_provenanc
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .unwrap();
     assert_eq!(
         coordinator
@@ -185,6 +186,7 @@ async fn a_dynamic_scope_resumes_its_durable_lease_and_rejects_corrupt_provenanc
                 Vec::new(),
                 CoordinatorOptions::default(),
             )
+            .await
             .is_err()
         );
     }
@@ -536,6 +538,7 @@ async fn nested_dynamic_scopes_can_lend_their_lease_and_keep_failure_retention()
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .unwrap();
     coordinator.finish().await;
     assert!(prune(&runtime).await.unwrap().is_clean());

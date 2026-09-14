@@ -15,6 +15,7 @@ use executor::{
 };
 use ir::{GraphBuilder, Outcome, RunStatus, RuntimeSpec, Scope, ScopeId, StepRef};
 use runtime::steps::{Step, StepCtx};
+use runtime::store::RunKey;
 use runtime::{RunOptions, Runtime};
 use testkit::{RunDir, container_id, container_is_running, is_docker_ready, sandbox_name};
 use tokio::time::timeout;
@@ -347,8 +348,12 @@ async fn prune_removes_crashed_host_action_containers_including_tombstoned_lease
     for tombstoned in [false, true] {
         let directory = RunDir::new("host-action-prune");
         drop(
-            execution::CoordinatorStore::create(directory.path(), Vec::new())
-                .expect("run manifest"),
+            execution::CoordinatorStore::create(
+                directory.path(),
+                RunKey::new(directory.run_id()),
+                Vec::new(),
+            )
+            .expect("run manifest"),
         );
         let runtime = Runtime::standard().options(RunOptions::new(directory.path()));
         let scope = ScopeSpec::new(ScopeId::new(0), "scope-0");
@@ -385,7 +390,7 @@ async fn prune_removes_crashed_host_action_containers_including_tombstoned_lease
         let mut lines = process.lines().expect("action lines");
         while lines.recv().await.is_some() {}
         assert!(process.wait().await.expect("action finishes").is_success());
-        let prefix = router.container_prefix().await.expect("prefix");
+        let prefix = router.container_prefix();
         assert_eq!(testkit::list_containers(&prefix).await.len(), 1);
         // A fresh router has only durable records, just as after a crash.
         router.shutdown().await;

@@ -12,7 +12,7 @@ use executor::{
 };
 use executor_sandbox::{MemoryLedger, PluginSettings, PluginSource, RoutingExecutor};
 use ir::{RuntimeSpec, ScopeId};
-use testkit::{RunDir, container_id, is_docker_ready, list_containers, sandbox_name};
+use testkit::{RunDir, container_id, is_docker_ready, list_containers};
 use tokio::process::Command;
 use tokio::time::{sleep, timeout};
 
@@ -55,7 +55,8 @@ async fn a_plugin_crash_fails_calls_then_recovers_one_generation_and_the_same_sa
         supervisor.clone(),
         directory.path(),
         Retention::Never,
-    );
+    )
+    .with_run_id(directory.run_id());
     router.set_ledger(Arc::new(MemoryLedger::default()));
     let scope = ScopeSpec::new(ScopeId::new(0), "scope-0")
         .with_runtime(RuntimeSpec::container("alpine:3.20"));
@@ -63,7 +64,7 @@ async fn a_plugin_crash_fails_calls_then_recovers_one_generation_and_the_same_sa
     let ctx = AcquireContext::bare().with_lease(lease);
     let handle = router.acquire(&scope, &ctx).await.unwrap();
     let generation = supervisor.current().await.unwrap();
-    let name = sandbox_name(directory.path(), lease.raw());
+    let name = directory.sandbox_name(lease.raw());
     let original = container_id(&name).await.unwrap();
     handle
         .exec()
@@ -169,7 +170,7 @@ async fn a_plugin_crash_fails_calls_then_recovers_one_generation_and_the_same_sa
         b"oneshot\n"
     );
     // Recovery removes abandoned one-shots before resuming the sandbox.
-    let prefix = router.container_prefix().await.unwrap();
+    let prefix = router.container_prefix();
     assert_eq!(list_containers(&prefix).await, vec![name]);
     assert!(
         router
@@ -247,7 +248,7 @@ async fn host_actions_recover_after_the_docker_plugin_restarts() {
         }
     }
     assert_eq!(supervisor.current().await.unwrap().number(), 2);
-    let prefix = router.container_prefix().await.unwrap();
+    let prefix = router.container_prefix();
     assert_eq!(list_containers(&prefix).await.len(), 1);
     assert!(
         router

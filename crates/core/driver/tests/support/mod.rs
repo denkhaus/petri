@@ -160,16 +160,13 @@ pub(crate) fn runners_with_wedged() -> Registry {
 /// Build a driver over the routing executor (container scopes go to Docker),
 /// and the container-name prefix it
 /// will use, so a leak check can look only at this test's own containers.
-pub(crate) async fn docker_driver_named(
+pub(crate) fn docker_driver_named(
     graph: Graph,
     dir: &RunDir,
     config: RunConfig,
 ) -> (Driver, String) {
     let executor = RoutingExecutor::local(dir.path(), config.keep_workspaces);
-    let prefix = executor
-        .container_prefix()
-        .await
-        .expect("the run id is recorded in the run dir");
+    let prefix = executor.container_prefix();
     let driver = Driver::new(
         graph,
         Arc::new(executor),

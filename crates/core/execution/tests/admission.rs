@@ -724,6 +724,7 @@ async fn resume_keeps_the_limit_and_refuses_one_below_the_declared_total() {
     // declares nothing new.
     let (mut resumed, _) =
         Coordinator::resume(runtime.prepare_run(directory.path()), Vec::new(), options)
+            .await
             .expect("resumes at the boundary");
     let result = resumed
         .run_root(parent, BTreeMap::new())
@@ -737,7 +738,7 @@ async fn resume_keeps_the_limit_and_refuses_one_below_the_declared_total() {
     let lower = CoordinatorOptions::default()
         .with_max_invocations(2)
         .expect("a lower limit is allowed");
-    match Coordinator::resume(runtime.prepare_run(directory.path()), Vec::new(), lower) {
+    match Coordinator::resume(runtime.prepare_run(directory.path()), Vec::new(), lower).await {
         Err(CoordinatorError::InvocationLimit { total, limit }) => {
             assert_eq!((total, limit), (3, 2));
         }
@@ -1040,6 +1041,7 @@ async fn resume_redispatches_queued_children_under_the_bound() {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("the coordinator resumes");
     let mut coordinator = coordinator.observe(resumed_live.clone());
     let result = timeout(
