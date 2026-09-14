@@ -9,7 +9,7 @@ use execution::host::{self, HostRun};
 use execution::inspect::inspect_run_dir;
 use fabro_acceptance::runs::fresh_run_dir;
 use frontend::{CompileInputs, Lowered, MapFiles, NoFiles};
-use frontend_fabro::load;
+use frontend_attractor::load;
 use ir::RunStatus;
 use runtime::executor::Retention;
 use runtime::{RunOptions, Runtime};
@@ -20,7 +20,7 @@ fn runtime(dir: &Path) -> Runtime {
     options.grace = Duration::from_secs(2);
     options.retention = Retention::Never;
     options.echo = false;
-    fabro_steps::register(Runtime::standard()).options(options)
+    attractor_steps::register(Runtime::standard()).options(options)
 }
 
 #[expect(

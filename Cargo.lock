@@ -1525,9 +1525,9 @@ dependencies = [
  "axum",
  "lithos-llm",
  "pebble-coding-agent",
+ "petri-attractor-steps",
  "petri-execution",
- "petri-fabro-steps",
- "petri-frontend-fabro",
+ "petri-frontend-attractor",
  "petri-frontend-gha",
  "petri-github-actions",
  "petri-github-objects",
@@ -1542,6 +1542,37 @@ dependencies = [
  "tracing",
  "twin-anthropic",
  "twin-openai",
+]
+
+[[package]]
+name = "petri-attractor-steps"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "globset",
+ "jsonschema",
+ "lithos-llm",
+ "pebble-agent",
+ "pebble-coding-agent",
+ "petri-execution",
+ "petri-executor",
+ "petri-frontend",
+ "petri-frontend-attractor",
+ "petri-ir",
+ "petri-runtime",
+ "petri-steps",
+ "petri-testkit",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "shlex 1.3.0",
+ "smol_str",
+ "tar",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -1678,10 +1709,10 @@ name = "petri-fabro-acceptance"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "petri-attractor-steps",
  "petri-execution",
- "petri-fabro-steps",
  "petri-frontend",
- "petri-frontend-fabro",
+ "petri-frontend-attractor",
  "petri-ir",
  "petri-runtime",
  "petri-steps",
@@ -1692,37 +1723,6 @@ dependencies = [
  "smol_str",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
-]
-
-[[package]]
-name = "petri-fabro-steps"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "globset",
- "jsonschema",
- "lithos-llm",
- "pebble-agent",
- "pebble-coding-agent",
- "petri-execution",
- "petri-executor",
- "petri-frontend",
- "petri-frontend-fabro",
- "petri-ir",
- "petri-runtime",
- "petri-steps",
- "petri-testkit",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "shlex 1.3.0",
- "smol_str",
- "tar",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
 ]
 
 [[package]]
@@ -1740,7 +1740,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "petri-frontend-fabro"
+name = "petri-frontend-attractor"
 version = "0.1.0"
 dependencies = [
  "minijinja",

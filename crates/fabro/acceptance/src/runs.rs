@@ -10,13 +10,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{env, fs, process};
 
+use attractor_steps::{Simulate, StubScripts, reported_outcome};
 use execution::host::{self, HostRun};
 use execution::{
     CoordinatorEvent, CoordinatorRecord, ExecutionId, ExecutionObserver, InvocationId,
 };
-use fabro_steps::{Simulate, StubScripts, reported_outcome};
-use frontend_fabro::BRANCH_META_KIND;
-use frontend_fabro::kinds::GOAL_CHECK_NODE;
+use frontend_attractor::BRANCH_META_KIND;
+use frontend_attractor::kinds::GOAL_CHECK_NODE;
 use ir::{FiringId, Graph, Value};
 use runtime::engine::{EngineState, EventRecord};
 use runtime::executor::Retention;
@@ -29,7 +29,7 @@ pub fn stub_runtime(run_dir: &Path) -> Runtime {
     options.grace = Duration::from_secs(2);
     options.retention = Retention::Never;
     options.echo = false;
-    fabro_steps::register_stubs(Runtime::standard()).options(options)
+    attractor_steps::register_stubs(Runtime::standard()).options(options)
 }
 
 /// A fresh run directory under the system temp dir.
@@ -335,7 +335,8 @@ impl Case {
     /// Lower the case: the root graph and every child graph its parallel
     /// branches run. Panics with the diagnostics when it does not lower.
     pub fn graphs(&self) -> (Graph, Vec<Graph>) {
-        let lowered = frontend_fabro::load_text(&format!("{}.fabro", self.name), &self.workflow);
+        let lowered =
+            frontend_attractor::load_text(&format!("{}.fabro", self.name), &self.workflow);
         let graph = lowered.graph.unwrap_or_else(|| {
             panic!(
                 "case `{}` does not lower:\n{}",

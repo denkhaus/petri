@@ -15,8 +15,8 @@ lithos-llm = { workspace = true, features = ["runtime", "builtin-catalog", "envi
 runtime = { workspace = true }
 execution = { workspace = true }
 frontend-gha = { workspace = true }
-frontend-fabro = { workspace = true }
-fabro-steps = { workspace = true }
+frontend-attractor = { workspace = true }
+attractor-steps = { workspace = true }
 # The retry observer that puts the client's own retries on the native agent's
 # event stream; Pebble asks the application that builds the client to install it.
 pebble-coding-agent = { workspace = true }

@@ -9,7 +9,11 @@
 //!    `crates/<component>/` (anything that is not `core`) depends only on core
 //!    and on its own component. Components never depend on each other —
 //!    anything two components need is core — and never on the distribution, not
-//!    even for tests.
+//!    even for tests. The one exception is a declared layer ([`LAYERED`]):
+//!    `fabro` is built on `attractor`, since the Fabro frontend wraps the
+//!    Attractor frontend and registers its step kinds
+//!    (`.ai/plans/attractor-split.md`). The layer runs one way; `attractor`
+//!    never names `fabro`.
 //! 3. Only the distribution (`crates/petri/`) may depend on component crates.
 //!
 //! The check reads `cargo metadata`, so it sees what cargo sees, not what the
@@ -20,6 +24,10 @@ use std::path::Path;
 use std::process::Command;
 
 use serde_json::Value;
+
+/// Component pairs `(upper, lower)` where `upper` may depend on `lower`: the
+/// layers rule 2 allows. Every other component pair is a violation.
+const LAYERED: &[(&str, &str)] = &[("fabro", "attractor")];
 
 /// Which world a workspace crate lives in, by its manifest path.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,10 +125,13 @@ fn core_never_depends_on_a_component() {
                 // Rule 1: core reaches only core.
                 (World::Core, World::Core) => true,
                 (World::Core, _) => false,
-                // Rule 2: a component reaches core and itself; never another
-                // component, never the distribution — dev deps included.
+                // Rule 2: a component reaches core, itself, and the component
+                // it is declared to sit on; never another component, never
+                // the distribution — dev deps included.
                 (World::Component(_), World::Core) => true,
-                (World::Component(a), World::Component(b)) => a == b,
+                (World::Component(a), World::Component(b)) => {
+                    a == b || LAYERED.contains(&(a.as_str(), b.as_str()))
+                }
                 (World::Component(_), World::Distribution) => false,
                 // Rule 3: the distribution reaches everything.
                 (World::Distribution, _) => true,

@@ -17,8 +17,8 @@ name = "fabro_acceptance"
 [dependencies]
 ir = { workspace = true }
 frontend = { workspace = true }
-frontend-fabro = { workspace = true }
-fabro-steps = { workspace = true }
+frontend-attractor = { workspace = true }
+attractor-steps = { workspace = true }
 runtime = { workspace = true }
 execution = { workspace = true }
 tokio = { workspace = true }

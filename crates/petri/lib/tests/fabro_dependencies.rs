@@ -1,15 +1,15 @@
 //! Petri never depends on a Fabro crate.
 //!
 //! Fabro embeds Petri, so the production dependency direction is Fabro to
-//! Petri. Petri's own Fabro component crates (`petri-fabro-*` and
-//! `petri-frontend-fabro`) are allowed. A crate of the fabro-sh/fabro
-//! repository (`fabro-*`) is not, whether it is reached by a path, by git,
-//! transitively through another crate, in any dependency kind, or from a
-//! separate Cargo workspace inside this repository. The check reads the full
-//! `cargo metadata` resolve graph, every package and every dependency kind,
-//! and separately scans nested manifests and build scripts that the main
-//! workspace does not see. Only testing and parity harness code may launch a
-//! pinned Fabro binary as a subprocess; nothing may link it.
+//! Petri. Petri's own component crates (`petri-fabro-*`, `petri-attractor-*`,
+//! `petri-frontend-attractor` and `petri-frontend-fabro`) are allowed. A crate
+//! of the fabro-sh/fabro repository (`fabro-*`) is not, whether it is reached
+//! by a path, by git, transitively through another crate, in any dependency
+//! kind, or from a separate Cargo workspace inside this repository. The check
+//! reads the full `cargo metadata` resolve graph, every package and every
+//! dependency kind, and separately scans nested manifests and build scripts
+//! that the main workspace does not see. Only testing and parity harness code
+//! may launch a pinned Fabro binary as a subprocess; nothing may link it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -129,7 +129,7 @@ fn forbidden_fabro_packages(metadata: &Value) -> Vec<String> {
 
 /// Is this line of a Cargo manifest a dependency on a Fabro crate? A
 /// workspace alias (`fabro-steps = { workspace = true }`) and a renamed Petri
-/// package (`package = "petri-fabro-steps"`) are Petri's own crates.
+/// package (`package = "petri-fabro-acceptance"`) are Petri's own crates.
 fn manifest_line_reaches_fabro(line: &str) -> bool {
     let trimmed = line.trim();
     if trimmed.starts_with('#') {
@@ -433,26 +433,26 @@ fn petri_fabro_crates_and_other_dependencies_are_allowed() {
         "git+ssh://git@github.com/lithoscomputer/sandbox-driver.git?rev=a56#sandbox-driver@0.1.0";
     let metadata = json!({
         "packages": [
-            petri_package("petri-fabro-steps", &json!([
+            petri_package("petri-attractor-steps", &json!([
                 { "name": "pebble-coding-agent", "source": "git+ssh://git@github.com/lithoscomputer/pebble.git?rev=a2f", "req": "*", "kind": null },
-                { "name": "frontend-fabro", "source": null, "req": "*", "kind": null, "path": format!("{PETRI_ROOT}/crates/x/petri-frontend-fabro") }
+                { "name": "frontend-attractor", "source": null, "req": "*", "kind": null, "path": format!("{PETRI_ROOT}/crates/x/petri-frontend-attractor") }
             ])),
-            petri_package("petri-frontend-fabro", &json!([])),
+            petri_package("petri-frontend-attractor", &json!([])),
             // A renamed dependency: cargo records the package name and the
             // alias separately.
             petri_package("petri-fabro-acceptance", &json!([
-                { "name": "petri-fabro-steps", "rename": "fabro-steps", "source": null, "req": "*", "kind": "dev", "path": format!("{PETRI_ROOT}/crates/x/petri-fabro-steps") }
+                { "name": "petri-attractor-steps", "rename": "attractor-steps", "source": null, "req": "*", "kind": "dev", "path": format!("{PETRI_ROOT}/crates/x/petri-attractor-steps") }
             ])),
             package("pebble-coding-agent", pebble_id, Some("git+ssh://git@github.com/lithoscomputer/pebble.git?rev=a2f#a2f"), "/home/u/.cargo/git/checkouts/pebble/a2f/Cargo.toml", &json!([])),
             package("sandbox-driver", driver_id, Some("git+ssh://git@github.com/lithoscomputer/sandbox-driver.git?rev=a56#a56"), "/home/u/.cargo/git/checkouts/sandbox-driver/a56/Cargo.toml", &json!([])),
         ],
         "resolve": { "nodes": [
-            node(&petri_id("petri-fabro-steps"), &json!([
+            node(&petri_id("petri-attractor-steps"), &json!([
                 edge("pebble_coding_agent", pebble_id, None),
-                edge("frontend_fabro", &petri_id("petri-frontend-fabro"), None),
+                edge("frontend_attractor", &petri_id("petri-frontend-attractor"), None),
             ])),
             node(&petri_id("petri-fabro-acceptance"), &json!([
-                edge("fabro_steps", &petri_id("petri-fabro-steps"), Some("dev")),
+                edge("attractor_steps", &petri_id("petri-attractor-steps"), Some("dev")),
             ])),
             node(pebble_id, &json!([])),
             node(driver_id, &json!([])),
@@ -533,7 +533,7 @@ fn manifest_lines_are_classified() {
         "fabro-steps = { workspace = true }"
     ));
     assert!(!manifest_line_reaches_fabro(
-        "fabro-steps = { package = \"petri-fabro-steps\", path = \"crates/fabro/steps\" }"
+        "fabro-steps = { package = \"petri-fabro-steps\", path = \"crates/attractor/steps\" }"
     ));
     assert!(!manifest_line_reaches_fabro(
         "frontend-fabro = { workspace = true }"
@@ -556,11 +556,14 @@ fn petri_never_depends_on_a_fabro_crate() {
         .as_array()
         .expect("packages")
         .iter()
-        .filter(|package| text_of(package, "name").starts_with("petri-fabro-"))
+        .filter(|package| {
+            let name = text_of(package, "name");
+            name.starts_with("petri-fabro-") || name.starts_with("petri-attractor-")
+        })
         .count();
     assert!(
         petri_fabro >= 2,
-        "the allow-list is exercised by Petri's own Fabro crates, saw {petri_fabro}"
+        "the allow-list is exercised by Petri's own Fabro and Attractor crates, saw {petri_fabro}"
     );
 }
 

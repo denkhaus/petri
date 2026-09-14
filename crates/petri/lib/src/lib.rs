@@ -36,8 +36,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use std::{env, fs, io, thread};
 
+use attractor_steps::pebble::PebbleClient;
 pub use execution::{self, host};
-use fabro_steps::pebble::PebbleClient;
 use frontend_gha::exprs::GITHUB_TOKEN_SECRET;
 use lithos_llm::catalog::{Catalog, CatalogError};
 use lithos_llm::client::ClientBuildError;
@@ -56,14 +56,14 @@ pub mod executor {
 
 /// The frontend interface, with every format this distribution ships.
 pub mod frontend {
-    pub use frontend_fabro as fabro;
+    pub use frontend_attractor as fabro;
     pub use frontend_gha as gha;
     pub use runtime::frontend::*;
 }
 
 /// The Fabro component's run-time half: its step kinds and the stub registry.
 pub mod fabro {
-    pub use fabro_steps::*;
+    pub use attractor_steps::*;
 }
 
 /// Step kinds, with the standard registry.
@@ -98,7 +98,7 @@ pub mod github {
 /// `Runtime::standard()` for core alone, `Runtime::bare()` for nothing — and
 /// registers what it wants.
 pub fn runtime() -> Runtime {
-    assemble(fabro_steps::register)
+    assemble(attractor_steps::register)
 }
 
 /// [`runtime`] with the Fabro step kinds simulated — `petri run --dry-run`:
@@ -106,7 +106,7 @@ pub fn runtime() -> Runtime {
 /// Fabro's own `--dry-run` does. The GitHub Actions kinds have no simulation
 /// and run for real.
 pub fn dry_run_runtime() -> Runtime {
-    assemble(fabro_steps::register_stubs)
+    assemble(attractor_steps::register_stubs)
 }
 
 fn assemble(fabro: fn(Runtime) -> Runtime) -> Runtime {
@@ -138,7 +138,7 @@ fn assemble(fabro: fn(Runtime) -> Runtime) -> Runtime {
         );
     }
     let runtime = Runtime::standard()
-        .frontend(frontend_fabro::Fabro::new().with_settings_toml(fabro_settings_toml()))
+        .frontend(frontend_attractor::Fabro::new().with_settings_toml(fabro_settings_toml()))
         .frontend(
             frontend_gha::GitHubActions::with_actions(manifests.clone())
                 .with_runners(runners)

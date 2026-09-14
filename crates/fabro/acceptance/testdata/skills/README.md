@@ -21,7 +21,7 @@ Fabro skill directories, precedence, loading, prompt and tool behavior.
   (Claude 5, Kimi Code), for a run that sees `home` and `repo`.
 
 Tests copy `repo` into a Git repository and point `FABRO_HOME` (or the
-`fabro_steps::skills::FabroHome` capability) at `home`.
+`attractor_steps::skills::FabroHome` capability) at `home`.
 
 ## Where the expectations come from
 

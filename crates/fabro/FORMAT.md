@@ -258,7 +258,7 @@ The parallel node itself is the `fabro/fork` step. It runs once per visit,
 before any branch, and takes the fork snapshot: the parent's `kv` and, when
 a branch target is an agent or prompt node, the parent's stage records. It
 offloads the `for_each` source list at any size and every other snapshot
-value above 4 KiB (`fabro_steps::blobs::FAN_OUT_OFFLOAD_THRESHOLD`) to the
+value above 4 KiB (`attractor_steps::blobs::FAN_OUT_OFFLOAD_THRESHOLD`) to the
 run's output store, so the snapshot holds `blob://sha256/<hex>` references
 in their place, one blob per value for the whole fork; the parent's own
 `kv` is not changed. Its output is `{ snapshot, nodes }`, which the branch
@@ -386,7 +386,7 @@ it changed (`internal.*`, `graph.*`, `thread.*` and `current*` keys excluded).
 is 1000 (a warning names the bad value), zero is 1. A 1,000-poll manager
 consumes one child invocation. The child inherits the parent's sandbox and
 secrets; the parent's cancel cancels it. A host that runs Fabro steps outside
-the coordinator registers `fabro_steps::workflow::ChildInvoker`.
+the coordinator registers `attractor_steps::workflow::ChildInvoker`.
 
 ## Steps at run time
 
@@ -511,7 +511,7 @@ the coordinator registers `fabro_steps::workflow::ChildInvoker`.
   updates read the logical value back through the store; a route or a
   condition that reads such a key sees the reference text, as Fabro's edge
   selection does for every key but `command.output`. The store is the
-  `fabro_steps::OutputStore` capability: `fabro_steps::register` installs a
+  `attractor_steps::OutputStore` capability: `attractor_steps::register` installs a
   `LocalBlobStore` under `<run_dir>/blobs` unless the host registered its own
   before the run, so a Fabro host replaces it with platform storage without
   changing node semantics. The store is content addressed, so a resumed run
@@ -558,7 +558,7 @@ sessions in an in-memory map per worker, so a resumed node runs from the
 across `petri resume` for the same reason.
 
 The native backend retains a successful node's conversation per thread for
-the run (`fabro_steps::sessions::SessionService`, one per invocation). A
+the run (`attractor_steps::sessions::SessionService`, one per invocation). A
 later node at effective `full` on the same thread resumes it from Pebble's
 export with its own event sink, question handler, tool hooks and metrics
 bound; a node that names another model than the retained conversation's warns
@@ -571,7 +571,7 @@ as Fabro does. ACP never reuses a session. Each resolution is a
 ### Hooks
 
 `[[run.hooks]]` entries run in the standalone runner through
-`fabro_steps::hooks::LocalHooks`, the `execution::hooks::HookService` the
+`attractor_steps::hooks::LocalHooks`, the `execution::hooks::HookService` the
 Fabro component installs (`crates/core/execution/HOOKS.md`). One service
 serves every point, and every caller reaches it as the `HookServiceHandle`
 capability, so a hook runs once whoever drives it and a replacement service
@@ -582,7 +582,7 @@ its sandbox exists, so the step asks once the sandbox is there), the fork
 and fan-in steps for `parallel_start` and `parallel_complete`, the native
 agent's Pebble `ToolMiddleware` at the tool boundary, and the ACP client's
 permission requests. A host that installs its own `Runtime::hooks` and
-`HookServiceHandle` before `fabro_steps::register` runs keeps them; the local
+`HookServiceHandle` before `attractor_steps::register` runs keeps them; the local
 service is then not installed.
 
 Fields: `id` (merge identity), `name`, `event`, `matcher`, `blocking`,
@@ -688,8 +688,8 @@ digraph change {
 The `petri` distribution supplies a lithos-llm client with the built-in model
 catalog and environment credentials, such as `ANTHROPIC_API_KEY` or
 `OPENAI_API_KEY`. It enables Anthropic, OpenAI, Gemini, and OpenAI-compatible
-adapters. Applications that use `fabro_steps::register` directly must provide
-`fabro_steps::pebble::PebbleClient(client)` through `Runtime::capability`.
+adapters. Applications that use `attractor_steps::register` directly must provide
+`attractor_steps::pebble::PebbleClient(client)` through `Runtime::capability`.
 The application owns the client's catalog, credentials, and retry middleware.
 
 Tools use the firing's `ExecEnv`. Commands run as `bash -c` inside the scope;
@@ -720,10 +720,10 @@ Every native session has Pebble's sub-agent tools (`spawn_agent`,
 `send_input`, `wait`, `close_agent`), as every API-backend agent does in
 Fabro, which has no setting to turn them off (the `[run.agent] subagents`
 key is refused, as Fabro refuses it). The lowering puts the reference
-configuration on every agent node (`frontend_fabro::subagents::SubagentConfig`:
+configuration on every agent node (`frontend_attractor::subagents::SubagentConfig`:
 `enabled = true`, `max_open_sessions = 4`, Pebble's bound on the sessions one
 tree holds open at once, the node's own session included) and
-`fabro_steps::subagents::configure` hands it to `CodingAgentBuilder::subagents`.
+`attractor_steps::subagents::configure` hands it to `CodingAgentBuilder::subagents`.
 Pebble builds and owns the children: each child runs in the parent's scope on
 the parent's model, under the same tool middleware, so the run's
 `pre_tool_use` hooks block inside a child, and the workflow's MCP tools
@@ -834,7 +834,7 @@ own metrics; those fields are gone.
 ### Model fallback
 
 `[run.model.fallbacks]` is applied by the native agent and prompt steps
-(`fabro_steps::fallback`). A stage runs on a *plan*: the canonical route its
+(`attractor_steps::fallback`). A stage runs on a *plan*: the canonical route its
 `model` and `provider` resolve to, then the targets the chain keyed by that
 canonical model id lists, in order. Petri builds the plan; on a native agent
 node Pebble runs it (the plan's remaining routes are the builder's
@@ -953,7 +953,7 @@ Pebble's `RouteFailover`). Nothing else about the routes is Petri's to say.
 ### MCP servers
 
 A native agent node connects to the run's `[run.agent.mcps]` servers through
-Pebble's `mcp` feature (`fabro_steps::pebble::mcp`). Petri maps each entry
+Pebble's `mcp` feature (`attractor_steps::pebble::mcp`). Petri maps each entry
 onto a Pebble `McpServer` (a `stdio` entry is `McpPlacement::Stdio`, `http`
 is `McpPlacement::Http`, `sandbox` is `McpPlacement::Environment`), resolves
 its secrets, and names the servers to the agent builder in name order. Pebble
@@ -985,7 +985,7 @@ itself, an SSE server's stream at `/sse` under it, where Fabro has always
 reached one. Pebble takes that route as its own `PortRoutes` contract
 (`pebble_coding_agent::mcp::PortRoutes`, so Petri shares no sandbox crate
 with Pebble to implement it); Petri hands it
-`fabro_steps::pebble::environment::ScopePortRoutes`, which answers from
+`attractor_steps::pebble::environment::ScopePortRoutes`, which answers from
 `ExecEnv::preview_url` (the sandbox-driver `access/preview_url`
 operation): the host's own loopback on a host scope; a forward the Docker
 plugin opens on Petri's loopback and bridges into the container, so nothing
@@ -1056,12 +1056,12 @@ Petri emitted `fabro.mcp.server` (`starting`, `ready`, `failed`,
 A skill is a `<dir>/<name>/SKILL.md` file: a frontmatter block with `name:`
 and an optional `description:`, then the prompt it expands into. Petri
 states the directories the way Fabro's agent orders them, as a Pebble
-`SkillDiscovery` (`fabro_steps::skills`), lowest precedence first, and Pebble
+`SkillDiscovery` (`attractor_steps::skills`), lowest precedence first, and Pebble
 resolves and searches them:
 
 1. the configured skills directory, `$FABRO_HOME/skills` when `FABRO_HOME`
    is set, else `$HOME/.fabro/skills`; an embedding host names the home
-   with the `fabro_steps::skills::FabroHome` capability instead;
+   with the `attractor_steps::skills::FabroHome` capability instead;
 2. `<root>/.fabro/skills`, where the root is the Git root above the scope's
    working directory, or the working directory outside a repository;
 3. `<root>/skills`;
@@ -1119,8 +1119,8 @@ A native agent's conversation is summarized as it approaches the model's
 context window, so a long task stays inside the window. Fabro has no setting
 for this: its agent sessions run with compaction on, a trigger at 80 percent
 of the context window, and the six most recent turns kept verbatim. Petri
-lowers those values onto every agent node (`frontend_fabro::CompactionSettings`)
-and translates them into Pebble's options (`fabro_steps::compaction`). A
+lowers those values onto every agent node (`frontend_attractor::CompactionSettings`)
+and translates them into Pebble's options (`attractor_steps::compaction`). A
 `[run.agent] compaction` key is refused, as Fabro refuses it (below,
 "Refused"). Compaction is separate from workflow fidelity: the `compact`
 fidelity mode is a deterministic preamble with no model call ("Fidelity and
@@ -1135,7 +1135,7 @@ compact) it summarizes the older turns and replaces them with the summary,
 keeping the recent turns and never separating a tool call from its result.
 The summary is one non-streaming call on the node's own model; a host may
 supply it instead through Pebble's `CompactionPolicy` (Petri installs a
-`fabro_steps::compaction::CompactionPolicyHandle` capability on every native
+`attractor_steps::compaction::CompactionPolicyHandle` capability on every native
 session, resumed ones included). A summary that fails or is cancelled leaves
 the history unchanged and does not fail the node: the agent continues on the
 full history, and one failure is not retried for the rest of that prompt.

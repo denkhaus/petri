@@ -38,8 +38,8 @@ such a caller then warns about nothing and still asks the service at every
 boundary it does have.
 
 Exactly one service is installed per run: `NoHooks` by default, the local
-executor in the standalone runner (`fabro_steps::hooks::LocalHooks`, installed
-by `fabro_steps::register` when no `Runtime::hooks` is installed yet), the
+executor in the standalone runner (`attractor_steps::hooks::LocalHooks`, installed
+by `attractor_steps::register` when no `Runtime::hooks` is installed yet), the
 host's own when embedded. The service owns configuration, matching, placement
 (host or sandbox), timeouts, and how an executor's result becomes a decision
 (a command's exit code, HTTP, prompt and agent hooks). Every caller reaches
@@ -51,13 +51,13 @@ every point.
 
 A host replaces the service by installing its own `Runtime::hooks` (normally
 `HookAdapter::new(service)`, or a wrapper around it) and registering
-`HookServiceHandle(service)` before `fabro_steps::register` runs; the local
+`HookServiceHandle(service)` before `attractor_steps::register` runs; the local
 service is then not installed at all. A host that wants the local service
 under its own `ExecutionHooks` (a pause, a marker note at every point) calls
 `register` first and wraps `Runtime::installed_hooks()`; it never constructs
 the local service itself. Both are exercised: the first by
 `embedding::a_hook_service_runs_each_hook_once_at_its_point` and the two
-`a_replacement_service_*` tests of `petri-fabro-steps::hooks`, the second by
+`a_replacement_service_*` tests of `petri-attractor-steps::hooks`, the second by
 `embedding_readiness.rs`.
 
 ## Points and decisions
@@ -145,7 +145,7 @@ identity, never as the stage's: `HookReport::notes` yields one
 `hook.activity` note per agent event (`HookActivity { hook: { point, hook },
 backend, envelope }`), then the `hook` note; the adapter records them at the
 driver's points, and a step that asks a point itself records the same
-activity notes before its `fabro.hook` event (`fabro_steps::hooks::record_report`).
+activity notes before its `fabro.hook` event (`attractor_steps::hooks::record_report`).
 The projector reads each note as `parsed.hook_activity`, apart from the
 stage's own backend events, so a consumer summing a stage's agent activity
 or its `pebble.usage` never counts a hook's work, and `HookRun::usage` sums
@@ -175,5 +175,5 @@ does this: a timeout cancels the prompt, waits for the running tool to stop
 tasks to join, and only then returns its fail-open report; a dropped hook
 future cancels the same way through a guard, and the owner finishes the same
 cleanup on its own, bounded by the grace plus a fixed margin
-(`petri-fabro-steps::hooks::an_agent_hook_timeout_stops_its_tool_before_failing_open`,
+(`petri-attractor-steps::hooks::an_agent_hook_timeout_stops_its_tool_before_failing_open`,
 `a_cancelled_run_stops_an_agent_hooks_running_tool`).
