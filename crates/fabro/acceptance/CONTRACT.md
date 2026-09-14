@@ -607,9 +607,23 @@ names the decision record under `decisions/`; "gap" names the owner.
 
 ## Library pin
 
-Pebble is pinned at `c91810fe51aece80359b9cd8efea971af0c46925`, which is
-Pebble `main`. That commit is Pebble PRs #18, #19 and #20 on top of
-`6996942`. PR #18 adds tool-result and transcript rendering options to
+Pebble is pinned at `a39f43e26effdf99635eaf343f095c17157c9c93`, which is
+Pebble `main`. That commit is Pebble PR #22 on top of `c91810f`. PR #22
+finishes the one-usage-type plan in the stored shapes: `Message::Assistant`'s
+`usage` and `StoredMessage::Assistant`'s `usage` are lithos-llm's `Usage`
+(they were `TokenCounts`), so a turn's cost travels with its counts, and
+the session record is format 5 (`SESSION_RECORD_FORMAT_VERSION`). A record
+of any other version is refused before its route is read:
+`SessionRecord::is_supported` is false and `CodingRuntime::from_record`
+fails with `CodingAgentBuildError::UnsupportedRecord { version, supported }`
+("session record format version 4 is not supported (this build requires
+5)"); nothing migrates it. Petri stores no session record: a retained
+thread is Pebble's warm `CodingAgentExport`, held in memory for the run and
+never written (`crates/fabro/FORMAT.md`, "Fidelity and threads"), so no
+record of Petri's can be format 4; and Petri constructs no
+`Message::Assistant`, so the pin moves with no Petri code change.
+`c91810fe51aece80359b9cd8efea971af0c46925` is Pebble PRs #18, #19 and #20
+on top of `6996942`. PR #18 adds tool-result and transcript rendering options to
 `pebble-cli-core`, which Petri does not use. PR #19 keeps a paired human's
 hold across a route failover; Petri needs no change for it. PR #20 is step
 2 of the one-usage-type plan: it deletes Pebble's `TokenUsage` and its
@@ -624,9 +638,10 @@ on `AssistantMessage` (whose `cost_source` is gone too),
 `DescendantAccount`, `CompactionProjection` and `RouteFailoverProjection`;
 both `descendant_usage()` return a `Usage`. Every sum is
 `Usage::saturating_add`, so a total has a cost only when every part that
-used tokens was priced. Pebble's session record is format 5; a format 4
-record is refused on resume, not migrated, and a stored event in the old
-shape reads back with zero usage. Petri follows: its own `usage` payloads
+used tokens was priced. Pebble's session record stayed format 4 there, an
+assistant turn's counts stored bare (format 5, and the refusal of 4, come
+with `a39f43e` above), and a stored event in the old shape reads back with
+zero usage. Petri follows: its own `usage` payloads
 and metrics take the same `Usage` (`crates/fabro/FORMAT.md`, "Usage"), and
 `pebble.cost_usd_micros`, `pebble.compaction_cost_usd_micros`,
 `prompt.cost_usd_micros` and every `cost_usd_micros` field are gone
@@ -743,9 +758,9 @@ fails when any of them disagree. The row names are the keys of a record's
 
 | Pin | Revision | Repository | Role |
 |---|---|---|---|
-| `pebble` | `c91810fe51aece80359b9cd8efea971af0c46925` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
+| `pebble` | `a39f43e26effdf99635eaf343f095c17157c9c93` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
 | `lithos_llm` | `55add4596b861a0623d00c3a54aa5c147c8d504b` | `lithoscomputer/lithos-llm` (public) | provider transport, request retries, and the `Usage` type every usage takes |
-| `sandbox_driver` | `ddb32e19e763299319ecf6aebc8961298db80c0c` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
+| `sandbox_driver` | `64c14b89d078a4b34d1555092ad01d41541f7a7d` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `ca45f0e50a6716d716aa2f638ca3cf767e88f613` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
 | `fabro_reference` | `05ebd0fd1beec214b558f4b478e36bd08b507dc7` | `fabro-sh/fabro` (public, `main`) | the reference Fabro the corpus, oracle, bundles, and differential matrix use |
 | `runner_image` | `f8bbbfd81934` | `lithoscomputer/sandbox-images` (public) | the default runner images (`ghcr.io/lithoscomputer/ubuntu-*`) Docker and Daytona scopes start from (`RUNNER_PIN` in `crates/core/executor-sandbox/src/backend.rs`; PyYAML present since `df708f910111`) |
@@ -757,12 +772,25 @@ the readiness work asked for is inside the pinned revisions (Pebble `4c00633`,
 sandbox-driver `a92c0db6`); the twins are pinned in both test crates that
 serve them. Since Pebble `6996942` the sandbox-driver pin is Petri's alone:
 Pebble's `mcp` feature no longer names the crate, so the two move
-independently. sandbox-driver `ddb32e19` (lithoscomputer/sandbox-driver#21)
-gives the protocol crate's `PluginSupervisor` numbered generations, a health
-probe before a generation serves, and a refusal of a replacement that reports
-another resource namespace; Petri's own supervisor is gone, and
-`executor-sandbox`'s `PluginSource` configures the protocol crate's with
-`PluginSettings`.
+independently. sandbox-driver `64c14b89` (lithoscomputer/sandbox-driver#22,
+on `ddb32e19`) stops the Daytona plugin failing an exec on a torn output
+frame: its decoder discards the unreadable record through the next newline,
+resyncs, and counts what it threw away in
+`ExecStreamingResult::output_loss` (`OutputLoss { dropped_frames,
+dropped_bytes }`, `is_lossy()`), carried across the plugin wire as an
+additive field, with `truncated` set on both captures because the lost
+record's stream is unknown. Petri's sandbox environment
+(`crates/core/executor-sandbox/src/env.rs`) reads the report: a lossy
+result keeps the command's exit status instead of failing as an incomplete
+delivery, one `warn!` names both counters, and one line, `[sandbox] N
+output frame(s), M bytes dropped by the provider`, is appended to the
+command's stderr after its own output, so the agent that ran the command
+and the run log both see the loss; a lossless result is unchanged.
+`ddb32e19` (lithoscomputer/sandbox-driver#21) gives the protocol crate's
+`PluginSupervisor` numbered generations, a health probe before a generation
+serves, and a refusal of a replacement that reports another resource
+namespace; Petri's own supervisor is gone, and `executor-sandbox`'s
+`PluginSource` configures the protocol crate's with `PluginSettings`.
 
 ## Readiness gate checklist
 

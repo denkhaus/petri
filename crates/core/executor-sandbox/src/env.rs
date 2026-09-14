@@ -27,10 +27,10 @@ use executor::{
 };
 use sandbox_driver::{
     Error as DriverError, ExecControls, ExecSpec, ExecStreamingResult, OneShotImage, OneShotSpec,
-    OutputStream, Sandbox, StdinSource, Termination,
+    OutputLoss, OutputStream, Sandbox, StdinSource, Termination,
 };
 use smol_str::SmolStr;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, duplex};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, DuplexStream, duplex};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -87,7 +87,11 @@ fn exit_status(termination: Termination, code: Option<i32>, signal: Option<i32>)
 }
 
 /// Retained bytes are deliberately omitted, but delivery to the line pumps
-/// must be complete before Petri can report the command's exit status.
+/// must be complete before Petri can report the command's exit status. A
+/// loss the provider counted is the exception: it marks both captures
+/// truncated because it cannot say which stream lost the bytes, the
+/// command still ran to its status, and the loss reaches the step as one
+/// stderr line ([`output_loss_line`]) instead of failing it.
 fn streaming_exit_status(streaming: &ExecStreamingResult) -> Result<ExitStatus, String> {
     let status = exit_status(
         streaming.result.termination,
@@ -96,13 +100,45 @@ fn streaming_exit_status(streaming: &ExecStreamingResult) -> Result<ExitStatus, 
     );
     // A command the provider killed at its deadline has its output cut off
     // by design; the timeout is the status, not an incomplete delivery.
-    if status.timed_out {
+    if status.timed_out || streaming.output_loss.is_lossy() {
         return Ok(status);
     }
     if streaming.stdout_capture.truncated || streaming.stderr_capture.truncated {
         return Err("sandbox command output delivery was incomplete".to_owned());
     }
     Ok(status)
+}
+
+/// The line appended to a command's stderr when the provider dropped
+/// output on its own transport (Daytona's encoded exec resyncs past a torn
+/// record and counts it), so the agent reading the output and the run log
+/// both learn that some is missing. `None` when nothing was lost.
+fn output_loss_line(loss: OutputLoss) -> Option<String> {
+    loss.is_lossy().then(|| {
+        format!(
+            "[sandbox] {} output frame(s), {} bytes dropped by the provider",
+            loss.dropped_frames, loss.dropped_bytes
+        )
+    })
+}
+
+/// Logs a counted loss and appends its line to the stderr pipe, after the
+/// command's own output, which the sink has fully written by the time the
+/// run resolves.
+async fn report_output_loss(loss: OutputLoss, stderr: &Mutex<Option<DuplexStream>>) {
+    let Some(line) = output_loss_line(loss) else {
+        return;
+    };
+    tracing::warn!(
+        dropped_frames = loss.dropped_frames,
+        dropped_bytes = loss.dropped_bytes,
+        "sandbox provider dropped command output"
+    );
+    let mut guard = stderr.lock().await;
+    if let Some(writer) = guard.as_mut() {
+        let _ = writer.write_all(line.as_bytes()).await;
+        let _ = writer.write_all(b"\n").await;
+    }
 }
 
 /// What one streamed job runs: a step's exec, or an action's container.
@@ -193,6 +229,9 @@ fn spawn_streamed(
                 )),
             },
         };
+        if let Ok(streaming) = &outcome {
+            report_output_loss(streaming.output_loss, &stderr_slot).await;
+        }
         // Close the pipes so the pumps flush and end.
         if let Some(mut writer) = stdout_slot.lock().await.take() {
             let _ = writer.shutdown().await;
@@ -574,7 +613,12 @@ impl ContainerRunner for OneShotRunner {
 
 #[cfg(test)]
 mod tests {
-    use sandbox_driver::{CaptureStats, ExecResult};
+    use std::sync::OnceLock;
+
+    use sandbox_driver::{
+        Capabilities, CaptureStats, Exec, ExecResult, Filesystem, Isolation, PlatformInfo,
+        SandboxId, SandboxStatus,
+    };
 
     use super::*;
 
@@ -619,5 +663,154 @@ mod tests {
         result.result.signal = Some(Sig::Term.number());
         let status = streaming_exit_status(&result).expect("complete delivery");
         assert_eq!(status.signal, Some(Sig::Term.number()));
+    }
+
+    fn counted_loss() -> OutputLoss {
+        let mut loss = OutputLoss::default();
+        loss.dropped_frames = 2;
+        loss.dropped_bytes = 300;
+        loss
+    }
+
+    #[test]
+    fn a_counted_loss_keeps_the_exit_status_although_both_captures_are_marked() {
+        let mut result = completed_command();
+        result.result.exit_code = Some(3);
+        result.output_loss = counted_loss();
+        result.stdout_capture.truncated = true;
+        result.stderr_capture.truncated = true;
+        let status = streaming_exit_status(&result).expect("a counted loss is reported, not fatal");
+        assert_eq!(status.code, Some(3));
+        assert_eq!(
+            output_loss_line(result.output_loss).as_deref(),
+            Some("[sandbox] 2 output frame(s), 300 bytes dropped by the provider")
+        );
+        assert_eq!(output_loss_line(OutputLoss::default()), None);
+    }
+
+    /// A command whose output is scripted: one stdout chunk, one stderr
+    /// chunk, exit 2, and the given loss report.
+    struct ScriptedExec {
+        loss: OutputLoss,
+    }
+
+    #[async_trait]
+    impl Exec for ScriptedExec {
+        async fn run(&self, _spec: &ExecSpec) -> sandbox_driver::Result<ExecResult> {
+            panic!("a step runs its command streaming")
+        }
+
+        async fn run_streaming(
+            &self,
+            _spec: &ExecSpec,
+            controls: ExecControls,
+        ) -> sandbox_driver::Result<ExecStreamingResult> {
+            let sink = controls.sink.expect("the step supplies a sink");
+            sink(OutputStream::Stdout, b"first\n".to_vec()).await?;
+            sink(OutputStream::Stderr, b"warned\n".to_vec()).await?;
+            let mut result = completed_command();
+            result.result.exit_code = Some(2);
+            result.output_loss = self.loss;
+            // The provider cannot tell which stream lost bytes, so a loss
+            // marks both captures, as the protocol requires.
+            if self.loss.is_lossy() {
+                result.stdout_capture.truncated = true;
+                result.stderr_capture.truncated = true;
+            }
+            Ok(result)
+        }
+    }
+
+    struct ScriptedSandbox {
+        id:   SandboxId,
+        exec: ScriptedExec,
+    }
+
+    #[async_trait]
+    impl Sandbox for ScriptedSandbox {
+        fn id(&self) -> &SandboxId {
+            &self.id
+        }
+
+        fn capabilities(&self) -> &Capabilities {
+            static CAPABILITIES: OnceLock<Capabilities> = OnceLock::new();
+            CAPABILITIES.get_or_init(|| Capabilities::minimal(Isolation::Container))
+        }
+
+        async fn describe(&self) -> sandbox_driver::Result<SandboxStatus> {
+            panic!("a step does not describe its sandbox")
+        }
+
+        fn working_directory(&self) -> &str {
+            crate::CONTAINER_WORKSPACE
+        }
+
+        async fn platform_info(&self) -> sandbox_driver::Result<PlatformInfo> {
+            panic!("a step does not probe the platform")
+        }
+
+        async fn start(&self) -> sandbox_driver::Result<()> {
+            panic!("a step does not start its sandbox")
+        }
+
+        async fn stop(&self) -> sandbox_driver::Result<()> {
+            panic!("a step does not stop its sandbox")
+        }
+
+        async fn delete(&self) -> sandbox_driver::Result<()> {
+            panic!("a step does not delete its sandbox")
+        }
+
+        fn exec(&self) -> &dyn Exec {
+            &self.exec
+        }
+
+        fn fs(&self) -> &dyn Filesystem {
+            panic!("a step's spawn does not touch the filesystem")
+        }
+    }
+
+    /// Runs the scripted command through the step's spawn path; returns
+    /// its stdout lines, its stderr lines in order, and its exit status.
+    async fn run_scripted(loss: OutputLoss) -> (Vec<String>, Vec<String>, ExitStatus) {
+        let sandbox: Arc<dyn Sandbox> = Arc::new(ScriptedSandbox {
+            id:   SandboxId::try_new("scripted").expect("the test sandbox id is valid"),
+            exec: ScriptedExec { loss },
+        });
+        let mut process = spawn_streamed(
+            sandbox,
+            Job::Exec(ExecSpec::new("true")),
+            false,
+            OutputMode::Lines,
+        );
+        let mut lines = process.lines().expect("a lines stream");
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        while let Some(line) = lines.recv().await {
+            match line.stream {
+                ir::LogStream::Stdout => stdout.push(line.line),
+                ir::LogStream::Stderr => stderr.push(line.line),
+            }
+        }
+        let status = process.wait().await.expect("the command's status");
+        (stdout, stderr, status)
+    }
+
+    #[tokio::test]
+    async fn a_counted_loss_is_one_stderr_line_after_the_output() {
+        let (stdout, stderr, status) = run_scripted(counted_loss()).await;
+        assert_eq!(status.code, Some(2));
+        assert_eq!(stdout, vec!["first".to_owned()]);
+        assert_eq!(stderr, vec![
+            "warned".to_owned(),
+            "[sandbox] 2 output frame(s), 300 bytes dropped by the provider".to_owned(),
+        ]);
+    }
+
+    #[tokio::test]
+    async fn a_lossless_result_passes_the_output_through_unchanged() {
+        let (stdout, stderr, status) = run_scripted(OutputLoss::default()).await;
+        assert_eq!(status.code, Some(2));
+        assert_eq!(stdout, vec!["first".to_owned()]);
+        assert_eq!(stderr, vec!["warned".to_owned()]);
     }
 }

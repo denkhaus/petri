@@ -269,8 +269,8 @@ before Petri moves its pin; then the manifests, the contract's pin table, and
 the affected evidence records move together, and the relevant Petri scenarios
 run again through the shipped binary. A library test pass never replaces a
 required Petri scenario. The current pins are in the contract's "Pinned
-revisions" table (Pebble `c91810f`, lithos-llm `55add45`, sandbox-driver
-`ddb32e19`, twins `ca45f0e`, Fabro `05ebd0f`, the runner image
+revisions" table (Pebble `a39f43e`, lithos-llm `55add45`, sandbox-driver
+`64c14b89`, twins `ca45f0e`, Fabro `05ebd0f`, the runner image
 `f8bbbfd81934`); `mise run check:pins` keeps every citation in agreement.
 The library batch the readiness work asked for landed on
 `petri/readiness-batch` in each repository and is pinned: Pebble's
@@ -290,7 +290,11 @@ Host and container scopes use the `sandbox-driver-host` and
 JSON-RPC; no provider crate is linked in. `mise run plugins:build` installs
 both from the pinned revision under `target/plugins/bin`. The development
 and test tasks select those binaries. Docker tests skip when no daemon is
-reachable; Host execution requires its plugin and no daemon.
+reachable; Host execution requires its plugin and no daemon. A provider that
+lost command output on its own transport (Daytona's encoded exec can tear a
+frame) counts the loss in its result; Petri keeps the command's exit status
+and appends one line, `[sandbox] N output frame(s), M bytes dropped by the
+provider`, to the command's stderr, so the agent and the run log see it.
 
 The Host plugin keeps private records under `<run_dir>/host-registry`.
 It owns each lease's workspace and process groups. After a plugin crash,
