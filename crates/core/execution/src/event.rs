@@ -4,6 +4,7 @@ use engine::{EngineExit, EngineStart, EventOrigin, MiddlewareKey};
 use ir::{FailureInfo, RunStatus, ScopeId, Value};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
+use store::RunKey;
 
 use crate::{ExecutionId, GraphDigest, InvocationId, ParentCallKey, SandboxLeaseId};
 
@@ -15,8 +16,12 @@ use crate::{ExecutionId, GraphDigest, InvocationId, ParentCallKey, SandboxLeaseI
 /// `{"seq", "origin", "recorded_at", "body"}`, with `body` tagged by `event`
 /// under a `<subject>.<verb>` name (`execution.declared`), `RunNote` renamed
 /// `RunNoteRecorded`, and snake-case tags on every enum inside a record; a
-/// version 3 run is refused, never migrated.
-pub const COORDINATOR_FORMAT_VERSION: u32 = 4;
+/// version 3 run is refused, never migrated. Version 5 stores the run through
+/// the store seam: the run declaration carries the run's `key`, the engine
+/// log version is pinned by this version and no engine log carries a header
+/// line, and sandbox resources are one append-only log; a version 4 run is
+/// refused, never migrated.
+pub const COORDINATOR_FORMAT_VERSION: u32 = 5;
 
 /// Name-only child secret bindings. Plaintext is not representable here.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +146,8 @@ pub enum CoordinatorEvent {
     #[serde(rename = "run.started")]
     RunStarted {
         format_version:   u32,
+        /// The run's identity in its store and on its sandbox providers.
+        key:              RunKey,
         root:             InvocationId,
         middleware_chain: Vec<MiddlewareKey>,
     },

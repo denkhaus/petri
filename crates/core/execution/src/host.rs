@@ -1,14 +1,17 @@
-//! The standalone host: run and resume a durable run dir through the
+//! The standalone host: run and resume a durable run through the
 //! coordinator.
 //!
-//! When petri runs a workflow with no product store behind it, the run dir is
-//! the record, in the coordinator store's layout: `run.json` (identity and
-//! lease), `coordinator.jsonl` (the lifecycle log), `graphs/<digest>.json` —
-//! every registered graph, byte-exact — and one engine log per execution at
-//! `invocations/<invocation>/executions/<execution>/events.jsonl`, streamed
-//! as it happens. Everything else under the run dir — workspaces, logs, the
-//! executors' own records — identifies the processes and containers of *this*
-//! run and fences them on resume.
+//! When petri runs a workflow with no product store behind it, the run
+//! directory is the record, in the run-directory store's layout
+//! (`store::RunDirStore`): `run.json` (identity and lease),
+//! `coordinator.jsonl` (the lifecycle log), `graphs/<digest>.json` (every
+//! registered graph, byte-exact), `resources.jsonl` (the sandbox leases) and
+//! one engine log per execution at `executions/<execution>/events.jsonl`,
+//! streamed as it happens. A host with a store of its own installs it with
+//! `Runtime::store`, and the same coordinator writes there instead.
+//! Everything else under the run dir — workspaces, logs, the executors' own
+//! records — identifies the processes and containers of *this* run and
+//! fences them on resume.
 //!
 //! Graphs persist byte-exact and are never masked; the contract that makes
 //! that safe (§11) is that raw secret values never belong in a recorded
@@ -24,17 +27,19 @@ use std::{fs, io};
 use driver::ExecutionReport;
 use executor::SecretProvider;
 use ir::Graph;
-use runtime::Runtime;
+use runtime::{RunAccess, Runtime};
+/// Each execution's engine-log file name under its execution directory, in
+/// the run-directory store.
+pub use store::EVENTS_FILE;
+use store::RunLogs;
 
 use crate::breaker::CircuitBreaker;
 use crate::events::{ExportError, verify_export};
+use crate::store::{decode_graph, graph_bytes, read_coordinator_log};
 use crate::{
     Coordinator, CoordinatorError, CoordinatorHandle, CoordinatorOptions, CoordinatorState,
-    ExecutionObserver, GraphDigest, InvocationId, Middleware, decode_coordinator_log,
+    ExecutionObserver, GraphDigest, InvocationId, Middleware,
 };
-
-/// Each execution's engine-log file name under its execution directory.
-pub const EVENTS_FILE: &str = "events.jsonl";
 
 /// What kept the standalone host from running or resuming.
 #[derive(Debug, thiserror::Error)]
@@ -60,12 +65,15 @@ pub enum HostError {
     SecretInGraph,
     #[error(transparent)]
     Replay(#[from] engine::ReplayMismatch),
-    /// The run dir's public stream does not export its logs: the
-    /// determinism canary's second half, checked with `verify_replay`.
+    /// The run's public stream does not export its logs: the determinism
+    /// canary's second half, checked with `verify_replay`.
     #[error(transparent)]
     Export(#[from] ExportError),
     #[error(transparent)]
     Coordinator(#[from] CoordinatorError),
+    /// The run could not be opened in its store.
+    #[error(transparent)]
+    Store(#[from] store::StoreError),
     #[error("the coordinator finished the root invocation without a final execution report")]
     MissingExecutionReport,
 }
@@ -75,9 +83,9 @@ pub enum HostError {
 pub type EventsDecodeError = crate::EngineLogDecodeError;
 
 /// One successful `events.jsonl` decode.
-pub type DecodedEvents = crate::DecodedEngineLog;
+pub type DecodedEvents = crate::DecodedEngineFile;
 
-/// Decode `events.jsonl` bytes: header, records, strict torn-line rule.
+/// Decode `events.jsonl` bytes: one record per line, strict torn-line rule.
 pub fn decode_events(bytes: &[u8]) -> Result<DecodedEvents, EventsDecodeError> {
     crate::decode_engine_log(bytes)
 }
@@ -163,10 +171,10 @@ pub fn policy_middleware(graph: &Graph) -> Vec<Arc<dyn Middleware>> {
     chain
 }
 
-/// Run a graph with the durable run dir, to completion. Every log's `finish`
-/// is awaited inside the run, so the run dir is complete when this returns.
-/// With the runtime's `verify_replay` on (the default), the final execution's
-/// log is replayed afterwards and any divergence is the error.
+/// Run a graph in the runtime's store, to completion. Every log's `finish`
+/// is awaited inside the run, so the run's record is complete when this
+/// returns. With the runtime's `verify_replay` on (the default), the final
+/// execution's log is replayed afterwards and any divergence is the error.
 pub async fn run(rt: &Runtime, graph: Graph) -> Result<ExecutionReport, HostError> {
     run_with_handle(rt, graph, |_| {}).await
 }
@@ -198,16 +206,18 @@ pub async fn run_configured(
     let mut chain = policy_middleware(&run.graph);
     chain.extend(run.middleware);
     let options = coordinator_options(&run.graph)?;
-    let mut coordinator = Coordinator::create(run_runtime, chain, options)?;
+    // The coordinator is a large value held across every await below; one
+    // allocation keeps a host's own future small.
+    let mut coordinator = Box::pin(Coordinator::create(run_runtime, chain, options)).await?;
     for observer in run.observers {
         coordinator = coordinator.observe(observer);
     }
-    let digest = register(&mut coordinator, &run.graph)?;
+    let digest = register(&mut coordinator, &run.graph).await?;
     for child in &run.children {
-        register(&mut coordinator, child)?;
+        register(&mut coordinator, child).await?;
     }
     with_handle(coordinator.handle(), secrets);
-    finish_root(rt, coordinator, digest, run.graph).await
+    Box::pin(finish_root(rt, coordinator, digest, run.graph)).await
 }
 
 /// The coordinator options a root graph's run policy asks for: its
@@ -223,17 +233,18 @@ pub fn coordinator_options(graph: &Graph) -> Result<CoordinatorOptions, HostErro
     }
 }
 
-fn register(coordinator: &mut Coordinator, graph: &Graph) -> Result<GraphDigest, HostError> {
-    match coordinator.register_graph(graph) {
+async fn register(coordinator: &mut Coordinator, graph: &Graph) -> Result<GraphDigest, HostError> {
+    match coordinator.register_graph(graph).await {
         Err(CoordinatorError::SecretInDurableData) => Err(HostError::SecretInGraph),
         result => Ok(result?),
     }
 }
 
-/// Continue the run in the runtime's run dir, to completion — the crash side
-/// of [`run`]. Same guarantees, same replay verification. A torn coordinator
-/// or engine-log tail truncates to the clean prefix; a record that decodes
-/// wrongly refuses the resume outright.
+/// Continue the run in the runtime's store, to completion — the crash side
+/// of [`run`]. Same guarantees, same replay verification. A record that
+/// decodes wrongly refuses the resume outright; a torn tail in a run
+/// directory is the store's own business and is dropped before the run is
+/// read.
 ///
 /// Dynamic secrets (`answer:<id>`) are not in any log by design: re-register
 /// them on the provider before delivering again, or the resumed step fails
@@ -256,7 +267,11 @@ pub async fn resume_configured(
     with_handle: impl FnOnce(CoordinatorHandle, Arc<dyn SecretProvider>),
 ) -> Result<ExecutionReport, HostError> {
     let run_dir = rt.run_options().run_dir.clone();
-    let root_graph = stored_root_graph(&run_dir)?;
+    let run_runtime = rt.prepare_run(&run_dir);
+    let root_graph = {
+        let logs = run_runtime.open(RunAccess::Read).await?;
+        stored_root_graph(&*logs).await?
+    };
     let mut chain = root_graph
         .as_ref()
         .map(policy_middleware)
@@ -265,61 +280,45 @@ pub async fn resume_configured(
     let options = root_graph
         .as_ref()
         .map_or(Ok(CoordinatorOptions::default()), coordinator_options)?;
-    let run_runtime = rt.prepare_run(&run_dir);
     let secrets = run_runtime.secret_provider();
-    let (mut coordinator, torn) = Coordinator::resume(run_runtime, chain, options).await?;
-    if torn {
-        tracing::warn!("truncated an EOF-torn coordinator record before resume");
-    }
+    let mut coordinator = Box::pin(Coordinator::resume(run_runtime, chain, options)).await?;
     for observer in observers {
         coordinator = coordinator.observe(observer);
     }
     let digest = coordinator.store().state().invocations[&InvocationId::ROOT]
         .declaration
         .graph;
-    let graph = (*coordinator.load_graph(digest)?).clone();
+    let graph = (*coordinator.load_graph(digest).await?).clone();
     with_handle(coordinator.handle(), secrets);
-    finish_root(rt, coordinator, digest, graph).await
+    Box::pin(finish_root(rt, coordinator, digest, graph)).await
 }
 
-/// The run's replayed coordinator state, read without taking the run
-/// lease: what a host checks before it resumes (has the run finished, is it
-/// paused) and what a resume needs before the coordinator exists. A torn
-/// final line is dropped, as the store would; a record that does not decode
-/// is the error.
-pub fn stored_state(run_dir: &Path) -> Result<CoordinatorState, HostError> {
-    let log_path = run_dir.join(crate::COORDINATOR_FILE);
-    let bytes = fs::read(&log_path).map_err(|e| HostError::Io {
-        action: "read",
-        path:   log_path.clone(),
-        source: e,
-    })?;
-    let decoded = decode_coordinator_log(&log_path, &bytes).map_err(CoordinatorError::from)?;
-    CoordinatorState::replay(&decoded.records)
+/// The run's replayed coordinator state, read through a handle that holds
+/// no lease: what a host checks before it resumes (has the run finished, is
+/// it paused) and what a resume needs before the coordinator exists. A
+/// record that does not decode is the error.
+pub async fn stored_state(logs: &dyn RunLogs) -> Result<CoordinatorState, HostError> {
+    let records = read_coordinator_log(logs)
+        .await
+        .map_err(CoordinatorError::from)?;
+    CoordinatorState::replay(&records)
         .map_err(|error| CoordinatorError::from(crate::StoreError::State(error)).into())
 }
 
 /// The root invocation's registered graph, read without taking the run
 /// lease. `None` when the log has no root invocation yet.
-pub fn stored_root_graph(run_dir: &Path) -> Result<Option<Graph>, HostError> {
-    let state = stored_state(run_dir)?;
+pub async fn stored_root_graph(logs: &dyn RunLogs) -> Result<Option<Graph>, HostError> {
+    let state = stored_state(logs).await?;
     let Some(root) = state.invocations.get(&InvocationId::ROOT) else {
         return Ok(None);
     };
-    let path = run_dir
-        .join(crate::GRAPHS_DIR)
-        .join(format!("{}.json", root.declaration.graph));
-    let bytes = fs::read(&path).map_err(|e| HostError::Io {
-        action: "read",
-        path:   path.clone(),
-        source: e,
-    })?;
-    let graph: Graph = serde_json::from_slice(&bytes).map_err(|error| HostError::Io {
-        action: "decode",
-        path,
-        source: io::Error::new(io::ErrorKind::InvalidData, error),
-    })?;
-    Ok(Some(graph))
+    let digest = root.declaration.graph;
+    let bytes = graph_bytes(logs, digest)
+        .await
+        .map_err(CoordinatorError::from)?;
+    Ok(Some(
+        decode_graph(digest, &bytes).map_err(CoordinatorError::from)?,
+    ))
 }
 
 /// The shared tail of [`run`] and [`resume`]: run the root invocation to its
@@ -338,12 +337,12 @@ async fn finish_root(
     if rt.run_options().verify_replay {
         engine::verify_replay(graph, &report.state.log)?;
     }
-    coordinator.finish().await;
+    let logs = coordinator.finish().await;
     if rt.run_options().verify_replay {
         // The other half of the canary: the records the public stream
         // carries are the stored logs, and they replay. Read after
         // `finish`, once every log is closed.
-        verify_export(&rt.run_options().run_dir)?;
+        verify_export(&*logs).await?;
     }
     Ok(report)
 }

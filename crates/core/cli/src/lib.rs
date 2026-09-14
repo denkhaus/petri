@@ -453,7 +453,7 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
         Command::Replay { target, log, model } => {
             replay(&make(RuntimeMode::Real), &target, &model, &log)
         }
-        Command::Inspect { run_dir, json } => inspect::inspect(&run_dir, json),
+        Command::Inspect { run_dir, json } => inspect::inspect(&run_dir, json).await,
         Command::Sandbox(SandboxCommand::Prune { run_dir, provider }) => {
             let mut options = RunOptions::new(&run_dir);
             options.sandbox = provider.options();
@@ -642,7 +642,7 @@ async fn run(
         graph,
         children: lowered.children,
     };
-    session::drive(rt, run_dir, start, session).await
+    Box::pin(session::drive(rt, run_dir, start, session)).await
 }
 
 #[expect(

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use petri::execution::events::{
-    CollectingSink, Derived, EventProjector, Parsed, RunEvent, ViewEvent, WaitState, replay_run,
+    CollectingSink, Derived, EventProjector, Parsed, RunEvent, ViewEvent, WaitState, replay_run_dir,
 };
 use petri::execution::host::{self, HostRun};
 use petri::execution::{
@@ -609,7 +609,7 @@ const TIMED_NO_DEFAULT: &str = r#"digraph G {
 
 /// The one expiry of a run: the public event, its subject, and the same
 /// event derived again from the run dir.
-fn the_expiry(dir: &RunDir, events: &[RunEvent]) -> RunEvent {
+async fn the_expiry(dir: &RunDir, events: &[RunEvent]) -> RunEvent {
     let expired = expiries(events);
     assert_eq!(expired.len(), 1, "one expiry: {expired:?}");
     let event = expired[0];
@@ -626,7 +626,7 @@ fn the_expiry(dir: &RunDir, events: &[RunEvent]) -> RunEvent {
             state: WaitState::Running,
         })
     );
-    let replayed = replay_run(dir.path()).expect("projects");
+    let replayed = replay_run_dir(dir.path()).await.expect("projects");
     let from_log = replayed
         .iter()
         .find(|e| e.id == event.id)
@@ -677,7 +677,7 @@ async fn an_expired_question_is_recorded_as_timed_out_with_the_default_it_took()
         default: Some("N".to_owned()),
     });
     assert_eq!(record.delivery, Delivery::Expired);
-    let expiry = the_expiry(&dir, &events);
+    let expiry = the_expiry(&dir, &events).await;
     assert_eq!(
         expiry.parsed(),
         Some(&Parsed::QuestionExpired {
@@ -714,7 +714,7 @@ async fn an_expired_question_without_a_default_is_timed_out_and_the_gate_asks_fo
     let record = &receipt.questions[0];
     assert_eq!(record.reply, ReplyRecord::TimedOut { default: None });
     assert_eq!(record.delivery, Delivery::Expired);
-    let expiry = the_expiry(&dir, &events);
+    let expiry = the_expiry(&dir, &events).await;
     assert_eq!(
         expiry.parsed(),
         Some(&Parsed::QuestionExpired {

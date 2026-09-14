@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
-use execution::events::{Parsed, RunEvent, replay_run};
+use execution::events::{Parsed, RunEvent, replay_run_dir};
 use execution::hooks::{
     HookActivity, HookAdapter, HookDecision, HookPoint, HookReport, HookRequest, HookRun,
     HookService, HookServiceHandle,
@@ -1229,7 +1229,7 @@ script = "echo tool-guard-ran >> tool-hooks.log"
     );
     // The same facts through the public stream, replayed from the run dir:
     // typed hook activity apart from any stage's own agent activity.
-    let events = replay_run(dir.path()).expect("replays");
+    let events = replay_run_dir(dir.path()).await.expect("replays");
     let replayed: Vec<_> = events
         .iter()
         .filter(|e| hook_activity_of(e).is_some())
@@ -1309,7 +1309,7 @@ model = "test/model"
         report.state.errors()
     );
     assert_eq!(provider.requests().len(), 3);
-    let events = replay_run(dir.path()).expect("replays");
+    let events = replay_run_dir(dir.path()).await.expect("replays");
     let on_b = |e: &&RunEvent| e.subject.as_ref().is_some_and(|s| s.node.name == "b");
     // The stage's own accounting: one prompt, one answer's tokens.
     let finished = events

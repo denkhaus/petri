@@ -114,18 +114,15 @@ fn persisted_events(run_dir: &Path, kind: &str) -> Vec<Value> {
         }
     }
     let mut out = Vec::new();
-    let invocations = run_dir.join("invocations");
-    for invocation in fs::read_dir(&invocations).into_iter().flatten().flatten() {
-        let executions = invocation.path().join("executions");
-        for execution in fs::read_dir(&executions).into_iter().flatten().flatten() {
-            let log = execution.path().join("events.jsonl");
-            let Ok(text) = fs::read_to_string(&log) else {
-                continue;
-            };
-            for line in text.lines().filter(|l| !l.trim().is_empty()) {
-                if let Ok(value) = serde_json::from_str::<Value>(line) {
-                    collect(&value, kind, &mut out);
-                }
+    let executions = run_dir.join("executions");
+    for execution in fs::read_dir(&executions).into_iter().flatten().flatten() {
+        let log = execution.path().join("events.jsonl");
+        let Ok(text) = fs::read_to_string(&log) else {
+            continue;
+        };
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            if let Ok(value) = serde_json::from_str::<Value>(line) {
+                collect(&value, kind, &mut out);
             }
         }
     }

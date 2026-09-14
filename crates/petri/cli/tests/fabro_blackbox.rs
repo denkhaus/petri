@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use petri::execution::events::{ViewEvent, replay_run};
+use petri::execution::events::{ViewEvent, replay_run_dir};
 use serde_json::{Value, json};
 use support::fabro::interview;
 use support::fabro::launch::{Case, Launch, sanitized_path};
@@ -2356,8 +2356,8 @@ fn finding_for(namespace: &str, item: &str, delay_ms: u64) -> Value {
 /// one branch per item, one `branch_completed` per clone in item order, and
 /// one `fork_completed` at the fan-in with the results in the same order.
 /// Zero items is a fork with zero branches and no `branch_completed`.
-fn assert_for_each_fork_events(run_dir: &Path, items: u32) {
-    let events = replay_run(run_dir).expect("the run replays");
+async fn assert_for_each_fork_events(run_dir: &Path, items: u32) {
+    let events = replay_run_dir(run_dir).await.expect("the run replays");
     let mut forks = Vec::new();
     let mut branches = Vec::new();
     let mut joins = Vec::new();
@@ -2442,7 +2442,7 @@ async fn for_each_branches_keep_distinct_values_under_one_key_in_item_order() {
     );
     let finished = case.run(&workflow, &[]).await;
     finished.assert_code(0);
-    assert_for_each_fork_events(&finished.run_dir, 3);
+    assert_for_each_fork_events(&finished.run_dir, 3).await;
     let results = results_file(&case);
     assert_eq!(results.len(), 3, "{results:?}");
     for (index, (envelope, item)) in results.iter().zip(["alpha", "beta", "gamma"]).enumerate() {
@@ -2625,7 +2625,7 @@ async fn an_empty_for_each_list_joins_without_calling_the_model() {
     // The fork starts and closes with zero branches: the placeholder clone
     // the lowering fires to reach the fan-in is no branch in the public
     // stream.
-    assert_for_each_fork_events(&finished.run_dir, 0);
+    assert_for_each_fork_events(&finished.run_dir, 0).await;
     assert_eq!(results_file(&case), Vec::<Value>::new());
     let context = finished.final_context();
     assert_eq!(context["parallel.branch_count"], json!(0));

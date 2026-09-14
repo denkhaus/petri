@@ -18,8 +18,8 @@ use execution::controls::ControlService;
 use execution::host::{HostError, HostRun};
 use execution::watchdog::StallWatchdog;
 use execution::{
-    CoordinatorHandle, InterviewDispatcher, InterviewReceipt, Interviewer, LeaseState,
-    RECEIPT_FILE, ResourceStore, host,
+    Access, CoordinatorHandle, InterviewDispatcher, InterviewReceipt, Interviewer, LeaseState,
+    RECEIPT_FILE, ResourceStore, host, open_run_dir,
 };
 use runtime::driver::ExecutionReport;
 use runtime::executor::Retention;
@@ -279,7 +279,7 @@ pub(crate) async fn drive(
     for record in report.state.history() {
         eprintln!("  {} {}", record.outcome.status.tag(), record.name);
     }
-    report_workspaces(run_dir, rt.run_options().retention);
+    report_workspaces(run_dir, rt.run_options().retention).await;
     let status = report.status;
     tracing::Span::current().record("status", display(status));
     eprintln!("run: {status}");
@@ -332,8 +332,15 @@ fn write_receipt(run_dir: &Path, receipt: &InterviewReceipt) {
     clippy::print_stderr,
     reason = "the retained workspace path is the run's result for the user, on stderr"
 )]
-fn report_workspaces(run_dir: &Path, retention: Retention) {
-    let store = match ResourceStore::load(run_dir.join(execution::RESOURCES_DIR)) {
+async fn report_workspaces(run_dir: &Path, retention: Retention) {
+    let logs = match open_run_dir(run_dir, Access::Read).await {
+        Ok(logs) => logs,
+        Err(error) => {
+            tracing::debug!(error = %error, "no run to report workspaces for");
+            return;
+        }
+    };
+    let store = match ResourceStore::load(&logs).await {
         Ok(store) => store,
         Err(error) => {
             tracing::debug!(error = %error, "no sandbox resource records to report");

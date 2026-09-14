@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::{env, fs, process};
@@ -18,7 +19,9 @@ use ir::{Graph, GraphBuilder, NodeId, ScopeId, StepRef, Value};
 use serde::Deserialize;
 use serde_json::json;
 use steps::PROCESS_KIND;
+use store::{Access, OwnerId, RunDirStore, RunLogs};
 use tokio::process::Command;
+use tokio::task::yield_now;
 use tokio::time;
 
 pub mod run_store;
@@ -325,6 +328,57 @@ pub async fn is_docker_available() -> bool {
     let ready = supervisor.current().await.is_ok();
     supervisor.shutdown().await;
     ready
+}
+
+/// The run under `run_dir`, opened for reading: no lease, so a live run
+/// can be read too.
+pub async fn read_run_dir(run_dir: &Path) -> Arc<dyn RunLogs> {
+    RunDirStore::new(run_dir)
+        .open_stored(Access::Read)
+        .await
+        .unwrap_or_else(|error| panic!("the run under `{}` opens: {error}", run_dir.display()))
+}
+
+/// The run under `run_dir`, opened for writing under a fresh owner: what a
+/// test does to change a stored run between two coordinators. Drop the
+/// handle before the next coordinator opens the run.
+pub async fn write_run_dir(run_dir: &Path) -> Arc<dyn RunLogs> {
+    RunDirStore::new(run_dir)
+        .open_stored(Access::Write {
+            owner: OwnerId::mint(),
+        })
+        .await
+        .unwrap_or_else(|error| panic!("the run under `{}` opens: {error}", run_dir.display()))
+}
+
+/// Wait until the run under `run_dir` can be opened for writing: a
+/// coordinator dropped mid-run (a crash test) releases the run's lease when
+/// the last of its tasks is dropped, which takes a turn of the scheduler.
+/// Panics when the lease is still held after `limit`.
+pub async fn wait_for_run_dir_release(run_dir: &Path, limit: Duration) {
+    let deadline = Instant::now() + limit;
+    loop {
+        yield_now().await;
+        match RunDirStore::new(run_dir)
+            .open_stored(Access::Write {
+                owner: OwnerId::mint(),
+            })
+            .await
+        {
+            Ok(handle) => {
+                drop(handle);
+                return;
+            }
+            Err(error) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "the run under `{}` is still held: {error}",
+                    run_dir.display()
+                );
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
 }
 
 /// The run id every sandbox of the run under `run_dir` is labelled with:

@@ -351,7 +351,7 @@ pub enum StoreError {
     #[error("run `{key}` is not in {locator}")]
     NotFound { key: RunKey, locator: String },
     /// Another live owner holds the run's writer lease.
-    #[error("run {locator} is held by owner {owner}")]
+    #[error("run {locator} is already in use by owner {owner}")]
     Leased { locator: String, owner: OwnerId },
     /// The handle's owner no longer holds the lease: a later owner took the
     /// run, and this one stops at its next write.

@@ -112,7 +112,8 @@ async fn replay_from_held_positions_is_the_tail_of_the_full_replay() {
     let report = host::run(&rt, b.build()).await.expect("the run completes");
     assert_eq!(report.status, RunStatus::Success);
 
-    let full = replay_run(dir.path()).expect("the run dir projects");
+    let logs = testkit::read_run_dir(dir.path()).await;
+    let full = replay_run(&*logs).await.expect("the run projects");
     let execution = full
         .iter()
         .map(|event| event.id.source)
@@ -136,7 +137,9 @@ async fn replay_from_held_positions_is_the_tail_of_the_full_replay() {
     let mut held = BTreeMap::new();
     held.insert(execution, held_engine);
     held.insert(EventSource::Coordinator, coordinator_last);
-    let tail = replay_since(dir.path(), &held).expect("the suffix projects");
+    let tail = replay_since(&*logs, &held)
+        .await
+        .expect("the suffix projects");
     let expected: Vec<_> = full
         .iter()
         .filter(|event| event.id.source == execution && event.id > held_engine)
@@ -152,7 +155,9 @@ async fn replay_from_held_positions_is_the_tail_of_the_full_replay() {
     // A log with no held position is replayed whole.
     let mut held = BTreeMap::new();
     held.insert(execution, held_engine);
-    let tail = replay_since(dir.path(), &held).expect("the suffix projects");
+    let tail = replay_since(&*logs, &held)
+        .await
+        .expect("the suffix projects");
     let coordinator: Vec<_> = tail
         .iter()
         .filter(|event| event.id.source == EventSource::Coordinator)
@@ -166,7 +171,9 @@ async fn replay_from_held_positions_is_the_tail_of_the_full_replay() {
 
     // Nothing held: the full replay.
     assert_eq!(
-        replay_since(dir.path(), &BTreeMap::new()).expect("projects"),
+        replay_since(&*logs, &BTreeMap::new())
+            .await
+            .expect("projects"),
         full
     );
 }

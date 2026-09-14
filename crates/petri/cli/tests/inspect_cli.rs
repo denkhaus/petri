@@ -80,7 +80,7 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, (SystemTime, Vec<u8>)> {
 }
 
 fn root_events(run_dir: &Path) -> PathBuf {
-    run_dir.join("invocations/0000000000000000/executions/0000000000000000/events.jsonl")
+    run_dir.join("executions/0000000000000000/events.jsonl")
 }
 
 /// A restart loop around a nested child. `work` reports `done=true` on its
@@ -133,7 +133,7 @@ fn inspect_reconstructs_a_restarted_run_with_children_after_the_process_exits() 
     assert_eq!(document, again);
     assert_eq!(snapshot(&run_dir), before, "inspection changed the run dir");
 
-    assert_eq!(document["inspect_format_version"], Value::from(2));
+    assert_eq!(document["inspect_format_version"], Value::from(3));
     assert_eq!(document["complete"], Value::Bool(true));
     assert_eq!(document["status"], Value::from("success"));
 
@@ -338,25 +338,39 @@ fn finished_run(label: &str) -> (RunDir, PathBuf) {
 fn inspect_reports_torn_logs_as_incomplete_and_corrupt_logs_as_errors() {
     let (_dir, run_dir) = finished_run("inspect-cli-damaged");
 
-    // A torn engine-log tail: incomplete, exit 1, the file left alone.
+    // A torn engine-log tail is the run directory's own business: dropped
+    // before the run is read, the file left alone, the complete prefix
+    // inspected. A tail torn after a finished run is a complete run.
     let events = root_events(&run_dir);
     let clean = fs::read(&events).expect("reads");
     let mut torn = clean.clone();
     torn.extend_from_slice(b"{\"seq\":");
     fs::write(&events, &torn).expect("writes");
     let (output, document) = inspect(&run_dir);
-    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert_eq!(document["complete"], Value::Bool(false));
-    assert_eq!(document["executions"][0]["log"]["torn"], Value::Bool(true));
-    assert!(
-        stderr(&output).contains("incomplete:"),
-        "{}",
-        stderr(&output)
-    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(document["complete"], Value::Bool(true));
     assert_eq!(
         fs::read(&events).expect("reads"),
         torn,
         "the torn tail was rewritten"
+    );
+    // A short engine log, cut right after a routing decision so the core
+    // records its apply produced are gone: a prefix, incomplete, exit 1.
+    let text = String::from_utf8(clean.clone()).expect("utf-8");
+    let keep = text
+        .lines()
+        .position(|line| line.contains("routing.resolved"))
+        .expect("a routing decision")
+        + 1;
+    let short: Vec<&str> = text.lines().take(keep).collect();
+    fs::write(&events, format!("{}\n", short.join("\n"))).expect("writes");
+    let (output, document) = inspect(&run_dir);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(document["complete"], Value::Bool(false));
+    assert!(
+        stderr(&output).contains("incomplete:"),
+        "{}",
+        stderr(&output)
     );
 
     // A complete line that does not decode: an error, exit 2, no document.
@@ -385,12 +399,17 @@ fn inspect_reports_torn_logs_as_incomplete_and_corrupt_logs_as_errors() {
     assert_eq!(document["complete"], Value::Bool(false));
     fs::write(&coordinator, &text).expect("restores");
 
-    // An unsupported run format: an error.
-    let metadata = run_dir.join("run.json");
-    let mut value: Value =
-        serde_json::from_slice(&fs::read(&metadata).expect("reads")).expect("json");
-    value["format_version"] = Value::from(1);
-    fs::write(&metadata, serde_json::to_vec(&value).expect("encodes")).expect("writes");
+    // An unsupported run format, on the run declaration: an error.
+    let mut lines: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("json"))
+        .collect();
+    lines[0]["body"]["format_version"] = Value::from(1);
+    let rewritten: Vec<String> = lines
+        .iter()
+        .map(|line| serde_json::to_string(line).expect("encodes"))
+        .collect();
+    fs::write(&coordinator, format!("{}\n", rewritten.join("\n"))).expect("writes");
     let (output, _) = inspect(&run_dir);
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     assert!(

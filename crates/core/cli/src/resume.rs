@@ -13,19 +13,20 @@
 //! Fabro, a node that was mid-turn starts a fresh session from the
 //! `summary:high` preamble.
 //!
-//! Before anything starts, the command reads the coordinator log without the
-//! lease and refuses, with exit code 2 and no work done: a run that already
-//! recorded its finish, a run another process holds (the lease), a paused run
-//! given no `--control` file (nothing could unpause it), and a run directory
-//! that is missing or does not decode.
+//! Before anything starts, the command reads the coordinator log through a
+//! read handle (no lease) and refuses, with exit code 2 and no work done: a
+//! run that already recorded its finish, a run another process holds (the
+//! lease), a paused run given no `--control` file (nothing could unpause
+//! it), and a run directory that is missing or does not decode.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use execution::controls::ControlService;
-use execution::{StoreError, hold_run_lease, host};
+use execution::{Access, OwnerId, StoreError, host, open_run_dir};
 use runtime::Runtime;
 use runtime::frontend::{Frontend, LaunchSettings};
+use runtime::store::StoreError as BackendError;
 
 use crate::control::TailFrom;
 use crate::session::{self, Session, SessionArgs, Start};
@@ -46,7 +47,14 @@ pub(crate) async fn resume(
     provider: ProviderArgs,
     runner: RunnerArgs,
 ) -> ExitCode {
-    let state = match host::stored_state(&run_dir) {
+    let logs = match open_run_dir(&run_dir, Access::Read).await {
+        Ok(logs) => logs,
+        Err(error) => {
+            eprintln!("error: {}", error_chain(&error));
+            return ExitCode::from(2);
+        }
+    };
+    let state = match host::stored_state(&*logs).await {
         Ok(state) => state,
         Err(error) => {
             eprintln!("error: {}", error_chain(&error));
@@ -70,9 +78,13 @@ pub(crate) async fn resume(
     // The lease, taken and released: a run a live process holds is refused
     // here, with the reason, before any runtime is built. The window between
     // this and the coordinator's own lease is the same refusal at exit 3.
-    match hold_run_lease(&run_dir) {
+    match open_run_dir(&run_dir, Access::Write {
+        owner: OwnerId::mint(),
+    })
+    .await
+    {
         Ok(lease) => drop(lease),
-        Err(error @ StoreError::Leased(_)) => {
+        Err(StoreError::Store(error @ BackendError::Leased { .. })) => {
             eprintln!("error: {error}");
             return ExitCode::from(2);
         }
@@ -81,7 +93,7 @@ pub(crate) async fn resume(
             return ExitCode::from(2);
         }
     }
-    let graph = match host::stored_root_graph(&run_dir) {
+    let graph = match host::stored_root_graph(&*logs).await {
         Ok(Some(graph)) => graph,
         Ok(None) => {
             eprintln!("error: the run declared no root invocation; nothing to resume");
@@ -126,5 +138,11 @@ pub(crate) async fn resume(
     let start = Start::Resume {
         stall_timeout: graph.policy.stall_timeout,
     };
-    session::drive(&rt.options(options), &run_dir, start, session).await
+    Box::pin(session::drive(
+        &rt.options(options),
+        &run_dir,
+        start,
+        session,
+    ))
+    .await
 }

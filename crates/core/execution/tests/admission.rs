@@ -414,12 +414,15 @@ async fn a_backoff_releases_the_fork_slot_so_a_queued_branch_runs_first() {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("the coordinator starts");
     let child_a = coordinator
         .register_graph(&traced_child("a", true, 0))
+        .await
         .expect("a registers");
     let child_b = coordinator
         .register_graph(&traced_child("b", false, 0))
+        .await
         .expect("b registers");
     let mut parent = GraphBuilder::new();
     parent.add_node(
@@ -440,6 +443,7 @@ async fn a_backoff_releases_the_fork_slot_so_a_queued_branch_runs_first() {
     parent.link(after_a, branch_b);
     let parent = coordinator
         .register_graph(&parent.build())
+        .await
         .expect("parent registers");
     let result = timeout(
         Duration::from_secs(20),
@@ -480,12 +484,15 @@ async fn overlap_under(max_parallel: u32) -> bool {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("the coordinator starts");
     let child_a = coordinator
         .register_graph(&traced_child("a", false, 300))
+        .await
         .expect("a registers");
     let child_b = coordinator
         .register_graph(&traced_child("b", false, 300))
+        .await
         .expect("b registers");
     let mut parent = GraphBuilder::new();
     parent.add_node(
@@ -500,6 +507,7 @@ async fn overlap_under(max_parallel: u32) -> bool {
     );
     let parent = coordinator
         .register_graph(&parent.build())
+        .await
         .expect("parent registers");
     let result = timeout(
         Duration::from_secs(20),
@@ -530,8 +538,8 @@ async fn one_slot_serializes_the_attempts_of_a_fork_and_two_slots_let_them_overl
     );
 }
 
-#[test]
-fn a_limit_of_zero_or_above_the_ceiling_is_refused() {
+#[tokio::test]
+async fn a_limit_of_zero_or_above_the_ceiling_is_refused() {
     assert_eq!(MAX_INVOCATIONS, 10_000);
     assert_eq!(
         CoordinatorOptions::default().with_max_invocations(0).err(),
@@ -559,7 +567,7 @@ fn a_limit_of_zero_or_above_the_ceiling_is_refused() {
         ..CoordinatorOptions::default()
     };
     assert!(matches!(
-        Coordinator::create(runtime.prepare_run(directory.path()), Vec::new(), options),
+        Coordinator::create(runtime.prepare_run(directory.path()), Vec::new(), options).await,
         Err(CoordinatorError::InvalidInvocationLimit(
             InvocationLimitError::Disabled
         ))
@@ -569,7 +577,7 @@ fn a_limit_of_zero_or_above_the_ceiling_is_refused() {
         ..CoordinatorOptions::default()
     };
     assert!(matches!(
-        Coordinator::create(runtime.prepare_run(directory.path()), Vec::new(), options),
+        Coordinator::create(runtime.prepare_run(directory.path()), Vec::new(), options).await,
         Err(CoordinatorError::InvalidInvocationLimit(
             InvocationLimitError::AboveCeiling { .. }
         ))
@@ -597,9 +605,11 @@ async fn the_limit_counts_finished_children_and_names_the_refused_call() {
         .expect("a lower limit is allowed");
     let mut coordinator =
         Coordinator::create(runtime.prepare_run(directory.path()), Vec::new(), options)
+            .await
             .expect("the coordinator starts");
     let child = coordinator
         .register_graph(&traced_child("c", false, 0))
+        .await
         .expect("child registers");
     let mut parent = GraphBuilder::new();
     let first = parent.add_node("first", ScopeId::new(0), invoke(child, "first", None, 0));
@@ -609,6 +619,7 @@ async fn the_limit_counts_finished_children_and_names_the_refused_call() {
     parent.link(second, third);
     let parent = coordinator
         .register_graph(&parent.build())
+        .await
         .expect("parent registers");
     let result = timeout(
         Duration::from_secs(20),
@@ -657,9 +668,11 @@ async fn nested_invocations_count_against_the_same_limit() {
         .expect("a lower limit is allowed");
     let mut coordinator =
         Coordinator::create(runtime.prepare_run(directory.path()), Vec::new(), options)
+            .await
             .expect("the coordinator starts");
     let grandchild = coordinator
         .register_graph(&noop_child())
+        .await
         .expect("grandchild registers");
     let mut child = GraphBuilder::new();
     let one = child.add_node("one", ScopeId::new(0), invoke(grandchild, "one", None, 0));
@@ -667,11 +680,13 @@ async fn nested_invocations_count_against_the_same_limit() {
     child.link(one, two);
     let child = coordinator
         .register_graph(&child.build())
+        .await
         .expect("child registers");
     let mut parent = GraphBuilder::new();
     parent.add_node("child", ScopeId::new(0), invoke(child, "child", None, 0));
     let parent = coordinator
         .register_graph(&parent.build())
+        .await
         .expect("parent registers");
     let result = timeout(
         Duration::from_secs(20),
@@ -701,9 +716,11 @@ async fn resume_keeps_the_limit_and_refuses_one_below_the_declared_total() {
         .expect("a lower limit is allowed");
     let mut coordinator =
         Coordinator::create(runtime.prepare_run(directory.path()), Vec::new(), options)
+            .await
             .expect("the coordinator starts");
     let child = coordinator
         .register_graph(&noop_child())
+        .await
         .expect("child registers");
     let mut parent = GraphBuilder::new();
     let first = parent.add_node("first", ScopeId::new(0), invoke(child, "first", None, 0));
@@ -711,6 +728,7 @@ async fn resume_keeps_the_limit_and_refuses_one_below_the_declared_total() {
     parent.link(first, second);
     let parent = coordinator
         .register_graph(&parent.build())
+        .await
         .expect("parent registers");
     let result = coordinator
         .run_root(parent, BTreeMap::new())
@@ -722,7 +740,7 @@ async fn resume_keeps_the_limit_and_refuses_one_below_the_declared_total() {
 
     // The same limit: the replay reattaches to the declared children and
     // declares nothing new.
-    let (mut resumed, _) =
+    let mut resumed =
         Coordinator::resume(runtime.prepare_run(directory.path()), Vec::new(), options)
             .await
             .expect("resumes at the boundary");
@@ -814,9 +832,11 @@ async fn exactly_ten_thousand_invocations_are_admitted_and_the_next_is_refused()
             .with_max_invocations(MAX_INVOCATIONS)
             .expect("the ceiling itself"),
     )
+    .await
     .expect("the coordinator starts");
     let child = coordinator
         .register_graph(&noop_child())
+        .await
         .expect("child registers");
     let mut parent = GraphBuilder::new();
     let flood = parent.add_node(
@@ -830,6 +850,7 @@ async fn exactly_ten_thousand_invocations_are_admitted_and_the_next_is_refused()
     parent.graph_mut().result = ResultProjection::NodeOutput(flood);
     let parent = coordinator
         .register_graph(&parent.build())
+        .await
         .expect("parent registers");
     let result = coordinator
         .run_root(parent, BTreeMap::new())
@@ -865,13 +886,16 @@ async fn a_fork_of_fifty_children_keeps_four_live_and_starts_them_in_order() {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("the coordinator starts")
     .observe(live.clone());
     let child = coordinator
         .register_graph(&traced_child("c", false, 20))
+        .await
         .expect("child registers");
     let parent = coordinator
         .register_graph(&fork_parent(child, 50, 4))
+        .await
         .expect("parent registers");
     let result = timeout(
         Duration::from_secs(60),
@@ -919,13 +943,16 @@ async fn cancelling_the_parent_finishes_every_queued_child_as_cancelled() {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("the coordinator starts")
     .observe(live.clone());
     let child = coordinator
         .register_graph(&hold_child(None))
+        .await
         .expect("child registers");
     let parent = coordinator
         .register_graph(&fork_parent(child, 12, 1))
+        .await
         .expect("parent registers");
     let handle = coordinator.handle();
     let first_started = started.clone();
@@ -996,13 +1023,16 @@ async fn resume_redispatches_queued_children_under_the_bound() {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("the coordinator starts")
     .observe(live.clone());
     let child = coordinator
         .register_graph(&hold_child(Some(&marker)))
+        .await
         .expect("child registers");
     let parent = coordinator
         .register_graph(&fork_parent(child, 6, 2))
+        .await
         .expect("parent registers");
     {
         let run = coordinator.run_root(parent, BTreeMap::new());
@@ -1030,13 +1060,15 @@ async fn resume_redispatches_queued_children_under_the_bound() {
         // The crash: the run future drops here, and its drivers with it.
     }
     drop(coordinator);
+    // The crash's tasks release the run at their next poll.
+    testkit::wait_for_run_dir_release(directory.path(), Duration::from_secs(10)).await;
     let before = live.seen();
     let labels_before = trace.labels().len();
     fs::remove_file(&marker).expect("the marker is removed");
 
     let resumed_runtime = runtime(&directory, &trace, &started);
     let resumed_live = Arc::new(LiveChildren::default());
-    let (coordinator, _) = Coordinator::resume(
+    let coordinator = Coordinator::resume(
         resumed_runtime.prepare_run(directory.path()),
         Vec::new(),
         CoordinatorOptions::default(),

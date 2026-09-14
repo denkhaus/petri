@@ -39,24 +39,26 @@ use engine::{
 use ir::{Attempt, Control, FailureInfo, FiringId, Graph, NodeId, Value};
 use serde::Serialize;
 use smol_str::SmolStr;
+use store::{Access, RunLogs};
 
-use crate::host::EVENTS_FILE;
 use crate::interview::{InterviewReceipt, RECEIPT_FILE};
 use crate::state::RunNote;
-use crate::store::{execution_relative_dir, verify_graph_registry};
+use crate::store::load_graph_registry;
 use crate::{
-    COORDINATOR_FILE, COORDINATOR_FORMAT_VERSION, CancelReason, CoordinatorState, EngineLogError,
-    ExecutionId, ExecutionState, GraphDigest, InvocationId, InvocationState, RUN_FILE, RunMetadata,
-    SandboxBinding, SecretBinding, SecretBindings, StateError, StoreError, decode_coordinator_log,
-    read_engine_log,
+    CancelReason, CoordinatorEvent, CoordinatorState, EngineLogError, ExecutionId, ExecutionState,
+    GraphDigest, InvocationId, InvocationState, SandboxBinding, SecretBinding, SecretBindings,
+    StateError, StoreError, open_run_dir, read_coordinator_log, read_execution_log,
 };
 
 /// The version of the [`RunInspection`] document. Bumped whenever a field
 /// changes shape or meaning; additions that keep every existing field intact
 /// do not bump it. Version 2 spells every enum the document carries from a
 /// record (`Admission`, `RouteDecision`, `EngineExit`, `EntryPoint`,
-/// `Status`, `RunStatus`) with snake-case tags, as the logs do.
-pub const INSPECT_FORMAT_VERSION: u32 = 2;
+/// `Status`, `RunStatus`) with snake-case tags, as the logs do. Version 3
+/// reads the run through its store: `run_dir` became `locator`, `run_key`
+/// names the run, and a log's `path` and `torn` are gone (a torn tail is the
+/// run directory's own business, dropped before the run is read).
+pub const INSPECT_FORMAT_VERSION: u32 = 3;
 
 /// Why a run directory could not be reconstructed.
 ///
@@ -97,10 +99,9 @@ pub enum InspectError {
     State(#[from] StateError),
     #[error(transparent)]
     EngineLog(#[from] EngineLogError),
-    #[error("execution {execution} log `{path}` diverges from replay: {source}")]
+    #[error("execution {execution} log diverges from replay: {source}")]
     ReplayDiverged {
         execution: ExecutionId,
-        path:      PathBuf,
         #[source]
         source:    ReplayMismatch,
     },
@@ -120,8 +121,11 @@ pub struct RunInspection {
     pub inspect_format_version: u32,
     /// The run directory's own format, from `run.json`.
     pub coordinator_format_version: u32,
-    /// The directory as it was named to the inspection.
-    pub run_dir: PathBuf,
+    /// Where the run lives, as its store names it: a run directory's path,
+    /// or a database and an id.
+    pub locator: String,
+    /// The run's identity in its store and on its sandbox providers.
+    pub run_key: store::RunKey,
     /// True only when `incomplete` is empty: the run recorded its finish and
     /// every execution's log decoded whole and replayed byte-identically.
     pub complete: bool,
@@ -268,20 +272,15 @@ pub enum ExitInspection {
     },
 }
 
-/// The execution's `events.jsonl` and how far replay trusted it.
+/// The execution's engine log and how far replay trusted it.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct LogInspection {
-    /// Relative to the run directory.
-    pub path:    PathBuf,
-    /// Complete records decoded.
+    /// Records stored.
     pub records: usize,
-    /// The file ended before its last line's newline. The torn line was
-    /// dropped and the file was left as found.
-    pub torn:    bool,
     /// `verified` (replay reproduced the log exactly), `prefix` (the log is
     /// a byte-prefix of what replay regenerates: a crash landed between an
     /// external append and the flush of its derived records) or `missing`
-    /// (no log, or an empty file).
+    /// (nothing stored for the execution).
     pub replay:  &'static str,
 }
 
@@ -408,51 +407,39 @@ pub struct LiveInspection {
     pub cancelling:     bool,
 }
 
-/// Reconstruct the run under `run_dir` from its durable files.
+/// Reconstruct a run from its store, through a handle opened for reading.
 ///
 /// # Errors
 ///
-/// Fails when the files do not support a trustworthy reconstruction: a
-/// missing or unreadable `run.json` or `coordinator.jsonl`, an unsupported
-/// format version, a complete record that does not decode, a coordinator
-/// log that does not replay, a registered graph that is missing or does not
-/// match its digest, an engine log with an undecodable record or version, an
-/// engine log that diverges from its replay, or an `interviews.json` that is
-/// not a receipt. An interrupted run is not an error; see
-/// [`RunInspection::incomplete`].
-pub fn inspect_run(run_dir: &Path) -> Result<RunInspection, InspectError> {
-    let metadata_path = run_dir.join(RUN_FILE);
-    let bytes = fs::read(&metadata_path).map_err(|source| InspectError::Io {
-        action: "read",
-        path: metadata_path.clone(),
-        source,
-    })?;
-    let metadata: RunMetadata =
-        serde_json::from_slice(&bytes).map_err(|source| InspectError::BadMetadata {
-            path: metadata_path,
-            source,
+/// Fails when the records do not support a trustworthy reconstruction: a
+/// run with no declaration, an unsupported format version, a record that
+/// does not decode, a coordinator log that does not replay, a registered
+/// graph that is missing or does not match its digest, an engine log with
+/// an undecodable record, or an engine log that diverges from its replay.
+/// An interrupted run is not an error; see [`RunInspection::incomplete`].
+/// The interview receipt is a file beside a run directory: see
+/// [`inspect_run_dir`] and [`RunInspection::with_interviews`].
+pub async fn inspect_run(logs: &dyn RunLogs) -> Result<RunInspection, InspectError> {
+    let records = read_coordinator_log(logs)
+        .await
+        .map_err(|error| match error {
+            StoreError::UnsupportedFormat { found, expected } => {
+                InspectError::UnsupportedFormat { found, expected }
+            }
+            other => InspectError::Store(other),
         })?;
-    if metadata.format_version != COORDINATOR_FORMAT_VERSION {
-        return Err(InspectError::UnsupportedFormat {
-            found:    metadata.format_version,
-            expected: COORDINATOR_FORMAT_VERSION,
-        });
-    }
-
-    let log_path = run_dir.join(COORDINATOR_FILE);
-    let bytes = fs::read(&log_path).map_err(|source| InspectError::Io {
-        action: "read",
-        path: log_path.clone(),
-        source,
-    })?;
-    let decoded = decode_coordinator_log(&log_path, &bytes)?;
-    let state = CoordinatorState::replay(&decoded.records)?;
-    let graphs = verify_graph_registry(run_dir, &state)?;
+    let (format_version, run_key) = match records.first().map(|record| &record.body) {
+        Some(CoordinatorEvent::RunStarted {
+            format_version,
+            key,
+            ..
+        }) => (*format_version, key.clone()),
+        _ => return Err(InspectError::State(StateError::MissingRunStart)),
+    };
+    let state = CoordinatorState::replay(&records)?;
+    let graphs = load_graph_registry(logs, &state).await?;
 
     let mut incomplete = Vec::new();
-    if decoded.torn {
-        incomplete.push(format!("`{COORDINATOR_FILE}` ends in a torn record"));
-    }
     if state.run_status.is_none() {
         incomplete.push("the run has not recorded its finish".to_owned());
     }
@@ -460,14 +447,9 @@ pub fn inspect_run(run_dir: &Path) -> Result<RunInspection, InspectError> {
     let children = children_by_execution(&state);
     let mut executions = Vec::with_capacity(state.executions.len());
     for execution in state.executions.values() {
-        executions.push(inspect_execution(
-            run_dir,
-            &state,
-            &graphs,
-            execution,
-            &children,
-            &mut incomplete,
-        )?);
+        executions.push(
+            inspect_execution(logs, &state, &graphs, execution, &children, &mut incomplete).await?,
+        );
     }
     let invocations = state
         .invocations
@@ -480,11 +462,11 @@ pub fn inspect_run(run_dir: &Path) -> Result<RunInspection, InspectError> {
         .invocations
         .get(&root_id)
         .ok_or(StateError::UnknownInvocation(root_id))?;
-    let interviews = read_receipt(run_dir)?;
     Ok(RunInspection {
         inspect_format_version: INSPECT_FORMAT_VERSION,
-        coordinator_format_version: metadata.format_version,
-        run_dir: run_dir.to_path_buf(),
+        coordinator_format_version: format_version,
+        locator: logs.locator(),
+        run_key,
         complete: incomplete.is_empty(),
         status: state.run_status.map(|status| status.to_string()),
         incomplete,
@@ -499,14 +481,31 @@ pub fn inspect_run(run_dir: &Path) -> Result<RunInspection, InspectError> {
         graphs: state.graphs.iter().copied().collect(),
         invocations,
         executions,
-        interviews,
+        interviews: None,
     })
 }
 
-/// The interview receipt beside the run, when the host wrote one. A run
-/// without an interviewer writes none, so a missing file is not an error; a
-/// file that is not a receipt is.
-fn read_receipt(run_dir: &Path) -> Result<Option<InterviewReceipt>, InspectError> {
+/// [`inspect_run`] over the run directory at `run_dir`, with the interview
+/// receipt the host wrote beside it (`interviews.json`), when there is one.
+pub async fn inspect_run_dir(run_dir: &Path) -> Result<RunInspection, InspectError> {
+    let logs = open_run_dir(run_dir, Access::Read).await?;
+    let inspection = inspect_run(&*logs).await?;
+    Ok(inspection.with_interviews(read_receipt(run_dir)?))
+}
+
+impl RunInspection {
+    /// Attach the interview receipt a host kept beside the run.
+    #[must_use]
+    pub fn with_interviews(mut self, interviews: Option<InterviewReceipt>) -> Self {
+        self.interviews = interviews;
+        self
+    }
+}
+
+/// The interview receipt beside a run directory, when the host wrote one.
+/// A run without an interviewer writes none, so a missing file is not an
+/// error; a file that is not a receipt is.
+pub fn read_receipt(run_dir: &Path) -> Result<Option<InterviewReceipt>, InspectError> {
     let path = run_dir.join(RECEIPT_FILE);
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
@@ -625,8 +624,8 @@ fn inspect_invocation(
     }
 }
 
-fn inspect_execution(
-    run_dir: &Path,
+async fn inspect_execution(
+    logs: &dyn RunLogs,
     state: &CoordinatorState,
     graphs: &BTreeMap<GraphDigest, Arc<Graph>>,
     execution: &ExecutionState,
@@ -653,46 +652,33 @@ fn inspect_execution(
         .and_then(|index| invocation.executions.get(index).copied());
     let successor = position.and_then(|index| invocation.executions.get(index + 1).copied());
 
-    let relative = execution_relative_dir(invocation_id, id).join(EVENTS_FILE);
-    let path = run_dir.join(&relative);
-    let (log, engine) = match read_present_log(&path)? {
-        None => {
-            incomplete.push(format!("execution {id}: no `{EVENTS_FILE}` was written"));
-            (
-                LogInspection {
-                    path:    relative,
-                    records: 0,
-                    torn:    false,
-                    replay:  "missing",
-                },
-                None,
-            )
+    let decoded = read_execution_log(logs, id).await?;
+    let (log, engine) = if decoded.log.is_empty() {
+        incomplete.push(format!("execution {id}: no engine log was stored"));
+        (
+            LogInspection {
+                records: 0,
+                replay:  "missing",
+            },
+            None,
+        )
+    } else {
+        let (engine_state, coverage) = replay_log(graph, &decoded.log, id)?;
+        if coverage == Coverage::Prefix {
+            incomplete.push(format!(
+                "execution {id}: the log ends before the core's derived records"
+            ));
         }
-        Some(decoded) => {
-            if decoded.torn {
-                incomplete.push(format!(
-                    "execution {id}: `{EVENTS_FILE}` ends in a torn record"
-                ));
-            }
-            let (engine_state, coverage) = replay_log(graph, &decoded.log, id, &path)?;
-            if coverage == Coverage::Prefix {
-                incomplete.push(format!(
-                    "execution {id}: the log ends before the core's derived records"
-                ));
-            }
-            (
-                LogInspection {
-                    path:    relative,
-                    records: decoded.log.len(),
-                    torn:    decoded.torn,
-                    replay:  match coverage {
-                        Coverage::Verified => "verified",
-                        Coverage::Prefix => "prefix",
-                    },
+        (
+            LogInspection {
+                records: decoded.log.len(),
+                replay:  match coverage {
+                    Coverage::Verified => "verified",
+                    Coverage::Prefix => "prefix",
                 },
-                Some(inspect_engine(&engine_state, &decoded.log)),
-            )
-        }
+            },
+            Some(inspect_engine(&engine_state, &decoded.log)),
+        )
     };
 
     let status = match &execution.exit {
@@ -737,26 +723,6 @@ fn inspect_execution(
     })
 }
 
-/// Read an execution's log when there is one to read. A missing file or an
-/// empty one is `None`: the execution was declared and nothing was written.
-fn read_present_log(path: &Path) -> Result<Option<crate::DecodedEngineLog>, InspectError> {
-    let metadata = match fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(InspectError::Io {
-                action: "inspect",
-                path: path.to_path_buf(),
-                source,
-            });
-        }
-    };
-    if metadata.len() == 0 {
-        return Ok(None);
-    }
-    Ok(Some(read_engine_log(path)?))
-}
-
 /// How much of a log its replay stood behind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Coverage {
@@ -772,13 +738,11 @@ fn replay_log(
     graph: &Graph,
     log: &EventLog,
     execution: ExecutionId,
-    path: &Path,
 ) -> Result<(EngineState, Coverage), InspectError> {
     let state = engine::replay(graph.clone(), log);
     let rebuilt = &state.log;
     let mismatch = |first_divergence| InspectError::ReplayDiverged {
         execution,
-        path: path.to_path_buf(),
         source: ReplayMismatch {
             original_records: log.len(),
             replayed_records: rebuilt.len(),

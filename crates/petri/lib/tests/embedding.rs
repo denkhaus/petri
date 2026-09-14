@@ -25,7 +25,7 @@ use petri::driver::{BranchRole, FiringView};
 use petri::engine::{Admission, DecisionId, Event, Intervention, RouteApplied, RouteDecision};
 use petri::execution::events::{
     CollectingSink, Derived, EventId, EventProjector, EventSource, Parsed, ProjectionReceipt,
-    ProjectorOptions, RunEvent, RunEventSink, SinkError, ViewEvent, WaitState, replay_run,
+    ProjectorOptions, RunEvent, RunEventSink, SinkError, ViewEvent, WaitState, replay_run_dir,
 };
 use petri::execution::hooks::{
     HOOK_NOTE_KIND, HookAdapter, HookDecision, HookPoint, HookReport, HookRequest, HookRun,
@@ -977,7 +977,9 @@ async fn the_workflow_runs_without_adapters_and_the_events_reconstruct_it() {
 
     // The stream from the run dir equals the live stream, identity for
     // identity, with the live-only timestamp stripped.
-    let mut replayed = replay_run(dir.path()).expect("the run dir projects");
+    let mut replayed = replay_run_dir(dir.path())
+        .await
+        .expect("the run dir projects");
     replayed.sort_by_key(|e| e.id);
     assert_eq!(replayed, normalized(&outcome.events));
 
@@ -1097,7 +1099,9 @@ async fn adapters_run_in_order_and_checkpoint_work_follows_source_metadata() {
     assert_eq!(checkpoints.get("prepare"), Some(&true));
 
     // Replay still equals the live stream with hooks installed.
-    let mut replayed = replay_run(dir.path()).expect("the run dir projects");
+    let mut replayed = replay_run_dir(dir.path())
+        .await
+        .expect("the run dir projects");
     replayed.sort_by_key(|e| e.id);
     assert_eq!(replayed, normalized(&outcome.events));
 }
@@ -1841,7 +1845,7 @@ async fn slow_and_failing_consumers_are_lossless_or_honest() {
     let delivered = slow.inner.events();
     assert_eq!(receipt.delivered, delivered.len() as u64);
     assert_eq!(receipt.projected, receipt.delivered);
-    let replayed = replay_run(dir.path()).expect("projects");
+    let replayed = replay_run_dir(dir.path()).await.expect("projects");
     assert_eq!(
         replayed.len(),
         delivered.len(),
@@ -1870,7 +1874,7 @@ async fn slow_and_failing_consumers_are_lossless_or_honest() {
         receipt.failure.as_deref(),
         Some("the projection store is down")
     );
-    let replayed = replay_run(dir.path()).expect("projects");
+    let replayed = replay_run_dir(dir.path()).await.expect("projects");
     assert_eq!(
         replayed.len() as u64,
         receipt.projected,
@@ -1919,7 +1923,7 @@ async fn a_stalled_sink_is_abandoned_after_its_budget_and_the_run_dir_still_proj
         failure.contains("stalled") && failure.contains("300ms"),
         "{failure}"
     );
-    let replayed = replay_run(dir.path()).expect("projects");
+    let replayed = replay_run_dir(dir.path()).await.expect("projects");
     assert_eq!(
         replayed.len() as u64,
         receipt.projected,
@@ -1977,7 +1981,7 @@ async fn a_sink_that_falls_behind_leaves_the_overflow_to_the_durable_log() {
             );
         }
     }
-    let replayed = replay_run(dir.path()).expect("projects");
+    let replayed = replay_run_dir(dir.path()).await.expect("projects");
     assert_eq!(
         replayed.len() as u64,
         receipt.projected,
@@ -2009,9 +2013,7 @@ async fn recovery_redelivers_with_stable_identities() {
     let complete = first.events();
 
     // The crash: the root execution's last record never reached disk.
-    let events_path = dir
-        .path()
-        .join("invocations/0000000000000000/executions/0000000000000000/events.jsonl");
+    let events_path = dir.path().join("executions/0000000000000000/events.jsonl");
     let text = fs::read_to_string(&events_path).expect("reads");
     let mut lines: Vec<&str> = text.lines().collect();
     lines.pop();
@@ -2029,7 +2031,9 @@ async fn recovery_redelivers_with_stable_identities() {
     fs::write(&coordinator, format!("{}\n", lines[..cut].join("\n"))).expect("writes");
 
     let second = Arc::new(CollectingSink::default());
-    let projector = EventProjector::primed(second.clone(), dir.path()).expect("primes");
+    let projector = EventProjector::primed_run_dir(second.clone(), dir.path())
+        .await
+        .expect("primes");
     let rt = runtime(&dir, None);
     let resumed = host::resume_configured(&rt, Vec::new(), vec![projector.clone()], |_, _| {})
         .await
@@ -2068,7 +2072,7 @@ async fn recovery_redelivers_with_stable_identities() {
     for event in complete.iter().chain(normalized(&redelivered).iter()) {
         merged.entry(event.id).or_insert_with(|| event.clone());
     }
-    let mut replayed = replay_run(dir.path()).expect("projects");
+    let mut replayed = replay_run_dir(dir.path()).await.expect("projects");
     replayed.sort_by_key(|e| e.id);
     assert_eq!(
         merged.values().map(timeless).collect::<Vec<_>>(),
@@ -2263,7 +2267,7 @@ async fn the_milestone_workflow_runs_through_the_embedding_boundary() {
     assert!(!ws.join("held.txt").exists());
 
     // Replay yields the same public stream, identity for identity.
-    let mut replayed = replay_run(dir.path()).expect("replays");
+    let mut replayed = replay_run_dir(dir.path()).await.expect("replays");
     replayed.sort_by_key(|e| e.id);
     assert_eq!(replayed, normalized(&events));
 }

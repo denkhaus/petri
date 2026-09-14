@@ -1079,7 +1079,7 @@ async fn the_combined_workflow_runs_end_to_end_through_the_binary() {
         read(&setup.case.workspace().join("run-end.log")),
         "run_complete\nsandbox_cleanup\n"
     );
-    let events = public_events(&setup.case.run_dir);
+    let events = public_events(&setup.case.run_dir).await;
     assert_public_projection(&events);
     let projected = project(&events);
     assert_eq!(projected.run_status.as_deref(), Some("Success"));
@@ -1138,7 +1138,7 @@ async fn the_combined_workflow_reports_an_exhausted_chain_and_keeps_its_work() {
         read(&setup.case.workspace().join("run-end.log")),
         "run_failed\nsandbox_cleanup\n"
     );
-    let events = public_events(&setup.case.run_dir);
+    let events = public_events(&setup.case.run_dir).await;
     let projected = project(&events);
     assert_eq!(
         count(&projected, "draft_docs", "pebble:RouteFailoverStopped"),
@@ -1235,7 +1235,7 @@ async fn the_combined_workflow_is_cancelled_during_a_childs_tool_and_leaks_nothi
 
     // The public events: the child was spawned and closed under the
     // delegate's session, and the cancel names the interrupt.
-    let events = public_events(&setup.case.run_dir);
+    let events = public_events(&setup.case.run_dir).await;
     let agent = activities(&events);
     assert_eq!(of_kind(&agent, "SubAgentSpawned").len(), 1);
     assert_eq!(

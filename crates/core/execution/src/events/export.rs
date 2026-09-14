@@ -3,7 +3,7 @@
 //!
 //! A record's own event carries the stored line unchanged, so a host that
 //! keeps `record` values keeps the logs. [`verify_export`] proves it over a
-//! run dir: project the run, take the records out of the stream, and check
+//! run's store: project the run, take the records out of the stream, and check
 //! that they equal the stored records as JSON values, that they reload
 //! through the log readers into the same logs, and that the external
 //! records replay to the stored logs, a complete log exactly and a crash
@@ -15,14 +15,16 @@ use std::path::Path;
 
 use engine::{EventLog, EventRecord, LOG_VERSION};
 use serde_json::Value;
+use store::{Access, RunLogs};
 
 use super::{EventSource, Projection, Record, ReplayError, load_run, project_loaded};
 use crate::{
-    COORDINATOR_FILE, CoordinatorRecord, DecodedEngineLog, ExecutionId, StoredEngineRecord,
-    decode_coordinator_log, decode_engine_log, encode_engine_log,
+    CoordinatorRecord, DecodedEngineLog, ExecutionId, StoredEngineRecord,
+    decode_coordinator_records, decode_engine_records, encode_engine_record, encode_record,
+    open_run_dir,
 };
 
-/// Why a run dir's public stream does not export its logs.
+/// Why a run's public stream does not export its logs.
 #[derive(Debug, thiserror::Error)]
 pub enum ExportError {
     #[error(transparent)]
@@ -74,10 +76,10 @@ fn at_seq(seq: Option<u64>) -> String {
     seq.map(|seq| format!(" at seq {seq}")).unwrap_or_default()
 }
 
-/// Prove that a run dir's public stream exports its logs. See the module
-/// docs for what is checked.
-pub fn verify_export(run_dir: &Path) -> Result<(), ExportError> {
-    let loaded = load_run(run_dir)?;
+/// Prove that a run's public stream exports its logs. See the module docs
+/// for what is checked.
+pub async fn verify_export(logs: &dyn RunLogs) -> Result<(), ExportError> {
+    let loaded = load_run(logs).await?;
     let events = project_loaded(&loaded, &mut Projection::new());
 
     // The coordinator log: every stored record, once, in order, unchanged.
@@ -89,19 +91,18 @@ pub fn verify_export(run_dir: &Path) -> Result<(), ExportError> {
             _ => None,
         })
         .collect();
-    if let Some(difference) = first_difference(&exported, &loaded.coordinator.records)? {
+    if let Some(difference) = first_difference(&exported, &loaded.coordinator)? {
         return Err(ExportError::Coordinator {
             seq: difference.seq(),
         });
     }
-    let mut lines = Vec::new();
-    for record in &exported {
-        lines.extend(serde_json::to_vec(record)?);
-        lines.push(b'\n');
-    }
-    let reloaded = decode_coordinator_log(&run_dir.join(COORDINATOR_FILE), &lines)
+    let stored = exported
+        .iter()
+        .map(|record| encode_record(record))
+        .collect::<Result<Vec<_>, _>>()
         .map_err(ExportError::CoordinatorReload)?;
-    if reloaded.records != loaded.coordinator.records {
+    let reloaded = decode_coordinator_records(&stored).map_err(ExportError::CoordinatorReload)?;
+    if reloaded != loaded.coordinator {
         return Err(ExportError::Coordinator { seq: None });
     }
 
@@ -185,7 +186,22 @@ fn reload(
         .map(|record| (*record).clone().into_parts())
         .unzip();
     let log = EventLog::try_from_records(LOG_VERSION, records)?;
-    decode_engine_log(&encode_engine_log(&log, &times))
+    let stored = log
+        .records()
+        .iter()
+        .zip(&times)
+        .map(|(record, at)| encode_engine_record(record, *at))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| crate::EngineLogDecodeError::BadRecord { line: 0, source })?;
+    decode_engine_records(&stored)
+}
+
+/// [`verify_export`] over the run directory at `run_dir`.
+pub async fn verify_export_run_dir(run_dir: &Path) -> Result<(), ExportError> {
+    let logs = open_run_dir(run_dir, Access::Read)
+        .await
+        .map_err(ReplayError::from)?;
+    verify_export(&*logs).await
 }
 
 /// Where two record sequences part.

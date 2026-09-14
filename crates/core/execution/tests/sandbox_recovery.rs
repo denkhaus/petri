@@ -5,7 +5,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use execution::{
-    InvocationId, ResourceLedger, ResourceStore, SandboxAllocationKey, SandboxResourceRecord,
+    Access, InvocationId, OwnerId, ResourceLedger, ResourceStore, RunDirStore, RunKey, RunLogs,
+    RunStore as _, SandboxAllocationKey, SandboxResourceRecord,
 };
 use executor::{AcquireContext, Executor, Retention, SandboxLeaseId, ScopeOutcome, ScopeSpec};
 use executor_sandbox::{
@@ -13,6 +14,7 @@ use executor_sandbox::{
 };
 use ir::{RuntimeSpec, ScopeId};
 use testkit::{RunDir, container_id, container_write, is_docker_ready};
+use tokio::sync::Mutex as AsyncMutex;
 
 const LEASE: SandboxLeaseId = SandboxLeaseId::new(0);
 
@@ -92,14 +94,24 @@ impl LeaseLedger for InterruptedLedger {
 struct Fixture {
     directory: RunDir,
     scope:     ScopeSpec,
+    /// The fixture's own writer handle: it holds the run's lease for the
+    /// fixture's life, and every resource store view writes through it.
+    logs:      Arc<dyn RunLogs>,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    async fn new() -> Self {
         let directory = RunDir::new("sandbox-ledger-recovery");
         let scope = ScopeSpec::new(ScopeId::new(0), "scope-0")
             .with_runtime(RuntimeSpec::container("alpine:3.20"));
-        ResourceStore::load(directory.path().join("resources"))
+        let logs = RunDirStore::new(directory.path())
+            .open(&RunKey::new(directory.run_id()), Access::Create {
+                owner: OwnerId::mint(),
+            })
+            .await
+            .expect("the run is created");
+        ResourceStore::load(&logs)
+            .await
             .expect("the test resource store opens")
             .ensure_record(
                 SandboxAllocationKey {
@@ -111,17 +123,24 @@ impl Fixture {
                 scope.runtime.clone(),
                 None,
             )
+            .await
             .expect("the initial lease is reserved");
-        Self { directory, scope }
+        Self {
+            directory,
+            scope,
+            logs,
+        }
     }
 
-    fn store(&self) -> ResourceStore {
-        ResourceStore::load(self.directory.path().join("resources"))
+    /// A fresh view of the resource log, over the fixture's own handle.
+    async fn store(&self) -> ResourceStore {
+        ResourceStore::load(&self.logs)
+            .await
             .expect("the persisted resource store reopens")
     }
 
-    fn router(&self, retention: Retention, crash: Option<Crash>) -> RoutingExecutor {
-        let ledger = ResourceLedger::new(Arc::new(Mutex::new(self.store())));
+    async fn router(&self, retention: Retention, crash: Option<Crash>) -> RoutingExecutor {
+        let ledger = ResourceLedger::new(Arc::new(AsyncMutex::new(self.store().await)));
         let router = RoutingExecutor::local(self.directory.path(), retention)
             .with_run_id(self.directory.run_id());
         router.set_ledger(Arc::new(InterruptedLedger {
@@ -131,8 +150,9 @@ impl Fixture {
         router
     }
 
-    fn record(&self) -> SandboxResourceRecord {
+    async fn record(&self) -> SandboxResourceRecord {
         self.store()
+            .await
             .resolve(LEASE)
             .expect("the fixture lease is recorded")
             .clone()
@@ -143,8 +163,8 @@ impl Fixture {
             .delete_recorded(LEASE, self.scope.workspace_id.as_str())
             .await
             .expect("the test sandbox is deleted");
-        assert_eq!(self.record().state, LeaseState::Deleted);
-        assert_eq!(self.record().pending, None);
+        assert_eq!(self.record().await.state, LeaseState::Deleted);
+        assert_eq!(self.record().await.pending, None);
         assert!(
             container_id(&self.directory.sandbox_name(LEASE.raw()))
                 .await
@@ -159,11 +179,11 @@ async fn allocation_crashes_recover_without_replacing_the_workspace() {
         return;
     }
     for crash in [Crash::Reserved, Crash::Created] {
-        let fixture = Fixture::new();
-        let router = fixture.router(Retention::Never, Some(crash));
+        let fixture = Fixture::new().await;
+        let router = fixture.router(Retention::Never, Some(crash)).await;
         let ctx = AcquireContext::bare().with_lease(LEASE);
         assert!(router.acquire(&fixture.scope, &ctx).await.is_err());
-        assert_eq!(fixture.record().state, LeaseState::Allocating);
+        assert_eq!(fixture.record().await.state, LeaseState::Allocating);
         let name = fixture.directory.sandbox_name(LEASE.raw());
         let created = container_id(&name).await;
         if crash == Crash::Created {
@@ -174,7 +194,7 @@ async fn allocation_crashes_recover_without_replacing_the_workspace() {
         }
         drop(router);
 
-        let resumed = fixture.router(Retention::Never, None);
+        let resumed = fixture.router(Retention::Never, None).await;
         let handle = resumed.acquire(&fixture.scope, &ctx).await.unwrap();
         if let Some(created) = created {
             assert_eq!(container_id(&name).await, Some(created));
@@ -188,7 +208,7 @@ async fn allocation_crashes_recover_without_replacing_the_workspace() {
                 b"preserved"
             );
         }
-        assert_eq!(fixture.record().state, LeaseState::Live);
+        assert_eq!(fixture.record().await.state, LeaseState::Live);
         assert!(
             resumed
                 .release(handle, ScopeOutcome::Succeeded)
@@ -205,8 +225,8 @@ async fn interrupted_stop_resumes_the_same_sandbox_and_workspace() {
         return;
     }
     for crash in [Crash::StopIntent, Crash::Stopped] {
-        let fixture = Fixture::new();
-        let router = fixture.router(Retention::Always, Some(crash));
+        let fixture = Fixture::new().await;
+        let router = fixture.router(Retention::Always, Some(crash)).await;
         let ctx = AcquireContext::bare().with_lease(LEASE);
         let handle = router.acquire(&fixture.scope, &ctx).await.unwrap();
         handle
@@ -214,7 +234,7 @@ async fn interrupted_stop_resumes_the_same_sandbox_and_workspace() {
             .write_file(Path::new("before"), b"preserved")
             .await
             .unwrap();
-        let created = fixture.record().resource_id;
+        let created = fixture.record().await.resource_id;
         assert!(
             router
                 .release(handle, ScopeOutcome::Succeeded)
@@ -227,13 +247,13 @@ async fn interrupted_stop_resumes_the_same_sandbox_and_workspace() {
                 .await
                 .is_clean()
         );
-        assert_eq!(fixture.record().pending, Some(PendingIntent::Stop));
+        assert_eq!(fixture.record().await.pending, Some(PendingIntent::Stop));
         drop(router);
 
-        let resumed = fixture.router(Retention::Never, None);
+        let resumed = fixture.router(Retention::Never, None).await;
         let handle = resumed.acquire(&fixture.scope, &ctx).await.unwrap();
-        assert_eq!(fixture.record().resource_id, created);
-        assert_eq!(fixture.record().pending, None);
+        assert_eq!(fixture.record().await.resource_id, created);
+        assert_eq!(fixture.record().await.pending, None);
         assert_eq!(
             handle
                 .exec()
@@ -259,8 +279,8 @@ async fn interrupted_delete_finishes_as_a_tombstone() {
         return;
     }
     for crash in [Crash::DeleteIntent, Crash::Deleted] {
-        let fixture = Fixture::new();
-        let router = fixture.router(Retention::Never, Some(crash));
+        let fixture = Fixture::new().await;
+        let router = fixture.router(Retention::Never, Some(crash)).await;
         let ctx = AcquireContext::bare().with_lease(LEASE);
         let handle = router.acquire(&fixture.scope, &ctx).await.unwrap();
         assert!(
@@ -275,13 +295,17 @@ async fn interrupted_delete_finishes_as_a_tombstone() {
                 .await
                 .is_clean()
         );
-        assert_eq!(fixture.record().pending, Some(PendingIntent::Delete));
+        assert_eq!(fixture.record().await.pending, Some(PendingIntent::Delete));
         drop(router);
 
-        let resumed = fixture.router(Retention::Never, None);
+        let resumed = fixture.router(Retention::Never, None).await;
         assert!(resumed.acquire(&fixture.scope, &ctx).await.is_err());
-        assert_eq!(fixture.record().state, LeaseState::Deleted, "{crash:?}");
-        assert_eq!(fixture.record().pending, None);
+        assert_eq!(
+            fixture.record().await.state,
+            LeaseState::Deleted,
+            "{crash:?}"
+        );
+        assert_eq!(fixture.record().await.pending, None);
         fixture.cleanup(&resumed).await;
     }
 }
@@ -291,8 +315,8 @@ async fn recovery_refuses_a_changed_fingerprint_or_a_lost_workspace() {
     if !is_docker_ready().await {
         return;
     }
-    let fixture = Fixture::new();
-    let router = fixture.router(Retention::Never, None);
+    let fixture = Fixture::new().await;
+    let router = fixture.router(Retention::Never, None).await;
     let ctx = AcquireContext::bare().with_lease(LEASE);
     let handle = router.acquire(&fixture.scope, &ctx).await.unwrap();
     assert!(
@@ -301,34 +325,40 @@ async fn recovery_refuses_a_changed_fingerprint_or_a_lost_workspace() {
             .await
             .is_clean()
     );
-    let original = fixture.record();
+    let original = fixture.record().await;
     drop(router);
     fixture
         .store()
+        .await
         .update(LEASE, |record| {
             record.fingerprint = Some("another-daemon".into());
         })
+        .await
         .unwrap();
-    let resumed = fixture.router(Retention::Never, None);
+    let resumed = fixture.router(Retention::Never, None).await;
     let error = resumed.acquire(&fixture.scope, &ctx).await.unwrap_err();
     assert!(error.to_string().contains("another-daemon"), "{error}");
     drop(resumed);
 
     fixture
         .store()
+        .await
         .update(LEASE, |record| {
             record.fingerprint.clone_from(&original.fingerprint);
         })
+        .await
         .unwrap();
-    let resumed = fixture.router(Retention::Never, None);
+    let resumed = fixture.router(Retention::Never, None).await;
     fixture.cleanup(&resumed).await;
     drop(resumed);
     // A resource lost outside Petri leaves its last confirmed live record.
     fixture
         .store()
+        .await
         .update(LEASE, |record| *record = original)
+        .await
         .unwrap();
-    let resumed = fixture.router(Retention::Never, None);
+    let resumed = fixture.router(Retention::Never, None).await;
     let error = resumed.acquire(&fixture.scope, &ctx).await.unwrap_err();
     assert!(error.to_string().contains("workspace was lost"), "{error}");
     fixture.cleanup(&resumed).await;
@@ -341,24 +371,24 @@ async fn release_reconciles_an_allocation_without_a_recorded_resource_id() {
     }
     for crash in [Crash::Reserved, Crash::Created] {
         for retention in [Retention::Never, Retention::Always] {
-            let fixture = Fixture::new();
-            let router = fixture.router(retention, Some(crash));
+            let fixture = Fixture::new().await;
+            let router = fixture.router(retention, Some(crash)).await;
             let ctx = AcquireContext::bare().with_lease(LEASE);
             assert!(router.acquire(&fixture.scope, &ctx).await.is_err());
-            assert!(fixture.record().resource_id.is_none());
+            assert!(fixture.record().await.resource_id.is_none());
             router.shutdown().await;
             drop(router);
 
-            let resumed = fixture.router(retention, None);
+            let resumed = fixture.router(retention, None).await;
             let report = resumed.release_lease(LEASE, ScopeOutcome::Failed).await;
             assert!(report.is_clean(), "{report:?}");
             let name = fixture.directory.sandbox_name(LEASE.raw());
             if crash == Crash::Created && retention == Retention::Always {
-                assert_eq!(fixture.record().state, LeaseState::Stopped);
+                assert_eq!(fixture.record().await.state, LeaseState::Stopped);
                 assert!(container_id(&name).await.is_some());
                 assert!(!testkit::container_is_running(&name).await);
             } else {
-                assert_eq!(fixture.record().state, LeaseState::Deleted);
+                assert_eq!(fixture.record().await.state, LeaseState::Deleted);
                 assert!(container_id(&name).await.is_none());
             }
             fixture.cleanup(&resumed).await;
@@ -373,8 +403,8 @@ async fn release_finishes_a_pending_delete_even_when_retention_changes() {
         return;
     }
     for crash in [Crash::DeleteIntent, Crash::Deleted] {
-        let fixture = Fixture::new();
-        let router = fixture.router(Retention::Never, Some(crash));
+        let fixture = Fixture::new().await;
+        let router = fixture.router(Retention::Never, Some(crash)).await;
         let ctx = AcquireContext::bare().with_lease(LEASE);
         let handle = router.acquire(&fixture.scope, &ctx).await.unwrap();
         assert!(
@@ -389,11 +419,11 @@ async fn release_finishes_a_pending_delete_even_when_retention_changes() {
                 .await
                 .is_clean()
         );
-        assert_eq!(fixture.record().pending, Some(PendingIntent::Delete));
+        assert_eq!(fixture.record().await.pending, Some(PendingIntent::Delete));
         router.shutdown().await;
         drop(router);
 
-        let resumed = fixture.router(Retention::Always, None);
+        let resumed = fixture.router(Retention::Always, None).await;
         let report = resumed.release_lease(LEASE, ScopeOutcome::Failed).await;
         assert!(report.is_clean(), "{report:?}");
         fixture.cleanup(&resumed).await;

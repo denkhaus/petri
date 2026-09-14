@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use petri::engine::Event;
-use petri::execution::events::{Derived, RunEvent, replay_run};
+use petri::execution::events::{Derived, RunEvent, replay_run_dir};
 use serde_json::{Map, Value, json};
 use testkit::backend_event;
 
@@ -57,8 +57,8 @@ pub(crate) fn provider_error(message: &str) -> Value {
 }
 
 /// The public events of a finished run.
-pub(crate) fn public_events(run_dir: &Path) -> Vec<RunEvent> {
-    replay_run(run_dir).expect("the run replays")
+pub(crate) async fn public_events(run_dir: &Path) -> Vec<RunEvent> {
+    replay_run_dir(run_dir).await.expect("the run replays")
 }
 
 /// One agent event of the public stream, with its attribution.

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use engine::{Event, EventOrigin};
 use execution::events::{
     CollectingSink, EventId, EventProjector, EventSource, Record, RecordOrigin, RunEvent,
-    replay_run, verify_export,
+    replay_run_dir, verify_export_run_dir,
 };
 use execution::{CoordinatorEvent, host, read_engine_log};
 use ir::{GraphBuilder, RunStatus, ScopeId};
@@ -83,8 +83,12 @@ async fn a_run_s_stream_carries_its_stored_records_unchanged() {
     );
 
     // And it can be run after the fact over the run dir alone.
-    verify_export(dir.path()).expect("the stream exports its logs");
-    let events = replay_run(dir.path()).expect("the run dir projects");
+    verify_export_run_dir(dir.path())
+        .await
+        .expect("the stream exports its logs");
+    let events = replay_run_dir(dir.path())
+        .await
+        .expect("the run dir projects");
     let exported = exported_records(&events);
 
     let coordinator = stored_lines(&dir.path().join("coordinator.jsonl"));
@@ -174,11 +178,13 @@ async fn a_crash_prefix_exports_what_is_stored_and_resume_stores_the_rest() {
     let prefix: Vec<&str> = text.lines().take(keep).collect();
     fs::write(&log, format!("{}\n", prefix.join("\n"))).expect("writes");
     let stored = stored_lines(&log);
-    assert_eq!(stored.len(), keep - 1);
+    assert_eq!(stored.len(), keep);
     assert!(stored.len() < whole.len());
     // The coordinator recorded the execution's exit, but the log is a
     // prefix now: complete logs must match exactly, so the check says so.
-    let error = verify_export(dir.path()).expect_err("a finished execution's log is short");
+    let error = verify_export_run_dir(dir.path())
+        .await
+        .expect_err("a finished execution's log is short");
     assert!(error.to_string().contains("prefix"), "{error}");
     // Without the exit the prefix is what a crash leaves, and exports.
     let coordinator = dir.path().join("coordinator.jsonl");
@@ -192,9 +198,13 @@ async fn a_crash_prefix_exports_what_is_stored_and_resume_stores_the_rest() {
         })
         .collect();
     fs::write(&coordinator, format!("{}\n", lines.join("\n"))).expect("writes");
-    verify_export(dir.path()).expect("a crash prefix exports what it holds");
+    verify_export_run_dir(dir.path())
+        .await
+        .expect("a crash prefix exports what it holds");
 
-    let events = replay_run(dir.path()).expect("the run dir projects");
+    let events = replay_run_dir(dir.path())
+        .await
+        .expect("the run dir projects");
     let exported = exported_records(&events);
     let execution = *exported
         .keys()
@@ -216,7 +226,9 @@ async fn a_crash_prefix_exports_what_is_stored_and_resume_stores_the_rest() {
     // Resume with a primed projector: the regenerated suffix and the rest
     // of the run arrive live.
     let sink = Arc::new(CollectingSink::default());
-    let projector = EventProjector::primed(sink.clone(), dir.path()).expect("primes");
+    let projector = EventProjector::primed_run_dir(sink.clone(), dir.path())
+        .await
+        .expect("primes");
     let resumed_at = recorded_now();
     let report = host::resume_configured(&rt, Vec::new(), vec![projector.clone()], |_, _| {})
         .await
@@ -243,7 +255,8 @@ async fn a_crash_prefix_exports_what_is_stored_and_resume_stores_the_rest() {
         .min()
         .expect("live engine events");
     assert_eq!(first_live, last_stored + 1);
-    let replayed: BTreeMap<EventId, RunEvent> = replay_run(dir.path())
+    let replayed: BTreeMap<EventId, RunEvent> = replay_run_dir(dir.path())
+        .await
         .expect("the resumed run dir projects")
         .into_iter()
         .map(|event| (event.id, event))
@@ -257,7 +270,9 @@ async fn a_crash_prefix_exports_what_is_stored_and_resume_stores_the_rest() {
             event.id
         );
     }
-    verify_export(dir.path()).expect("the resumed run exports");
+    verify_export_run_dir(dir.path())
+        .await
+        .expect("the resumed run exports");
     assert!(replayed.values().any(|event| matches!(
         event.coordinator(),
         Some(CoordinatorEvent::RunFinished { .. })

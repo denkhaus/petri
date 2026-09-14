@@ -14,10 +14,16 @@
 //! hold exactly the lines a public event carries under `record`. A torn
 //! final line (EOF before its newline) is dropped: a writer truncates it
 //! before it appends, a reader leaves the file alone.
+//!
+//! Durability: every append is written and flushed before it returns, so a
+//! process crash cannot lose it. The coordinator and resource logs are also
+//! synced to disk per append, as their records are few and decide the run;
+//! an engine log is synced when the handle closes, since its records are
+//! many and replay regenerates what a power loss takes from its tail.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write as _};
+use std::io::{self, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
@@ -44,10 +50,14 @@ pub fn execution_relative_dir(execution: ExecutionId) -> PathBuf {
     Path::new(EXECUTIONS_DIR).join(format!("{:016x}", execution.raw()))
 }
 
-/// The store's own index under the run directory.
+/// The store's own index under the run directory: the run's key, and the
+/// owner holding the writer lease while one does, so a refused open can
+/// name the holder.
 #[derive(Serialize, Deserialize)]
 struct RunFile {
-    key: RunKey,
+    key:   RunKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner: Option<OwnerId>,
 }
 
 /// A store of one run, the one under `run_dir`.
@@ -73,15 +83,31 @@ impl RunDirStore {
     /// The key of the run stored here, read from `run.json`; `None` when
     /// the directory holds no run.
     pub fn stored_key(&self) -> Result<Option<RunKey>, StoreError> {
+        Ok(self.run_file()?.map(|run| run.key))
+    }
+
+    fn run_file(&self) -> Result<Option<RunFile>, StoreError> {
         let path = self.root.join(RUN_FILE);
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(self.io("read run.json", source)),
         };
-        let run: RunFile = serde_json::from_slice(&bytes)
-            .map_err(|source| StoreError::backend(self.locator(), "read run.json", source))?;
-        Ok(Some(run.key))
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|source| StoreError::backend(self.locator(), "read run.json", source))
+    }
+
+    /// Open the run stored here, whatever its key: what a command given a
+    /// run directory does. A directory with no run is [`StoreError::NotFound`].
+    pub async fn open_stored(&self, access: Access) -> Result<Arc<dyn RunLogs>, StoreError> {
+        let key = self.stored_key()?.ok_or_else(|| {
+            self.io(
+                "read run.json",
+                io::Error::new(io::ErrorKind::NotFound, "the directory holds no run"),
+            )
+        })?;
+        self.open(&key, access).await
     }
 
     fn locator(&self) -> String {
@@ -102,16 +128,31 @@ impl RunDirStore {
         }
     }
 
-    fn acquire_lease(&self, file: &File, owner: &OwnerId) -> Result<(), StoreError> {
+    /// Take the writer lease: the lock on `run.json`, then the holder's
+    /// owner written into it so a refused open can name who holds the run.
+    fn acquire_lease(
+        &self,
+        file: &mut File,
+        key: &RunKey,
+        owner: &OwnerId,
+    ) -> Result<(), StoreError> {
         file.try_lock().map_err(|source| match source {
             fs::TryLockError::WouldBlock => StoreError::Leased {
                 locator: self.locator(),
-                // The holder is another process; its owner id is not
-                // readable through the lock.
-                owner:   owner.clone(),
+                owner:   self
+                    .run_file()
+                    .ok()
+                    .flatten()
+                    .and_then(|run| run.owner)
+                    .unwrap_or_else(|| OwnerId::new("another process")),
             },
             fs::TryLockError::Error(source) => self.io("lock run.json", source),
+        })?;
+        write_run_file(file, &RunFile {
+            key:   key.clone(),
+            owner: Some(owner.clone()),
         })
+        .map_err(|source| self.io("write run.json", source))
     }
 }
 
@@ -128,7 +169,7 @@ impl RunStore for RunDirStore {
                 key:   key.clone(),
                 owner: None,
                 state: Arc::new(WriterState::new(self.root.clone())),
-                _lock: None,
+                lock:  Mutex::new(None),
             }));
         };
         let mut lease = lock(&self.lease);
@@ -169,17 +210,12 @@ impl RunStore for RunDirStore {
                             self.io("create run.json", source)
                         }
                     })?;
-                self.acquire_lease(&file, owner)?;
-                let bytes = serde_json::to_vec_pretty(&RunFile { key: key.clone() })
-                    .map_err(|source| StoreError::backend(self.locator(), "encode", source))?;
-                file.write_all(&bytes)
-                    .and_then(|()| file.flush())
-                    .and_then(|()| file.sync_data())
-                    .map_err(|source| self.io("write run.json", source))?;
+                self.acquire_lease(&mut file, key, owner)?;
                 file
             }
             Access::Write { .. } => {
-                let file = OpenOptions::new()
+                self.check_key(key)?;
+                let mut file = OpenOptions::new()
                     .read(true)
                     .write(true)
                     .open(&path)
@@ -193,8 +229,7 @@ impl RunStore for RunDirStore {
                             self.io("open run.json", source)
                         }
                     })?;
-                self.acquire_lease(&file, owner)?;
-                self.check_key(key)?;
+                self.acquire_lease(&mut file, key, owner)?;
                 file
             }
             Access::Read => unreachable!("a read open names no owner"),
@@ -203,7 +238,7 @@ impl RunStore for RunDirStore {
             key:   key.clone(),
             owner: Some(owner.clone()),
             state: Arc::new(WriterState::new(self.root.clone())),
-            _lock: Some(lock_file),
+            lock:  Mutex::new(Some(lock_file)),
         });
         *lease = Some((owner.clone(), Arc::downgrade(&handle)));
         Ok(handle)
@@ -311,7 +346,10 @@ impl WriterState {
         head.file
             .write_all(&bytes)
             .and_then(|()| head.file.flush())
-            .and_then(|()| head.file.sync_data())
+            .and_then(|()| match log {
+                LogId::Coordinator | LogId::Resources => head.file.sync_data(),
+                LogId::Execution(_) => Ok(()),
+            })
             .map_err(|source| self.io("append", source))?;
         head.next += fresh.len() as u64;
         Ok(())
@@ -364,6 +402,15 @@ impl WriterState {
     }
 }
 
+impl Drop for WriterState {
+    fn drop(&mut self) {
+        // The engine logs' one sync, when the run's handle closes.
+        for head in lock(&self.heads).values() {
+            let _ = lock(head).file.sync_data();
+        }
+    }
+}
+
 /// Publish `bytes` at `path`: a temp write with fsync, a rename, and a
 /// parent-directory sync, so a crash leaves the file whole or absent.
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), (&'static str, io::Error)> {
@@ -393,7 +440,31 @@ pub struct RunDirLogs {
     owner: Option<OwnerId>,
     state: Arc<WriterState>,
     /// The lease: `run.json`, locked for the handle's life.
-    _lock: Option<File>,
+    lock:  Mutex<Option<File>>,
+}
+
+impl Drop for RunDirLogs {
+    fn drop(&mut self) {
+        // Clear the holder before the lock ends with the file. Best effort:
+        // a crash leaves the old owner's name, which the next holder
+        // overwrites when it takes the lease.
+        if let Some(mut file) = lock(&self.lock).take() {
+            let _ = write_run_file(&mut file, &RunFile {
+                key:   self.key.clone(),
+                owner: None,
+            });
+        }
+    }
+}
+
+/// Rewrite `run.json` in place, whole, and sync it.
+fn write_run_file(file: &mut File, run: &RunFile) -> io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(run).map_err(io::Error::other)?;
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(&bytes)?;
+    file.flush()?;
+    file.sync_data()
 }
 
 impl RunDirLogs {

@@ -12,10 +12,10 @@ use std::{fs, thread};
 
 use execution::events::{
     CollectingSink, EventProjector, ForkDisposition, ForkOccurrence, RunEvent, ViewEvent,
-    replay_run,
+    replay_run_dir,
 };
 use execution::host::{self, HostRun};
-use execution::inspect::{InvocationInspection, RunInspection, inspect_run};
+use execution::inspect::{InvocationInspection, RunInspection, inspect_run_dir};
 use execution::{CoordinatorEvent, ExecutionObserver};
 use fabro_steps::blobs::{holds_ref, hydrate};
 use fabro_steps::{
@@ -267,7 +267,7 @@ fn child_invocation(events: &[RunEvent], target: &str) -> u64 {
 
 /// The replayed stream equals the live one, identity for identity, with
 /// the live-only `observed_at` set aside.
-fn assert_replay_matches(dir: &Path, live: &[RunEvent]) {
+async fn assert_replay_matches(dir: &Path, live: &[RunEvent]) {
     let mut live: Vec<RunEvent> = live
         .iter()
         .cloned()
@@ -277,7 +277,7 @@ fn assert_replay_matches(dir: &Path, live: &[RunEvent]) {
         })
         .collect();
     live.sort_by_key(|event| event.id);
-    let mut replayed = replay_run(dir).expect("replays");
+    let mut replayed = replay_run_dir(dir).await.expect("replays");
     replayed.sort_by_key(|event| event.id);
     assert_eq!(
         replayed.len(),
@@ -317,8 +317,12 @@ fn published_results(report: &ExecutionReport) -> Vec<Value> {
         .expect("parallel.results published")
 }
 
-fn invocation_count(dir: &Path) -> usize {
-    inspect_run(dir).expect("inspects").invocations.len()
+async fn invocation_count(dir: &Path) -> usize {
+    inspect_run_dir(dir)
+        .await
+        .expect("inspects")
+        .invocations
+        .len()
 }
 
 const FINDERS: &str = r#"
@@ -377,7 +381,7 @@ async fn static_branches_return_envelopes_that_never_merge_into_the_parent() {
     .expect("stdin is the results JSON");
     assert_eq!(stdin, Value::Array(results));
     assert_eq!(
-        invocation_count(dir.path()),
+        invocation_count(dir.path()).await,
         3,
         "the root and one child per branch"
     );
@@ -595,7 +599,7 @@ async fn duplicate_targets_are_separate_branches_with_their_own_index() {
     assert_eq!(results[0]["index"], json!(0));
     assert_eq!(results[1]["index"], json!(1));
     assert_eq!(status_of(&report, "a.branch1").as_deref(), Some("success"));
-    assert_eq!(invocation_count(dir.path()), 3);
+    assert_eq!(invocation_count(dir.path()).await, 3);
 
     let starts = fork_starts(&events);
     assert_eq!(starts.len(), 1, "{starts:#?}");
@@ -615,7 +619,7 @@ async fn duplicate_targets_are_separate_branches_with_their_own_index() {
         format!("branch:fork@{firing}:0:a"),
         format!("branch:fork@{firing}:1:a"),
     ]);
-    assert_replay_matches(dir.path(), &events);
+    assert_replay_matches(dir.path(), &events).await;
 }
 
 const FOR_EACH: &str = r#"
@@ -653,7 +657,7 @@ async fn an_empty_for_each_list_joins_with_no_branches_and_no_child() {
     // `cat` of the results JSON, byte for byte: no newline the script did
     // not write.
     assert_eq!(output_of(&report, "report")["stdout"], json!("[]"));
-    assert_eq!(invocation_count(dir.path()), 1, "no child ran");
+    assert_eq!(invocation_count(dir.path()).await, 1, "no child ran");
 
     let forks: Vec<(String, Vec<u32>)> = events
         .iter()
@@ -710,7 +714,7 @@ async fn an_empty_for_each_list_joins_with_no_branches_and_no_child() {
         BranchRole::None,
         "the placeholder clone is no member of any branch"
     );
-    assert_replay_matches(dir.path(), &events);
+    assert_replay_matches(dir.path(), &events).await;
 }
 
 #[tokio::test]
@@ -733,7 +737,7 @@ async fn for_each_items_are_labelled_and_ordered_by_index() {
         assert_eq!(envelope["item_label"], json!(label));
         assert_eq!(envelope["status"], json!("succeeded"));
     }
-    assert_eq!(invocation_count(dir.path()), 4);
+    assert_eq!(invocation_count(dir.path()).await, 4);
 }
 
 /// A fork visited twice is two fork occurrences: each visit's `fork_started`,
@@ -785,7 +789,11 @@ async fn a_repeated_fork_publishes_results_per_visit_with_its_own_children() {
         results[0]["context_updates"]["command.output"],
         json!("second\n")
     );
-    assert_eq!(invocation_count(dir.path()), 5, "two children per visit");
+    assert_eq!(
+        invocation_count(dir.path()).await,
+        5,
+        "two children per visit"
+    );
 
     let starts = fork_starts(&events);
     assert_eq!(starts.len(), 2, "{starts:#?}");
@@ -843,7 +851,7 @@ async fn a_repeated_fork_publishes_results_per_visit_with_its_own_children() {
         format!("branch:fork@{second_firing}:0:a"),
         format!("branch:fork@{second_firing}:1:b"),
     ]);
-    assert_replay_matches(dir.path(), &events);
+    assert_replay_matches(dir.path(), &events).await;
 }
 
 /// An inner fork inside a branch is its own occurrence in the branch's child
@@ -898,7 +906,7 @@ async fn a_nested_fork_runs_inside_its_branch_and_reports_its_own_results() {
         json!("q\n")
     );
     // Root, x, inner, p, q.
-    assert_eq!(invocation_count(dir.path()), 5);
+    assert_eq!(invocation_count(dir.path()).await, 5);
 
     // The outer fork starts first; the inner one, inside branch 1's child,
     // starts and closes before the outer join fires.
@@ -932,7 +940,7 @@ async fn a_nested_fork_runs_inside_its_branch_and_reports_its_own_results() {
     };
     assert_eq!(custom_occurrence(&of("outer")), outer.firing.raw());
     assert_eq!(custom_occurrence(&of("inner")), inner.firing.raw());
-    assert_replay_matches(dir.path(), &events);
+    assert_replay_matches(dir.path(), &events).await;
 }
 
 #[tokio::test]
@@ -965,7 +973,7 @@ async fn cancelling_the_run_settles_every_branch_child() {
     })
     .await;
     assert_eq!(report.status, RunStatus::Cancelled);
-    let inspection = inspect_run(dir.path()).expect("inspects");
+    let inspection = inspect_run_dir(dir.path()).await.expect("inspects");
     assert_eq!(inspection.invocations.len(), 3);
     for invocation in &inspection.invocations {
         assert_eq!(
@@ -1061,7 +1069,7 @@ async fn a_clean_cancel_during_work_closes_the_branches_and_the_fork() {
             "a clean cancel never escalates invocation {invocation}"
         );
     }
-    let inspection = inspect_run(dir.path()).expect("inspects");
+    let inspection = inspect_run_dir(dir.path()).await.expect("inspects");
     assert_eq!(inspection.invocations.len(), 3);
     assert!(
         inspection
@@ -1069,7 +1077,7 @@ async fn a_clean_cancel_during_work_closes_the_branches_and_the_fork() {
             .iter()
             .all(|invocation| invocation.status == "finished")
     );
-    assert_replay_matches(dir.path(), &events);
+    assert_replay_matches(dir.path(), &events).await;
 }
 
 /// One slot, two branches: the cancel arrives while the second child is
@@ -1144,7 +1152,7 @@ async fn a_cancel_before_admission_records_a_branch_that_never_started() {
         }),
         "no attempt of b's child started"
     );
-    assert_replay_matches(dir.path(), &events);
+    assert_replay_matches(dir.path(), &events).await;
 }
 
 /// The cancel arrives after one branch finished and before the fan-in: the
@@ -1202,7 +1210,7 @@ async fn a_cancel_before_the_fan_in_keeps_the_finished_branch_result() {
         report.state.run_context().get("parallel.results").is_none(),
         "the fan-in never published"
     );
-    assert_replay_matches(dir.path(), &events);
+    assert_replay_matches(dir.path(), &events).await;
 }
 
 /// A second cancel escalates to a kill while the children ignore the polite
@@ -1262,7 +1270,7 @@ async fn a_kill_after_the_cancel_closes_the_fork_as_killed() {
             "the kill reached `{target}`'s child"
         );
     }
-    assert_replay_matches(dir.path(), &events);
+    assert_replay_matches(dir.path(), &events).await;
 }
 
 /// Keep `lines` of a JSONL file up to and including the first line `keep`
@@ -1320,7 +1328,7 @@ async fn resume_keeps_a_finished_branch_and_finishes_the_unfinished_one() {
         "{:?}",
         report.state.errors()
     );
-    let inspection = inspect_run(dir.path()).expect("inspects");
+    let inspection = inspect_run_dir(dir.path()).await.expect("inspects");
     let child_of = |slot: &str| {
         inspection
             .invocations
@@ -1330,10 +1338,10 @@ async fn resume_keeps_a_finished_branch_and_finishes_the_unfinished_one() {
             .expect("the branch child")
     };
     let (child_a, child_b) = (child_of(":a"), child_of(":b"));
+    // A branch child's first execution carries the child's own id.
     let log_of = |invocation: u64| {
-        dir.path().join(format!(
-            "invocations/{invocation:016x}/executions/{invocation:016x}/events.jsonl"
-        ))
+        dir.path()
+            .join(format!("executions/{invocation:016x}/events.jsonl"))
     };
     let a_log_before = fs::read_to_string(log_of(child_a)).expect("a's log");
 
@@ -1356,7 +1364,7 @@ async fn resume_keeps_a_finished_branch_and_finishes_the_unfinished_one() {
         "{:?}",
         resumed.state.errors()
     );
-    let inspection = inspect_run(dir.path()).expect("inspects");
+    let inspection = inspect_run_dir(dir.path()).await.expect("inspects");
     assert_eq!(
         inspection.invocations.len(),
         3,
@@ -1440,7 +1448,7 @@ async fn a_fifty_item_fork_declares_its_children_from_references() {
         "{:?}",
         report.state.errors()
     );
-    let inspection = inspect_run(dir.path()).expect("inspects");
+    let inspection = inspect_run_dir(dir.path()).await.expect("inspects");
     let children = children_of(&inspection, "fan");
     assert_eq!(children.len(), 50);
     let mut list_refs: BTreeSet<String> = BTreeSet::new();
@@ -1561,9 +1569,7 @@ async fn a_resumed_run_reads_the_offloaded_results_after_the_fork() {
     // result (the root's exit, result and the run's finish are gone); the
     // root log ends before the report finished.
     drop_last_lines(&dir.path().join("coordinator.jsonl"), 3);
-    let root_log = dir
-        .path()
-        .join("invocations/0000000000000000/executions/0000000000000000/events.jsonl");
+    let root_log = dir.path().join("executions/0000000000000000/events.jsonl");
     truncate_before(&root_log, |line| {
         line.contains("step.finished") && line.contains("\"stdout\":\"[{")
     });
@@ -1576,7 +1582,7 @@ async fn a_resumed_run_reads_the_offloaded_results_after_the_fork() {
         resumed.state.errors()
     );
     assert_eq!(
-        invocation_count(dir.path()),
+        invocation_count(dir.path()).await,
         61,
         "no branch was declared again"
     );
@@ -1617,7 +1623,7 @@ async fn two_forks_in_sequence_keep_every_child_small() {
         "{:?}",
         report.state.errors()
     );
-    let inspection = inspect_run(dir.path()).expect("inspects");
+    let inspection = inspect_run_dir(dir.path()).await.expect("inspects");
     assert_eq!(inspection.invocations.len(), 121);
     let second = children_of(&inspection, "second");
     assert_eq!(second.len(), 60);

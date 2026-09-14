@@ -1,18 +1,19 @@
-//! Acknowledged progress against the real engine-log writer: when
-//! `send_acked` returns, the record is in `events.jsonl`, so a driver that
-//! dies right after leaves it on disk for the resume to load — and the
-//! attempt whose finish never landed runs again.
+//! Acknowledged progress against the real store writer: when `send_acked`
+//! returns, the record is in the run's store, so a driver that dies right
+//! after leaves it there for the resume to load — and the attempt whose
+//! finish never landed runs again.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use execution::{JsonlEngineLog, read_engine_log};
+use execution::{ExecutionId, ExecutionLogWriter, StoreWriter, read_execution_log};
 use ir::{GraphBuilder, Outcome, RunStatus, ScopeId, StepEvent};
 use runtime::driver::{Driver, EventObserver, RunConfig};
 use runtime::engine::{Event, EventLog, verify_replay};
 use runtime::executor::MapSecrets;
 use runtime::executor::sandbox::HostExecutor;
 use runtime::steps::{Registry, StepCtx, StepRunner};
+use runtime::store::{Access, OwnerId, RunDirStore, RunKey, RunStore as _};
 use serde_json::json;
 use testkit::RunDir;
 use tokio::sync::Notify;
@@ -83,13 +84,22 @@ fn markers(log: &EventLog) -> usize {
 #[tokio::test]
 async fn an_acknowledged_record_is_on_disk_when_the_driver_dies() {
     let dir = RunDir::new("durable-ack-crash");
-    let path = dir.path().join("events.jsonl");
+    let store = RunDirStore::new(dir.path());
+    let key = RunKey::new("durable-ack");
+    let logs = store
+        .open(&key, Access::Create {
+            owner: OwnerId::new("first"),
+        })
+        .await
+        .expect("the run is created");
+    let execution = ExecutionId::new(0);
     let mut b = GraphBuilder::new();
     b.add_step("work", ScopeId::new(0), PARKING);
     let graph = b.build();
     let acked = Arc::new(Notify::new());
 
-    let writer = Arc::new(JsonlEngineLog::create(&path).expect("the log file"));
+    let store_writer = StoreWriter::start(&logs);
+    let writer = Arc::new(ExecutionLogWriter::new(store_writer.clone(), execution, 0));
     let driver = Driver::new(
         graph.clone(),
         Arc::new(HostExecutor::new(dir.path())),
@@ -106,13 +116,15 @@ async fn an_acknowledged_record_is_on_disk_when_the_driver_dies() {
     run.abort();
     let _ = run.await;
     drop(writer);
+    drop(store_writer);
 
-    let decoded = read_engine_log(&path).expect("the file decodes");
-    assert!(!decoded.torn, "every record was written whole");
+    let decoded = read_execution_log(&*logs, execution)
+        .await
+        .expect("the stored log decodes");
     assert_eq!(
         markers(&decoded.log),
         1,
-        "the acknowledged record is in the file the crash left behind"
+        "the acknowledged record is in the store the crash left behind"
     );
     let firing = decoded
         .log
@@ -124,7 +136,12 @@ async fn an_acknowledged_record_is_on_disk_when_the_driver_dies() {
         .expect("the attempt started");
 
     let high_water = decoded.log.len() as u64;
-    let writer = Arc::new(JsonlEngineLog::append(&path, high_water).expect("reopened"));
+    let store_writer = StoreWriter::start(&logs);
+    let writer = Arc::new(ExecutionLogWriter::new(
+        store_writer.clone(),
+        execution,
+        high_water,
+    ));
     let (driver, info) = Driver::resume(
         graph.clone(),
         decoded.log,
@@ -151,8 +168,10 @@ async fn an_acknowledged_record_is_on_disk_when_the_driver_dies() {
         report.observer_errors
     );
 
-    let complete = read_engine_log(&path).expect("the file decodes");
-    assert_eq!(complete.log, report.state.log, "the file is the log");
+    let complete = read_execution_log(&*logs, execution)
+        .await
+        .expect("the stored log decodes");
+    assert_eq!(complete.log, report.state.log, "the store holds the log");
     assert_eq!(
         markers(&complete.log),
         2,

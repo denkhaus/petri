@@ -9,7 +9,7 @@ use execution::prune::prune;
 use execution::{
     CallSite, Coordinator, CoordinatorEvent, CoordinatorInvocationClient, CoordinatorOptions,
     ExecutionId, GraphDigest, InvocationClient as _, InvocationId, InvocationRequest, LeaseState,
-    ResourceStore, SandboxMode, SecretBindings, decode_coordinator_log, read_engine_log,
+    ResourceStore, SandboxMode, SecretBindings, read_coordinator_log, read_engine_log,
 };
 use executor::Retention;
 use ir::{
@@ -45,8 +45,10 @@ fn upload_graph(fragment: &GraphFragment) -> ir::Graph {
     graph.build()
 }
 
-fn resources(directory: &RunDir) -> ResourceStore {
-    ResourceStore::load(directory.path().join("resources")).expect("resource store")
+async fn resources(directory: &RunDir) -> ResourceStore {
+    ResourceStore::load(&testkit::read_run_dir(directory.path()).await)
+        .await
+        .expect("resource store")
 }
 
 fn retained_runtime(directory: &RunDir) -> Runtime {
@@ -73,9 +75,11 @@ async fn a_dynamic_scope_resumes_its_durable_lease_and_rejects_corrupt_provenanc
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .unwrap();
     let graph = coordinator
         .register_graph(&upload_graph(&fragment))
+        .await
         .unwrap();
     assert_eq!(
         coordinator
@@ -94,11 +98,11 @@ async fn a_dynamic_scope_resumes_its_durable_lease_and_rejects_corrupt_provenanc
         .unwrap()
         .firing;
     let events_path = coordinator
-        .store()
-        .execution_dir(InvocationId::ROOT, ExecutionId::new(0))
+        .execution_dir(ExecutionId::new(0))
         .join("events.jsonl");
     coordinator.finish().await;
     let before = resources(&directory)
+        .await
         .records()
         .find(|record| matches!(record.allocation.scope, ScopeIdentity::Spliced(_)))
         .unwrap()
@@ -109,10 +113,11 @@ async fn a_dynamic_scope_resumes_its_durable_lease_and_rejects_corrupt_provenanc
     // Crash after the dynamic step starts: its introducing upload remains
     // durable, but neither that step's result nor invocation completion does.
     let coordinator_path = directory.path().join("coordinator.jsonl");
-    let decoded =
-        decode_coordinator_log(&coordinator_path, &fs::read(&coordinator_path).unwrap()).unwrap();
+    let decoded = read_coordinator_log(&*testkit::read_run_dir(directory.path()).await)
+        .await
+        .unwrap();
     let mut prefix = Vec::new();
-    for record in decoded.records {
+    for record in decoded {
         serde_json::to_writer(&mut prefix, &record).unwrap();
         prefix.push(b'\n');
         if matches!(record.body, CoordinatorEvent::ExecutionDeclared { .. }) {
@@ -133,7 +138,7 @@ async fn a_dynamic_scope_resumes_its_durable_lease_and_rejects_corrupt_provenanc
         }
     }
     fs::write(&events_path, prefix).unwrap();
-    let (mut coordinator, _) = Coordinator::resume(
+    let mut coordinator = Coordinator::resume(
         runtime.prepare_run(directory.path()),
         Vec::new(),
         CoordinatorOptions::default(),
@@ -149,7 +154,7 @@ async fn a_dynamic_scope_resumes_its_durable_lease_and_rejects_corrupt_provenanc
         RunStatus::Success
     );
     coordinator.finish().await;
-    let after = resources(&directory);
+    let after = resources(&directory).await;
     assert_eq!(after.records().count(), 2);
     assert_eq!(
         after.resolve(before.lease).unwrap().resource_id,
@@ -167,7 +172,8 @@ async fn a_dynamic_scope_resumes_its_durable_lease_and_rejects_corrupt_provenanc
     // An arbitrary runtime or originating execution is not sufficient proof
     // that a dynamic resource belonged to this invocation.
     for corrupt_runtime in [false, true] {
-        let mut store = resources(&directory);
+        let logs = testkit::write_run_dir(directory.path()).await;
+        let mut store = ResourceStore::load(&logs).await.unwrap();
         store
             .update(before.lease, |record| {
                 record.introduced_by = Some(if corrupt_runtime {
@@ -179,7 +185,10 @@ async fn a_dynamic_scope_resumes_its_durable_lease_and_rejects_corrupt_provenanc
                     record.runtime.requirements.push("changed".into());
                 }
             })
+            .await
             .unwrap();
+        drop(store);
+        drop(logs);
         assert!(
             Coordinator::resume(
                 runtime.prepare_run(directory.path()),
@@ -289,6 +298,7 @@ async fn reordered_dynamic_scopes_keep_their_workspaces_across_restart() {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .unwrap();
     let mut graph = GraphBuilder::new();
     let seed = graph.add_step("seed", ScopeId::new(0), "noop");
@@ -321,7 +331,7 @@ async fn reordered_dynamic_scopes_keep_their_workspaces_across_restart() {
     for node in &mut graph.graph_mut().body.nodes {
         node.budget.max_firings = 2;
     }
-    let digest = coordinator.register_graph(&graph.build()).unwrap();
+    let digest = coordinator.register_graph(&graph.build()).await.unwrap();
     let result = timeout(
         Duration::from_secs(30),
         coordinator.run_root(digest, BTreeMap::new()),
@@ -331,7 +341,7 @@ async fn reordered_dynamic_scopes_keep_their_workspaces_across_restart() {
     .unwrap();
     assert_eq!(result.status, RunStatus::Success, "{result:?}");
     assert_eq!(result.final_execution, ExecutionId::new(1));
-    let records = resources(&directory);
+    let records = resources(&directory).await;
     assert_eq!(
         records.records().count(),
         3,
@@ -342,15 +352,14 @@ async fn reordered_dynamic_scopes_keep_their_workspaces_across_restart() {
         .map(|execution| {
             read_engine_log(
                 &coordinator
-                    .store()
-                    .execution_dir(InvocationId::ROOT, ExecutionId::new(execution))
+                    .execution_dir(ExecutionId::new(execution))
                     .join("events.jsonl"),
             )
             .unwrap()
             .log
         })
         .collect();
-    let graph = coordinator.load_graph(digest).unwrap();
+    let graph = coordinator.load_graph(digest).await.unwrap();
     let states: Vec<_> = logs
         .iter()
         .map(|log| engine::replay((*graph).clone(), log))
@@ -383,6 +392,7 @@ async fn a_restart_refuses_a_changed_runtime_for_an_existing_dynamic_scope() {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .unwrap();
     let mut graph = GraphBuilder::new();
     let seed = graph.add_step("seed", ScopeId::new(0), "noop");
@@ -403,7 +413,7 @@ async fn a_restart_refuses_a_changed_runtime_for_an_existing_dynamic_scope() {
     for node in &mut graph.graph_mut().body.nodes {
         node.budget.max_firings = 2;
     }
-    let digest = coordinator.register_graph(&graph.build()).unwrap();
+    let digest = coordinator.register_graph(&graph.build()).await.unwrap();
     let result = timeout(
         Duration::from_secs(30),
         coordinator.run_root(digest, BTreeMap::new()),
@@ -424,7 +434,7 @@ async fn a_restart_refuses_a_changed_runtime_for_an_existing_dynamic_scope() {
         "{:?}",
         report.state.history()
     );
-    let records = resources(&directory);
+    let records = resources(&directory).await;
     assert_eq!(records.records().count(), 2);
     assert!(
         records
@@ -484,6 +494,7 @@ async fn nested_dynamic_scopes_can_lend_their_lease_and_keep_failure_retention()
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .unwrap();
     let mut child = GraphBuilder::new();
     child.add_node(
@@ -496,7 +507,7 @@ async fn nested_dynamic_scopes_can_lend_their_lease_and_keep_failure_retention()
             }),
         ),
     );
-    let child = coordinator.register_graph(&child.build()).unwrap();
+    let child = coordinator.register_graph(&child.build()).await.unwrap();
     let inner = GraphFragment::chain([(
         "invoke",
         StepRef::new(
@@ -509,7 +520,10 @@ async fn nested_dynamic_scopes_can_lend_their_lease_and_keep_failure_retention()
         StepRef::new(Upload::NAME, serde_json::json!(inner)),
     )]);
     outer.body.nodes[0].splice_policy = SplicePolicy::Append;
-    let graph = coordinator.register_graph(&upload_graph(&outer)).unwrap();
+    let graph = coordinator
+        .register_graph(&upload_graph(&outer))
+        .await
+        .unwrap();
     assert_eq!(
         coordinator
             .run_root(graph, BTreeMap::new())
@@ -518,7 +532,7 @@ async fn nested_dynamic_scopes_can_lend_their_lease_and_keep_failure_retention()
             .status,
         RunStatus::Failed
     );
-    let records = resources(&directory);
+    let records = resources(&directory).await;
     assert_eq!(
         records.records().count(),
         3,
@@ -533,7 +547,7 @@ async fn nested_dynamic_scopes_can_lend_their_lease_and_keep_failure_retention()
         .join("work/inherited");
     coordinator.finish().await;
     assert_eq!(fs::read_to_string(proof).unwrap(), "kept");
-    let (coordinator, _) = Coordinator::resume(
+    let coordinator = Coordinator::resume(
         runtime.prepare_run(directory.path()),
         Vec::new(),
         CoordinatorOptions::default(),
@@ -553,12 +567,14 @@ async fn an_inherited_child_refuses_a_dynamic_scope_with_a_different_container()
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .unwrap();
     let mut fragment =
         GraphFragment::chain([("conflict", StepRef::new("noop", serde_json::Value::Null))]);
     fragment.body.scopes[0].runtime = ir::RuntimeSpec::container("different-image");
     let child = coordinator
         .register_graph(&upload_graph(&fragment))
+        .await
         .unwrap();
     let mut root = GraphBuilder::new();
     root.add_node(
@@ -569,7 +585,7 @@ async fn an_inherited_child_refuses_a_dynamic_scope_with_a_different_container()
             serde_json::json!((child, RunStatus::Failed)),
         ),
     );
-    let root = coordinator.register_graph(&root.build()).unwrap();
+    let root = coordinator.register_graph(&root.build()).await.unwrap();
     assert_eq!(
         coordinator
             .run_root(root, BTreeMap::new())
@@ -590,7 +606,7 @@ async fn an_inherited_child_refuses_a_dynamic_scope_with_a_different_container()
             .message
             .contains("different container from its inherited sandbox")
     );
-    assert_eq!(resources(&directory).records().count(), 1);
+    assert_eq!(resources(&directory).await.records().count(), 1);
     coordinator.finish().await;
     assert!(prune(&runtime).await.unwrap().is_clean());
 }

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use execution::events::{RunEvent, replay_run};
+use execution::events::{RunEvent, replay_run_dir};
 use execution::host;
 use fabro_steps::agent::THREAD_EVENT;
 use fabro_steps::compaction::{CompactionPolicyHandle, EVENT};
@@ -747,7 +747,9 @@ async fn public_events_account_for_the_compaction_and_later_activity() {
         .expect("runs");
     assert_eq!(report.status, RunStatus::Success);
 
-    let events: Vec<RunEvent> = replay_run(dir.path()).expect("the run dir projects");
+    let events: Vec<RunEvent> = replay_run_dir(dir.path())
+        .await
+        .expect("the run dir projects");
     let node_of = |event: &RunEvent| {
         event
             .subject

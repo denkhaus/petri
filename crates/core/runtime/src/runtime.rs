@@ -24,7 +24,7 @@ use frontend::{CompileInputs, DirFiles, Frontend, Lowered, REPOSITORY_VAR, Span}
 use ir::Graph;
 use serde_json::Value;
 use smol_str::SmolStr;
-use store::{OwnerId, RunDirStore, RunKey};
+use store::{Access, OwnerId, RunDirStore, RunKey, RunLogs, RunStore, StoreError};
 use tracing::field::Empty;
 
 /// The knobs a run gets, with the defaults the driver documents.
@@ -110,6 +110,9 @@ pub struct Runtime {
     frontends:    Vec<Box<dyn Frontend>>,
     steps:        ::steps::Registry,
     executor:     Option<Arc<dyn Executor>>,
+    /// The store runs live in; `None` is the run directory under
+    /// `RunOptions::run_dir`.
+    store:        Option<Arc<dyn RunStore>>,
     secrets:      Arc<dyn SecretProvider>,
     observers:    Vec<Arc<dyn EventObserver>>,
     progress:     Option<Arc<dyn ProgressSink>>,
@@ -143,6 +146,7 @@ impl Runtime {
             frontends:    vec![Box::new(frontend_native::Native)],
             steps:        crate::steps::standard(),
             executor:     None,
+            store:        None,
             secrets:      Arc::new(MapSecrets::empty()),
             observers:    Vec::new(),
             progress:     None,
@@ -162,6 +166,7 @@ impl Runtime {
             frontends:    Vec::new(),
             steps:        ::steps::Registry::new(),
             executor:     None,
+            store:        None,
             secrets:      Arc::new(MapSecrets::empty()),
             observers:    Vec::new(),
             progress:     None,
@@ -201,6 +206,18 @@ impl Runtime {
     #[must_use]
     pub fn executor(mut self, executor: impl Executor + 'static) -> Self {
         self.executor = Some(Arc::new(executor));
+        self
+    }
+
+    /// Keep every run's durable record in `store` instead of the run
+    /// directory: a host's database, or [`store::MemoryRunStore`] for a run
+    /// that leaves no files of record. The run directory still holds what
+    /// is a file by nature (workspaces, step output). A resume through a
+    /// host store needs `RunOptions::run_key`, since the directory no
+    /// longer names the run.
+    #[must_use]
+    pub fn store(mut self, store: Arc<dyn RunStore>) -> Self {
+        self.store = Some(store);
         self
     }
 
@@ -458,13 +475,38 @@ impl Runtime {
     }
 
     /// The run's key: the one the options name, else the one the run
-    /// directory already stores (a resume), else a fresh one.
+    /// directory already stores (a resume over the run-directory store),
+    /// else a fresh one.
     pub fn run_key_for(&self, run_dir: &Path) -> RunKey {
         self.options
             .run_key
             .clone()
-            .or_else(|| RunDirStore::new(run_dir).stored_key().ok().flatten())
+            .or_else(|| {
+                self.store
+                    .is_none()
+                    .then(|| RunDirStore::new(run_dir).stored_key().ok().flatten())
+                    .flatten()
+            })
             .unwrap_or_else(RunKey::mint)
+    }
+
+    /// The store runs under `run_dir` live in: the installed one, else the
+    /// run directory itself.
+    pub fn store_for(&self, run_dir: &Path) -> Arc<dyn RunStore> {
+        self.store
+            .clone()
+            .unwrap_or_else(|| Arc::new(RunDirStore::new(run_dir)))
+    }
+
+    /// Open the run under `run_dir` in the runtime's store: what a host does
+    /// to inspect, replay or prune a run without preparing it.
+    pub async fn open_run(
+        &self,
+        run_dir: &Path,
+        access: Access,
+    ) -> Result<Arc<dyn RunLogs>, StoreError> {
+        let key = self.run_key_for(run_dir);
+        self.store_for(run_dir).open(&key, access).await
     }
 
     fn executor_for_run(
@@ -492,6 +534,7 @@ impl Runtime {
     ) -> RunRuntime {
         let (caps, guards) = self.provision(&run_dir);
         RunRuntime {
+            store: self.store_for(&run_dir),
             run_dir,
             key,
             owner: OwnerId::mint(),
@@ -607,8 +650,19 @@ impl Runtime {
     }
 }
 
+/// How a [`RunRuntime`] opens its run: the access modes of
+/// [`store::Access`] under the run's own key and owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunAccess {
+    Create,
+    Write,
+    Read,
+}
+
 /// Shared runtime services and configuration for all executions in one run.
 pub struct RunRuntime {
+    /// The store the run's durable record lives in.
+    store:     Arc<dyn RunStore>,
     run_dir:   PathBuf,
     /// The run's identity in its store and on its providers.
     key:       RunKey,
@@ -653,6 +707,27 @@ impl RunRuntime {
     /// prepared: what the store's writer lease is taken for.
     pub fn owner(&self) -> &OwnerId {
         &self.owner
+    }
+
+    /// The store the run's durable record lives in.
+    pub fn store(&self) -> &Arc<dyn RunStore> {
+        &self.store
+    }
+
+    /// Open this run in its store: `Create` for a fresh run, `Write` to
+    /// continue one, both under this instance's owner; `Read` takes no
+    /// lease.
+    pub async fn open(&self, access: RunAccess) -> Result<Arc<dyn RunLogs>, StoreError> {
+        let access = match access {
+            RunAccess::Create => Access::Create {
+                owner: self.owner.clone(),
+            },
+            RunAccess::Write => Access::Write {
+                owner: self.owner.clone(),
+            },
+            RunAccess::Read => Access::Read,
+        };
+        self.store.open(&self.key, access).await
     }
 
     /// The standard routing executor, when this run uses it: the host that

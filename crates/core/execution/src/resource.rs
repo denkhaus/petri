@@ -1,29 +1,31 @@
-//! Durable sandbox leases: one record per lease under the run's
-//! `resources/`, the crash-safe authority on what the run holds on which
-//! provider.
+//! Durable sandbox leases: one append-only log of lease records, the
+//! crash-safe authority on what the run holds on which provider.
 //!
-//! A record is reserved before anything exists on a provider, in
+//! Every transition of a lease is one record in the run's resource log; the
+//! latest record per lease is its current state, and the run's single
+//! writer keeps that map in memory, rebuilt from the log on open. A record
+//! is reserved before anything exists on a provider, in
 //! [`LeaseState::Allocating`]; it becomes `live` with the provider's own
 //! resource id only after the provider confirms the create (or recovery
 //! finds the one match). Every stop and delete is written down as a
 //! [`PendingIntent`] before the provider is asked and confirmed after, so a
 //! crash between the two leaves a repeatable intent, never a lie. A deleted
-//! lease stays as a tombstone while the run directory exists, so a
-//! historical inherited invocation still resolves during replay while new
-//! work on the lease is refused.
+//! lease stays as a tombstone while the run exists, so a historical
+//! inherited invocation still resolves during replay while new work on the
+//! lease is refused.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::{fs, io};
+use std::sync::{Arc, Weak};
 
 use executor::WorkspaceId;
 use executor_sandbox::{LeaseLedger, LeaseRecord, LedgerError};
 pub use executor_sandbox::{LeaseState, PendingIntent};
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
+use store::{LogId, Record, RunLogs};
+use tokio::sync::Mutex;
 
-use crate::store::write_atomically_with;
 use crate::{ExecutionId, SandboxAllocationKey, SandboxLeaseId};
 
 /// The provider kind a host-process scope's lease records: its workspace
@@ -68,32 +70,29 @@ impl SandboxResourceRecord {
     }
 }
 
+/// One line of the resource log: a lease's whole record at one transition.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ResourceLogRecord {
+    pub seq:         u64,
+    /// Milliseconds since the Unix epoch when the transition was recorded.
+    pub recorded_at: u64,
+    pub body:        SandboxResourceRecord,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ResourceError {
-    #[error("could not {action} `{path}`: {source}")]
-    Io {
-        action: &'static str,
-        path:   PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error("`{path}` is not a sandbox resource record: {source}")]
+    #[error(transparent)]
+    Store(#[from] store::StoreError),
+    #[error("the resource log holds a record at seq {seq} this build cannot decode: {source}")]
     Decode {
-        path:   PathBuf,
+        seq:    u64,
         #[source]
         source: serde_json::Error,
     },
     #[error("could not encode a sandbox resource record: {0}")]
     Encode(#[source] serde_json::Error),
-    #[error("sandbox lease {0} is recorded more than once")]
-    DuplicateLease(SandboxLeaseId),
-    #[error("sandbox allocation {0:?} is recorded more than once")]
+    #[error("sandbox allocation {0:?} is recorded under more than one lease")]
     DuplicateAllocation(SandboxAllocationKey),
-    #[error("sandbox resource file `{path}` does not match lease {lease}")]
-    AddressMismatch {
-        path:  PathBuf,
-        lease: SandboxLeaseId,
-    },
     #[error("sandbox allocation {0:?} does not match its recorded resource")]
     AllocationMismatch(SandboxAllocationKey),
     #[error("unknown sandbox lease {0}")]
@@ -102,56 +101,52 @@ pub enum ResourceError {
     DeletedLease(SandboxLeaseId),
 }
 
-/// Provider-neutral durable sandbox leases under one run's `resources/`.
+/// Provider-neutral durable sandbox leases of one run: the latest record
+/// per lease, over the run's resource log.
+///
+/// The store holds the run's handle weakly: the coordinator (or the
+/// command) that opened the run owns the handle and the lease with it, and
+/// a write after that owner is gone is refused rather than made under a
+/// lease nobody holds.
 pub struct ResourceStore {
-    root:          PathBuf,
+    logs:          Weak<dyn RunLogs>,
+    locator:       String,
     by_lease:      BTreeMap<SandboxLeaseId, SandboxResourceRecord>,
     by_allocation: BTreeMap<SandboxAllocationKey, SandboxLeaseId>,
     next_lease:    u64,
+    next_seq:      u64,
 }
 
 impl ResourceStore {
-    pub fn load(root: impl Into<PathBuf>) -> Result<Self, ResourceError> {
-        let root = root.into();
-        fs::create_dir_all(&root).map_err(|source| resource_io("create", &root, source))?;
+    /// Rebuild the current state of every lease from the resource log. The
+    /// caller keeps `logs` for as long as it writes through the store.
+    pub async fn load(logs: &Arc<dyn RunLogs>) -> Result<Self, ResourceError> {
+        let stored = logs.read(&LogId::Resources).await?;
         let mut by_lease = BTreeMap::new();
         let mut by_allocation = BTreeMap::new();
         let mut next_lease = 0_u64;
-        for entry in fs::read_dir(&root).map_err(|source| resource_io("read", &root, source))? {
-            let entry = entry.map_err(|source| resource_io("read", &root, source))?;
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("json") {
-                continue;
-            }
-            let bytes = fs::read(&path).map_err(|source| resource_io("read", &path, source))?;
-            let record: SandboxResourceRecord =
-                serde_json::from_slice(&bytes).map_err(|source| ResourceError::Decode {
-                    path: path.clone(),
+        for line in &stored {
+            let record: ResourceLogRecord =
+                line.decode().map_err(|source| ResourceError::Decode {
+                    seq: line.seq,
                     source,
                 })?;
-            let expected_name = format!("{:016x}.json", record.lease.raw());
-            if path.file_name().and_then(|name| name.to_str()) != Some(&expected_name) {
-                return Err(ResourceError::AddressMismatch {
-                    path,
-                    lease: record.lease,
-                });
-            }
-            if by_lease.insert(record.lease, record.clone()).is_some() {
-                return Err(ResourceError::DuplicateLease(record.lease));
-            }
-            if by_allocation
-                .insert(record.allocation.clone(), record.lease)
-                .is_some()
+            let record = record.body;
+            if let Some(existing) = by_allocation.insert(record.allocation.clone(), record.lease)
+                && existing != record.lease
             {
                 return Err(ResourceError::DuplicateAllocation(record.allocation));
             }
             next_lease = next_lease.max(record.lease.raw().saturating_add(1));
+            by_lease.insert(record.lease, record);
         }
         Ok(Self {
-            root,
+            logs: Arc::downgrade(logs),
+            locator: logs.locator(),
             by_lease,
             by_allocation,
             next_lease,
+            next_seq: stored.len() as u64,
         })
     }
 
@@ -161,7 +156,7 @@ impl ResourceStore {
 
     /// Reserve a stable scope identity. A dynamic scope's workspace follows
     /// its lease, since its live ScopeId can change after an execution restart.
-    pub(crate) fn reserve_scope(
+    pub(crate) async fn reserve_scope(
         &mut self,
         allocation: SandboxAllocationKey,
         provider: &str,
@@ -182,6 +177,7 @@ impl ResourceStore {
             }
         };
         self.ensure_record(allocation, provider, workspace, runtime, introduced_by)
+            .await
     }
 
     /// The record of `lease`, tombstones included: replay of a historical
@@ -208,7 +204,7 @@ impl ResourceStore {
     /// The lease of `allocation`, reserved on first use. `provider` is the
     /// kind the scope's runtime target names; the sandbox lease manager
     /// records the real one, with its fingerprint, when it allocates.
-    pub fn ensure_record(
+    pub async fn ensure_record(
         &mut self,
         allocation: SandboxAllocationKey,
         provider: impl Into<SmolStr>,
@@ -240,7 +236,7 @@ impl ResourceStore {
             pending: None,
             fingerprint: None,
         };
-        self.write(&record)?;
+        self.write(&record).await?;
         self.next_lease = self.next_lease.saturating_add(1);
         self.by_allocation.insert(allocation, lease);
         self.by_lease.insert(lease, record);
@@ -250,38 +246,50 @@ impl ResourceStore {
             .expect("the new resource was inserted"))
     }
 
-    /// Change one record in place, durably: written before the index is
-    /// updated, so a crash leaves the file and the memory in agreement.
-    pub fn update(
+    /// Change one record, durably: its new state is appended to the log
+    /// before the map is updated, so a crash leaves the log and the memory
+    /// in agreement.
+    pub async fn update(
         &mut self,
         lease: SandboxLeaseId,
         update: impl FnOnce(&mut SandboxResourceRecord),
     ) -> Result<(), ResourceError> {
         let mut record = self.resolve(lease)?.clone();
         update(&mut record);
-        self.write(&record)?;
+        self.write(&record).await?;
         self.by_lease.insert(lease, record);
         Ok(())
     }
 
-    fn write(&self, record: &SandboxResourceRecord) -> Result<(), ResourceError> {
-        let path = self.root.join(format!("{:016x}.json", record.lease.raw()));
-        let bytes = serde_json::to_vec_pretty(record).map_err(ResourceError::Encode)?;
-        write_atomically_with(&path, &bytes, resource_io)
-    }
-}
-
-fn resource_io(action: &'static str, path: &Path, source: io::Error) -> ResourceError {
-    ResourceError::Io {
-        action,
-        path: path.to_path_buf(),
-        source,
+    async fn write(&mut self, record: &SandboxResourceRecord) -> Result<(), ResourceError> {
+        let line = ResourceLogRecord {
+            seq:         self.next_seq,
+            recorded_at: driver::recorded_now(),
+            body:        record.clone(),
+        };
+        let stored = Record::encode(&line).map_err(|error| match error {
+            store::EncodeError::Encode(source) => ResourceError::Encode(source),
+            store::EncodeError::Shape(shape) => {
+                ResourceError::Encode(serde_json::Error::custom(shape))
+            }
+        })?;
+        let logs = self.logs.upgrade().ok_or_else(|| {
+            store::StoreError::backend(
+                self.locator.clone(),
+                "append",
+                "the run's store handle is gone",
+            )
+        })?;
+        logs.append(&LogId::Resources, &[stored]).await?;
+        self.next_seq += 1;
+        Ok(())
     }
 }
 
 /// The resource store as the sandbox lease manager's ledger. The
 /// coordinator reserves every lease first; an unknown lease here is a
 /// caller that acquired without one, and is refused rather than invented.
+/// Every write resolves once its record is in the store.
 #[derive(Clone)]
 pub struct ResourceLedger(Arc<Mutex<ResourceStore>>);
 
@@ -290,15 +298,16 @@ impl ResourceLedger {
         Self(store)
     }
 
-    fn update(
+    async fn update(
         &self,
         lease: SandboxLeaseId,
-        update: impl FnOnce(&mut SandboxResourceRecord),
+        update: impl FnOnce(&mut SandboxResourceRecord) + Send,
     ) -> Result<(), LedgerError> {
         self.0
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .await
             .update(lease, update)
+            .await
             .map_err(|error| LedgerError(error.to_string()))
     }
 }
@@ -306,7 +315,7 @@ impl ResourceLedger {
 #[async_trait::async_trait]
 impl LeaseLedger for ResourceLedger {
     async fn lookup(&self, lease: SandboxLeaseId) -> Result<Option<LeaseRecord>, LedgerError> {
-        let store = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let store = self.0.lock().await;
         let Ok(record) = store.resolve(lease) else {
             return Ok(None);
         };
@@ -331,6 +340,7 @@ impl LeaseLedger for ResourceLedger {
             record.provider = SmolStr::new(provider);
             record.fingerprint = Some(SmolStr::new(fingerprint));
         })
+        .await
     }
 
     async fn live(&self, lease: SandboxLeaseId, resource_id: &str) -> Result<(), LedgerError> {
@@ -339,6 +349,7 @@ impl LeaseLedger for ResourceLedger {
             record.pending = None;
             record.resource_id = Some(SmolStr::new(resource_id));
         })
+        .await
     }
 
     async fn pending(
@@ -347,6 +358,7 @@ impl LeaseLedger for ResourceLedger {
         intent: PendingIntent,
     ) -> Result<(), LedgerError> {
         self.update(lease, |record| record.pending = Some(intent))
+            .await
     }
 
     async fn stopped(&self, lease: SandboxLeaseId) -> Result<(), LedgerError> {
@@ -354,6 +366,7 @@ impl LeaseLedger for ResourceLedger {
             record.state = LeaseState::Stopped;
             record.pending = None;
         })
+        .await
     }
 
     async fn deleted(&self, lease: SandboxLeaseId) -> Result<(), LedgerError> {
@@ -361,5 +374,6 @@ impl LeaseLedger for ResourceLedger {
             record.state = LeaseState::Deleted;
             record.pending = None;
         })
+        .await
     }
 }

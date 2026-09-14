@@ -4,10 +4,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use execution::{
-    CallSite, Coordinator, CoordinatorEvent, CoordinatorInvocationClient, CoordinatorOptions,
-    CoordinatorStore, ExecutionId, FoldEvent, GraphDigest, InvocationClient as _, InvocationId,
-    InvocationRequest, JsonlEngineLog, Middleware, MiddlewareError, RouteCall, RouteNext,
-    SandboxBinding, SandboxMode, SecretBindings, StoredEngineRecord, decode_coordinator_log,
+    Access, CallSite, Coordinator, CoordinatorEvent, CoordinatorInvocationClient,
+    CoordinatorOptions, CoordinatorStore, ExecutionId, FoldEvent, GraphDigest,
+    InvocationClient as _, InvocationId, InvocationRequest, Middleware, MiddlewareError, OwnerId,
+    RouteCall, RouteNext, RunDirStore, RunStore as _, SandboxBinding, SandboxMode, SecretBindings,
+    StoredEngineRecord, read_coordinator_log,
 };
 use executor::Retention;
 use ir::{
@@ -33,13 +34,17 @@ async fn one_invocation_and_execution_use_the_coordinator_layout() {
     let run_runtime = runtime.prepare_run(directory.path());
     let mut coordinator =
         Coordinator::create(run_runtime, Vec::new(), CoordinatorOptions::default())
+            .await
             .expect("the coordinator starts");
 
     let mut builder = GraphBuilder::bare();
     let scope = builder.add_scope(Scope::new(ScopeId::new(0)));
     builder.add_step("only", scope, "noop");
     let graph = builder.build();
-    let digest = coordinator.register_graph(&graph).expect("graph registers");
+    let digest = coordinator
+        .register_graph(&graph)
+        .await
+        .expect("graph registers");
     let result = coordinator
         .run_root(digest, BTreeMap::new())
         .await
@@ -59,7 +64,7 @@ async fn one_invocation_and_execution_use_the_coordinator_layout() {
     assert!(
         directory
             .path()
-            .join("invocations/0000000000000000/executions/0000000000000000/events.jsonl")
+            .join("executions/0000000000000000/events.jsonl")
             .is_file()
     );
     assert_eq!(coordinator.store().state().root, Some(InvocationId::ROOT));
@@ -67,7 +72,7 @@ async fn one_invocation_and_execution_use_the_coordinator_layout() {
 }
 
 #[tokio::test]
-async fn a_declared_execution_with_only_a_log_header_starts_from_its_declaration() {
+async fn a_declared_execution_with_an_empty_log_starts_from_its_declaration() {
     let directory = RunDir::new("coordinator-empty-execution");
     let mut builder = GraphBuilder::bare();
     let scope = builder.add_scope(Scope::new(ScopeId::new(0)));
@@ -76,9 +81,17 @@ async fn a_declared_execution_with_only_a_log_header_starts_from_its_declaration
     let context = BTreeMap::from([("input".into(), serde_json::json!("kept"))]);
 
     let digest = {
-        let mut store = CoordinatorStore::create(directory.path(), RunKey::new("test"), Vec::new())
+        let key = RunKey::new("test");
+        let logs = RunDirStore::new(directory.path())
+            .open(&key, Access::Create {
+                owner: OwnerId::mint(),
+            })
+            .await
+            .expect("the run is created");
+        let mut store = CoordinatorStore::create(logs, key, Vec::new())
+            .await
             .expect("store");
-        let (digest, _) = store.register_graph(&graph).expect("graph registers");
+        let (digest, _) = store.register_graph(&graph).await.expect("graph registers");
         store
             .append(CoordinatorEvent::InvocationDeclared {
                 invocation:      InvocationId::ROOT,
@@ -89,6 +102,7 @@ async fn a_declared_execution_with_only_a_log_header_starts_from_its_declaration
                 sandbox:         SandboxBinding::Isolated,
                 admission:       None,
             })
+            .await
             .expect("invocation declaration persists");
         store
             .append(CoordinatorEvent::ExecutionDeclared {
@@ -104,16 +118,13 @@ async fn a_declared_execution_with_only_a_log_header_starts_from_its_declaration
                 },
                 middleware_state: BTreeMap::new(),
             })
+            .await
             .expect("execution declaration persists");
-        let execution_dir = store
-            .create_execution_dir(InvocationId::ROOT, ExecutionId::new(0))
-            .expect("execution directory");
-        JsonlEngineLog::create(execution_dir.join("events.jsonl")).expect("engine header");
         digest
     };
 
     let runtime = Runtime::standard().options(RunOptions::new(directory.path()));
-    let (mut coordinator, _) = Coordinator::resume(
+    let mut coordinator = Coordinator::resume(
         runtime.prepare_run(directory.path()),
         Vec::new(),
         CoordinatorOptions::default(),
@@ -144,6 +155,7 @@ async fn resume_folds_a_final_outcome_before_reissuing_pending_routing() {
         middleware.clone(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("the coordinator starts");
 
     let mut builder = GraphBuilder::bare();
@@ -153,6 +165,7 @@ async fn resume_folds_a_final_outcome_before_reissuing_pending_routing() {
     builder.link(first, second);
     let digest = coordinator
         .register_graph(&builder.build())
+        .await
         .expect("graph registers");
     let result = coordinator
         .run_root(digest, BTreeMap::new())
@@ -162,13 +175,11 @@ async fn resume_folds_a_final_outcome_before_reissuing_pending_routing() {
     drop(coordinator);
 
     let coordinator_path = directory.path().join("coordinator.jsonl");
-    let decoded = decode_coordinator_log(
-        &coordinator_path,
-        &fs::read(&coordinator_path).expect("coordinator log"),
-    )
-    .expect("coordinator log decodes");
+    let decoded = read_coordinator_log(&*testkit::read_run_dir(directory.path()).await)
+        .await
+        .expect("coordinator log decodes");
     let mut coordinator_prefix = Vec::new();
-    for record in decoded.records {
+    for record in decoded {
         let declared = matches!(record.body, CoordinatorEvent::ExecutionDeclared { .. });
         serde_json::to_writer(&mut coordinator_prefix, &record).expect("record encodes");
         coordinator_prefix.push(b'\n');
@@ -180,7 +191,7 @@ async fn resume_folds_a_final_outcome_before_reissuing_pending_routing() {
 
     let events_path = directory
         .path()
-        .join("invocations/0000000000000000/executions/0000000000000000/events.jsonl");
+        .join("executions/0000000000000000/events.jsonl");
     let events = fs::read_to_string(&events_path).expect("engine log");
     let mut lines = events.lines();
     let mut engine_prefix = format!("{}\n", lines.next().expect("engine header"));
@@ -195,7 +206,7 @@ async fn resume_folds_a_final_outcome_before_reissuing_pending_routing() {
     fs::write(&events_path, engine_prefix).expect("engine prefix");
 
     let runtime = Runtime::standard().options(RunOptions::new(directory.path()));
-    let (mut coordinator, _) = Coordinator::resume(
+    let mut coordinator = Coordinator::resume(
         runtime.prepare_run(directory.path()),
         middleware,
         CoordinatorOptions::default(),
@@ -422,6 +433,7 @@ async fn a_step_can_run_a_registered_nested_invocation() {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("the coordinator starts");
 
     let mut child = GraphBuilder::bare();
@@ -433,7 +445,10 @@ async fn a_step_can_run_a_registered_nested_invocation() {
     );
     child.graph_mut().result = ResultProjection::NodeOutput(result_node);
     let child = child.build();
-    let child_digest = coordinator.register_graph(&child).expect("child registers");
+    let child_digest = coordinator
+        .register_graph(&child)
+        .await
+        .expect("child registers");
 
     let mut parent = GraphBuilder::bare();
     let parent_scope = parent.add_scope(Scope::new(ScopeId::new(0)));
@@ -448,6 +463,7 @@ async fn a_step_can_run_a_registered_nested_invocation() {
     let parent = parent.build();
     let parent_digest = coordinator
         .register_graph(&parent)
+        .await
         .expect("parent registers");
 
     let result = coordinator
@@ -481,13 +497,14 @@ async fn an_inherited_child_cannot_declare_a_different_container() {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .unwrap();
     let mut child = GraphBuilder::bare();
     let mut child_scope = Scope::new(ScopeId::new(0));
     child_scope.runtime = ir::RuntimeSpec::container("alpine:3.20");
     let child_scope = child.add_scope(child_scope);
     child.add_step("must-not-run", child_scope, "noop");
-    let child = coordinator.register_graph(&child.build()).unwrap();
+    let child = coordinator.register_graph(&child.build()).await.unwrap();
     let mut parent = GraphBuilder::new();
     parent.add_node(
         "invoke",
@@ -497,7 +514,7 @@ async fn an_inherited_child_cannot_declare_a_different_container() {
             serde_json::json!({"graph": child, "inherit": true}),
         ),
     );
-    let parent = coordinator.register_graph(&parent.build()).unwrap();
+    let parent = coordinator.register_graph(&parent.build()).await.unwrap();
     let result = coordinator.run_root(parent, BTreeMap::new()).await.unwrap();
     assert_eq!(result.status, RunStatus::Failed);
     assert_eq!(
@@ -508,7 +525,7 @@ async fn an_inherited_child_cannot_declare_a_different_container() {
     let events = fs::read_to_string(
         directory
             .path()
-            .join("invocations/0000000000000000/executions/0000000000000000/events.jsonl"),
+            .join("executions/0000000000000000/events.jsonl"),
     )
     .unwrap();
     assert!(events.contains("declares a different container"));
@@ -528,6 +545,7 @@ async fn sibling_nested_invocations_run_in_parallel() {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("the coordinator starts");
 
     let mut child = GraphBuilder::bare();
@@ -535,6 +553,7 @@ async fn sibling_nested_invocations_run_in_parallel() {
     child.add_step("barrier", child_scope, "test/barrier");
     let child_digest = coordinator
         .register_graph(&child.build())
+        .await
         .expect("child registers");
 
     let mut parent = GraphBuilder::bare();
@@ -548,6 +567,7 @@ async fn sibling_nested_invocations_run_in_parallel() {
     }
     let parent_digest = coordinator
         .register_graph(&parent.build())
+        .await
         .expect("parent registers");
 
     let result = timeout(
@@ -576,6 +596,7 @@ async fn a_sibling_result_reaches_the_parent_while_another_sibling_is_running() 
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("the coordinator starts");
 
     let mut children = Vec::new();
@@ -589,6 +610,7 @@ async fn a_sibling_result_reaches_the_parent_while_another_sibling_is_running() 
         children.push(
             coordinator
                 .register_graph(&child.build())
+                .await
                 .expect("child registers"),
         );
     }
@@ -622,6 +644,7 @@ async fn a_sibling_result_reaches_the_parent_while_another_sibling_is_running() 
     parent.link(first, release_second);
     let parent = coordinator
         .register_graph(&parent.build())
+        .await
         .expect("parent registers");
     let result = timeout(
         Duration::from_secs(5),
@@ -661,6 +684,7 @@ async fn cancelling_the_root_cancels_an_active_nested_invocation() {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("the coordinator starts");
 
     let mut child = GraphBuilder::bare();
@@ -668,6 +692,7 @@ async fn cancelling_the_root_cancels_an_active_nested_invocation() {
     child.add_step("wait", child_scope, "test/wait-for-cancel");
     let child_digest = coordinator
         .register_graph(&child.build())
+        .await
         .expect("child registers");
 
     let mut parent = GraphBuilder::bare();
@@ -679,6 +704,7 @@ async fn cancelling_the_root_cancels_an_active_nested_invocation() {
     );
     let parent_digest = coordinator
         .register_graph(&parent.build())
+        .await
         .expect("parent registers");
     let control = coordinator.handle();
 
@@ -714,11 +740,13 @@ async fn completing_a_parent_cancels_each_descendant_once() {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("the coordinator starts");
     let mut grandchild = GraphBuilder::new();
     grandchild.add_step("wait", ScopeId::new(0), WaitForCancelStep::NAME);
     let grandchild = coordinator
         .register_graph(&grandchild.build())
+        .await
         .expect("grandchild registers");
     let mut child = GraphBuilder::new();
     child.add_node(
@@ -728,6 +756,7 @@ async fn completing_a_parent_cancels_each_descendant_once() {
     );
     let child = coordinator
         .register_graph(&child.build())
+        .await
         .expect("child registers");
     let mut parent = GraphBuilder::new();
     parent.add_node(
@@ -740,6 +769,7 @@ async fn completing_a_parent_cancels_each_descendant_once() {
     );
     let parent = coordinator
         .register_graph(&parent.build())
+        .await
         .expect("parent registers");
     timeout(
         Duration::from_secs(5),
@@ -755,10 +785,7 @@ async fn completing_a_parent_cancels_each_descendant_once() {
             .as_ref()
             .expect("descendant settled")
             .final_execution;
-        let path = coordinator
-            .store()
-            .execution_dir(InvocationId::new(id), execution)
-            .join("events.jsonl");
+        let path = coordinator.execution_dir(execution).join("events.jsonl");
         let log = execution::read_engine_log(&path)
             .expect("descendant engine log")
             .log;
@@ -804,11 +831,13 @@ async fn assert_terminal_parent_recovers_child(cancel_recorded: bool) {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("the coordinator starts");
     let mut child = GraphBuilder::new();
     child.add_step("wait", ScopeId::new(0), WaitForCancelStep::NAME);
     let child = coordinator
         .register_graph(&child.build())
+        .await
         .expect("child registers");
     let mut parent = GraphBuilder::new();
     parent.add_node(
@@ -821,6 +850,7 @@ async fn assert_terminal_parent_recovers_child(cancel_recorded: bool) {
     );
     let parent = coordinator
         .register_graph(&parent.build())
+        .await
         .expect("parent registers");
     timeout(
         Duration::from_secs(5),
@@ -834,13 +864,11 @@ async fn assert_terminal_parent_recovers_child(cancel_recorded: bool) {
     // Model a crash after the parent driver finished, before its coordinator
     // cancelled the child. The terminal parent log cannot reissue the call.
     let lifecycle_path = directory.path().join("coordinator.jsonl");
-    let lifecycle = decode_coordinator_log(
-        &lifecycle_path,
-        &fs::read(&lifecycle_path).expect("coordinator log"),
-    )
-    .expect("coordinator log decodes");
+    let lifecycle = read_coordinator_log(&*testkit::read_run_dir(directory.path()).await)
+        .await
+        .expect("coordinator log decodes");
     let mut prefix = Vec::new();
-    for record in lifecycle.records {
+    for record in lifecycle {
         let cancellation = matches!(
             record.body,
             CoordinatorEvent::InvocationCancelRequested { .. }
@@ -857,7 +885,7 @@ async fn assert_terminal_parent_recovers_child(cancel_recorded: bool) {
     fs::write(&lifecycle_path, prefix).expect("coordinator prefix");
     let child_events = directory
         .path()
-        .join("invocations/0000000000000001/executions/0000000000000001/events.jsonl");
+        .join("executions/0000000000000001/events.jsonl");
     let events = fs::read_to_string(&child_events).expect("child engine log");
     let mut lines = events.lines();
     let mut prefix = format!("{}\n", lines.next().expect("engine header"));
@@ -875,7 +903,7 @@ async fn assert_terminal_parent_recovers_child(cancel_recorded: bool) {
     }
     fs::write(&child_events, prefix).expect("child engine prefix");
 
-    let (mut coordinator, _) = Coordinator::resume(
+    let mut coordinator = Coordinator::resume(
         runtime.prepare_run(directory.path()),
         Vec::new(),
         CoordinatorOptions::default(),
@@ -928,6 +956,7 @@ async fn a_restart_declares_a_successor_in_the_same_invocation() {
         Vec::new(),
         CoordinatorOptions::default(),
     )
+    .await
     .expect("the coordinator starts");
 
     let mut builder = GraphBuilder::bare();
@@ -938,7 +967,10 @@ async fn a_restart_declares_a_successor_in_the_same_invocation() {
     builder.link(start, target);
     builder.node_mut(start).routing.groups[0].arms[0].transition = EdgeTransition::Restart;
     let graph = builder.build();
-    let digest = coordinator.register_graph(&graph).expect("graph registers");
+    let digest = coordinator
+        .register_graph(&graph)
+        .await
+        .expect("graph registers");
 
     let result = coordinator
         .run_root(digest, BTreeMap::new())
