@@ -181,7 +181,10 @@ impl Step for HoldStep {
 /// child's `ExecutionDeclared` opens one and its `ExecutionFinished` closes
 /// it. Also the order the children were declared and dispatched in.
 #[derive(Default)]
-struct LiveChildren(Mutex<LiveChildrenSeen>);
+struct LiveChildren {
+    seen:    Mutex<LiveChildrenSeen>,
+    changed: Notify,
+}
 
 #[derive(Clone, Default)]
 struct LiveChildrenSeen {
@@ -194,7 +197,17 @@ struct LiveChildrenSeen {
 
 impl LiveChildren {
     fn seen(&self) -> LiveChildrenSeen {
-        self.0.lock().expect("not poisoned").clone()
+        self.seen.lock().expect("not poisoned").clone()
+    }
+
+    /// Wait until `condition` holds for what has been seen.
+    async fn wait_until(&self, condition: impl Fn(&LiveChildrenSeen) -> bool) {
+        loop {
+            if condition(&self.seen()) {
+                return;
+            }
+            self.changed.notified().await;
+        }
     }
 }
 
@@ -209,7 +222,7 @@ impl ExecutionObserver for LiveChildren {
     }
 
     fn on_lifecycle(&self, record: &CoordinatorRecord) {
-        let mut seen = self.0.lock().expect("not poisoned");
+        let mut seen = self.seen.lock().expect("not poisoned");
         match &record.body {
             CoordinatorEvent::InvocationDeclared {
                 invocation,
@@ -233,6 +246,8 @@ impl ExecutionObserver for LiveChildren {
             }
             _ => {}
         }
+        drop(seen);
+        self.changed.notify_one();
     }
 }
 
@@ -873,10 +888,14 @@ async fn exactly_ten_thousand_invocations_are_admitted_and_the_next_is_refused()
 }
 
 /// Fifty children under four slots: at most four child drivers are live at
-/// once, and they start in declaration order, which is branch order.
+/// once, and they start in declaration order, which is branch order. The
+/// children hold a marker until four are live, so the bound is seen full
+/// before any child finishes, however long each dispatch takes.
 #[tokio::test]
 async fn a_fork_of_fifty_children_keeps_four_live_and_starts_them_in_order() {
     let directory = RunDir::new("admission-live-bound");
+    let marker = directory.path().join("hold");
+    fs::write(&marker, b"").expect("the marker is written");
     let trace = Trace::default();
     let started = AStarted::default();
     let runtime = runtime(&directory, &trace, &started);
@@ -890,20 +909,29 @@ async fn a_fork_of_fifty_children_keeps_four_live_and_starts_them_in_order() {
     .expect("the coordinator starts")
     .observe(live.clone());
     let child = coordinator
-        .register_graph(&traced_child("c", false, 20))
+        .register_graph(&hold_child(Some(&marker)))
         .await
         .expect("child registers");
     let parent = coordinator
         .register_graph(&fork_parent(child, 50, 4))
         .await
         .expect("parent registers");
-    let result = timeout(
-        Duration::from_secs(60),
-        coordinator.run_root(parent, BTreeMap::new()),
-    )
-    .await
-    .expect("the fork completes")
-    .expect("the run completes");
+    let result = {
+        let run = coordinator.run_root(parent, BTreeMap::new());
+        tokio::pin!(run);
+        let four_live = live.wait_until(|seen| seen.live == 4);
+        tokio::select! {
+            result = &mut run => panic!("the run finished while the marker held: {result:?}"),
+            waited = timeout(Duration::from_secs(20), four_live) => {
+                waited.expect("four children are live and the rest wait");
+            }
+        }
+        fs::remove_file(&marker).expect("the marker is removed");
+        timeout(Duration::from_secs(60), run)
+            .await
+            .expect("the fork completes")
+            .expect("the run completes")
+    };
     assert_eq!(result.status, RunStatus::Success);
     let seen = live.seen();
     assert_eq!(seen.peak, 4, "four child drivers are live at the most");
@@ -921,7 +949,7 @@ async fn a_fork_of_fifty_children_keeps_four_live_and_starts_them_in_order() {
     let expected: Vec<String> = (0..50).map(|index| format!("c{index:02}")).collect();
     assert_eq!(slots, expected, "declaration order is branch order");
     assert!(
-        peak_concurrency(&trace.labels(), "c:1") <= 4,
+        peak_concurrency(&trace.labels(), "hold:h") <= 4,
         "at most four child steps run at once: {:?}",
         trace.labels()
     );
