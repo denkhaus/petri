@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use petri::execution::events::{EventBody, replay_run};
+use petri::execution::events::{ViewEvent, replay_run};
 use serde_json::{Value, json};
 use support::fabro::interview;
 use support::fabro::launch::{Case, Launch, sanitized_path};
@@ -2373,18 +2373,18 @@ fn assert_for_each_fork_events(run_dir: &Path, items: u32) {
             .and_then(|subject| subject.node.meta["kind"].as_str())
             .unwrap_or_default()
             .to_owned();
-        match &event.body {
-            EventBody::ForkStarted { branches: refs, .. } => {
+        match event.view() {
+            Some(ViewEvent::ForkStarted { branches: refs, .. }) => {
                 forks.push((node, kind, refs.iter().map(|b| b.index).collect::<Vec<_>>()));
             }
-            EventBody::BranchCompleted { result, .. } => {
+            Some(ViewEvent::BranchCompleted { result, .. }) => {
                 branches.push((
                     result.branch.index,
                     result.node.name.to_string(),
                     result.status.tag().to_owned(),
                 ));
             }
-            EventBody::ForkCompleted { fork, results, .. } => {
+            Some(ViewEvent::ForkCompleted { fork, results, .. }) => {
                 joins.push((
                     node,
                     kind,

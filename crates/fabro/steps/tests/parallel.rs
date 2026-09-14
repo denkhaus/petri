@@ -10,20 +10,22 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
-use execution::ExecutionObserver;
 use execution::events::{
-    CollectingSink, EventBody, EventProjector, ForkDisposition, ForkOccurrence, RunEvent,
+    CollectingSink, EventProjector, ForkDisposition, ForkOccurrence, RunEvent, ViewEvent,
     replay_run,
 };
 use execution::host::{self, HostRun};
 use execution::inspect::{InvocationInspection, RunInspection, inspect_run};
+use execution::{CoordinatorEvent, ExecutionObserver};
 use fabro_steps::blobs::{holds_ref, hydrate};
 use fabro_steps::{
     AGENT_KIND, BLOBS_DIR, BranchStep, CommandStep, FanInStep, ForkStep, HUMAN_KIND,
     LocalBlobStore, STAGE_KIND, StubStep, WAIT_KIND, WORKFLOW_KIND,
 };
 use frontend::{CompileInputs, Lowered, NoFiles};
+use ir::StepEvent;
 use runtime::driver::{BranchRole, ExecutionReport};
+use runtime::engine::Event;
 use runtime::executor::Retention;
 use runtime::ir::{Graph, RunStatus};
 use runtime::{RunOptions, Runtime};
@@ -117,8 +119,11 @@ async fn run_projected(
 fn customs(events: &[RunEvent], kind: &str) -> Vec<Value> {
     events
         .iter()
-        .filter_map(|event| match &event.body {
-            EventBody::StepCustom { value } if value["kind"] == json!(kind) => Some(value.clone()),
+        .filter_map(|event| match event.engine() {
+            Some(Event::StepProgressRecorded {
+                ev: StepEvent::Custom(value),
+                ..
+            }) if value["kind"] == json!(kind) => Some(value.clone()),
             _ => None,
         })
         .collect()
@@ -128,8 +133,8 @@ fn customs(events: &[RunEvent], kind: &str) -> Vec<Value> {
 fn branch_closes(events: &[RunEvent]) -> Vec<(u32, String)> {
     events
         .iter()
-        .filter_map(|event| match &event.body {
-            EventBody::BranchCompleted { result, .. } => {
+        .filter_map(|event| match event.view() {
+            Some(ViewEvent::BranchCompleted { result, .. }) => {
                 Some((result.branch.index, result.status.tag().to_owned()))
             }
             _ => None,
@@ -142,12 +147,12 @@ fn branch_closes(events: &[RunEvent]) -> Vec<(u32, String)> {
 fn fork_closes(events: &[RunEvent]) -> Vec<(ForkDisposition, Vec<(u32, String)>)> {
     events
         .iter()
-        .filter_map(|event| match &event.body {
-            EventBody::ForkCompleted {
+        .filter_map(|event| match event.view() {
+            Some(ViewEvent::ForkCompleted {
                 results,
                 disposition,
                 ..
-            } => Some((
+            }) => Some((
                 *disposition,
                 results
                     .iter()
@@ -164,11 +169,11 @@ fn fork_closes(events: &[RunEvent]) -> Vec<(ForkDisposition, Vec<(u32, String)>)
 fn fork_starts(events: &[RunEvent]) -> Vec<(ForkOccurrence, Vec<u32>)> {
     events
         .iter()
-        .filter_map(|event| match &event.body {
-            EventBody::ForkStarted {
+        .filter_map(|event| match event.view() {
+            Some(ViewEvent::ForkStarted {
                 occurrence,
                 branches,
-            } => Some((
+            }) => Some((
                 occurrence.clone(),
                 branches.iter().map(|branch| branch.index).collect(),
             )),
@@ -182,8 +187,8 @@ fn fork_starts(events: &[RunEvent]) -> Vec<(ForkOccurrence, Vec<u32>)> {
 fn branch_occurrences(events: &[RunEvent]) -> Vec<(ForkOccurrence, u32)> {
     events
         .iter()
-        .filter_map(|event| match &event.body {
-            EventBody::BranchCompleted { occurrence, result } => {
+        .filter_map(|event| match event.view() {
+            Some(ViewEvent::BranchCompleted { occurrence, result }) => {
                 Some((occurrence.clone(), result.branch.index))
             }
             _ => None,
@@ -196,12 +201,12 @@ fn branch_occurrences(events: &[RunEvent]) -> Vec<(ForkOccurrence, u32)> {
 fn close_occurrences(events: &[RunEvent]) -> Vec<(ForkOccurrence, Vec<u32>)> {
     events
         .iter()
-        .filter_map(|event| match &event.body {
-            EventBody::ForkCompleted {
+        .filter_map(|event| match event.view() {
+            Some(ViewEvent::ForkCompleted {
                 occurrence,
                 results,
                 ..
-            } => Some((
+            }) => Some((
                 occurrence.clone(),
                 results.iter().map(|result| result.branch.index).collect(),
             )),
@@ -221,10 +226,10 @@ fn custom_occurrence(event: &Value) -> u64 {
 fn child_slots(events: &[RunEvent]) -> Vec<String> {
     events
         .iter()
-        .filter_map(|event| match &event.body {
-            EventBody::InvocationDeclared {
+        .filter_map(|event| match event.coordinator() {
+            Some(CoordinatorEvent::InvocationDeclared {
                 call: Some(call), ..
-            } => Some(call.slot.to_string()),
+            }) => Some(call.slot.to_string()),
             _ => None,
         })
         .collect()
@@ -235,8 +240,11 @@ fn kills_in(events: &[RunEvent], invocation: u64) -> usize {
     events
         .iter()
         .filter(|event| {
-            event.invocation.is_some_and(|id| id.raw() == invocation)
-                && matches!(event.body, EventBody::KillRequested { .. })
+            event
+                .context
+                .invocation
+                .is_some_and(|id| id.raw() == invocation)
+                && matches!(event.engine(), Some(Event::KillRequested { .. }))
         })
         .count()
 }
@@ -246,12 +254,12 @@ fn kills_in(events: &[RunEvent], invocation: u64) -> usize {
 fn child_invocation(events: &[RunEvent], target: &str) -> u64 {
     events
         .iter()
-        .find_map(|event| match &event.body {
-            EventBody::InvocationDeclared {
+        .find_map(|event| match event.coordinator() {
+            Some(CoordinatorEvent::InvocationDeclared {
                 invocation,
                 call: Some(call),
                 ..
-            } if call.slot.ends_with(&format!(":{target}")) => Some(invocation.raw()),
+            }) if call.slot.ends_with(&format!(":{target}")) => Some(invocation.raw()),
             _ => None,
         })
         .unwrap_or_else(|| panic!("a child for `{target}`"))
@@ -649,8 +657,8 @@ async fn an_empty_for_each_list_joins_with_no_branches_and_no_child() {
 
     let forks: Vec<(String, Vec<u32>)> = events
         .iter()
-        .filter_map(|event| match &event.body {
-            EventBody::ForkStarted { branches, .. } => Some((
+        .filter_map(|event| match event.view() {
+            Some(ViewEvent::ForkStarted { branches, .. }) => Some((
                 event
                     .subject
                     .as_ref()
@@ -1122,14 +1130,17 @@ async fn a_cancel_before_admission_records_a_branch_that_never_started() {
     // The queued child was finished as cancelled without an attempt.
     let child_b = child_invocation(&events, "b");
     assert!(events.iter().any(|event| matches!(
-        &event.body,
-        EventBody::InvocationFinished { invocation, result }
+        event.coordinator(),
+        Some(CoordinatorEvent::InvocationFinished { invocation, result })
             if invocation.raw() == child_b && result.status == RunStatus::Cancelled
     )));
     assert!(
         !events.iter().any(|event| {
-            event.invocation.is_some_and(|id| id.raw() == child_b)
-                && matches!(event.body, EventBody::AttemptStarted)
+            event
+                .context
+                .invocation
+                .is_some_and(|id| id.raw() == child_b)
+                && matches!(event.engine(), Some(Event::StepStarted { .. }))
         }),
         "no attempt of b's child started"
     );

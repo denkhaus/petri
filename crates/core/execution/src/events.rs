@@ -1,24 +1,43 @@
 //! The public event contract: one versioned stream a host projects a run
 //! from, built only from durable records.
 //!
-//! Every [`RunEvent`] is derived from a coordinator record or an engine
-//! record with the post-apply engine state beside it. The same derivation
-//! runs live (as an [`ExecutionObserver`]) and over a finished run dir
-//! ([`replay_run`]), so a host that lost its live subscription rebuilds the
-//! same events, in the same order, with the same identities, from the files
-//! alone. Nothing here reads a clock inside the state machine: `recorded_at`
-//! is the time the record was appended to its log, read at that boundary and
-//! persisted beside the record, so it is the same live and on replay;
-//! `observed_at` is stamped by the projector when it sees a record live and is
-//! absent on replay.
+//! # The rule
+//!
+//! A public event carries its record, unchanged, plus what Petri derived
+//! beside it. Every [`RunEvent`] is either a record's own event or a view
+//! event attached to one:
+//!
+//! - A record's own event is named after the record (`step.finished`,
+//!   `execution.declared`): the `body.event` tag of the stored line. It carries
+//!   the stored line itself under [`RunEvent::record`], exactly as the
+//!   coordinator log or the execution's engine log holds it (`seq`, `origin`,
+//!   `recorded_at`, `body`), serialized by the same types. Nothing is renamed,
+//!   re-nested, dropped or lifted out of it. What Petri derived from the record
+//!   and the post-apply state lives apart from it under [`RunEvent::derived`]:
+//!   whether an attempt was final, the node a route resolved to, the answer a
+//!   delivered control decoded to, Petri's reading of a step protocol it owns
+//!   (`parsed`).
+//! - A view event ([`ViewEvent`]: `visit.started`, `wait.state.changed`,
+//!   `fork.completed` and the rest) has no record. It is derived from the state
+//!   alone, marked [`RecordOrigin::Derived`], and follows the record whose
+//!   apply produced it at `index` 1 and up.
+//!
+//! The same derivation runs live (as an [`ExecutionObserver`]) and over a
+//! finished run dir ([`replay_run`]), so a host that lost its live
+//! subscription rebuilds the same events, in the same order, with the same
+//! identities, from the files alone. Nothing here reads a clock inside the
+//! state machine: `recorded_at` is the time the record was appended to its
+//! log, read at that boundary and persisted beside the record, so it is the
+//! same live and on replay; `observed_at` is stamped by the projector when
+//! it sees a record live and is absent on replay.
 //!
 //! # Identity and ordering
 //!
-//! [`EventId`] is `(source, seq, index)`: the log the record came from (the
+//! [`EventId`] is `(log, seq, index)`: the log the record came from (the
 //! coordinator log or one execution's engine log), the record's `seq` in
 //! that log, and the ordinal of this event among the events one record
-//! produced. Within one source the order is total. Across sources the
-//! `execution` and `invocation` fields plus [`ParentLink`] tie an execution's
+//! produced (`0` is the record's own event). Within one log the order is
+//! total. Across logs the [`Context`] plus [`ParentLink`] tie an execution's
 //! events to the invocation that declared it and to the parent firing that
 //! called it.
 //!
@@ -32,7 +51,7 @@
 //! slows the driver, and an event projected while the queue is full is not
 //! queued. It is counted as `overflowed` in the [`ProjectionReceipt`], live
 //! delivery goes on with the next event that finds room (so the sink sees
-//! each source in order, with gaps), and the durable log keeps it. A sink
+//! each log in order, with gaps), and the durable log keeps it. A sink
 //! error stops the pump; every later event is counted as undelivered. A
 //! `deliver` or `finish` that outlasts [`ProjectorOptions::stall_timeout`]
 //! (30 seconds by default) is dropped and counts as a failure that names the
@@ -41,45 +60,37 @@
 //! that needs completeness after an overflow, a failure or a stall calls
 //! [`replay_run`] and deduplicates by [`EventId`].
 //!
-//! Across a resume, the driver replays the regenerated suffix to observers
-//! before dispatching pending work, so events for records the crash kept off
-//! disk arrive again with the same identities: delivery is at-least-once,
-//! deduplicated by [`EventId`]. Records before the loaded prefix are not
-//! re-delivered live; [`replay_run`] covers them. A projector attached at
-//! resume is built with [`EventProjector::primed`], which folds the prefix
-//! into its state without delivering it, so the suffix derives the same
-//! events it would have derived live.
+//! # Crash recovery
 //!
-//! # Durability
+//! Read-only projection publishes what is stored. A crash can leave an
+//! engine log short of the core records its last external record produced;
+//! [`replay_run`] regenerates them to reach the right state but publishes no
+//! event attached to a record that never reached the log. Resume writes those
+//! records through the normal storage path, with normal recording times,
+//! before its observers see them: the driver hands the regenerated suffix to
+//! the log writer first and to every other observer after it, before it
+//! dispatches pending work, so events for records the crash kept off disk
+//! arrive with the same identities. Delivery is at-least-once, deduplicated
+//! by [`EventId`]. Records before the loaded prefix are not re-delivered
+//! live; [`replay_run`] covers them. A projector attached at resume is built
+//! with [`EventProjector::primed`], which folds the stored prefix into its
+//! state without delivering it, so the suffix derives the same events it
+//! would have derived live.
 //!
-//! Every event here is derived from a durable record, log lines included:
-//! the engine log persists `StepProgress`, and every record carries the time
-//! it was recorded, so run, invocation, visit, attempt, interview and command
-//! start and completion times are recovered from the logs as `recorded_at`.
-//! `observed_at` is the one live-only field. Agent activity
-//! ([`EventBody::AgentActivity`]) carries the backend's own envelope as
-//! recorded; a backend's live stream chunks that never reached the step's
-//! progress channel are not in the contract.
+//! # Export
+//!
+//! Because a record's own event carries the stored line, a host that stores
+//! `record` values stores the logs. [`verify_export`] proves it over a run
+//! dir: the exported records equal the stored ones as JSON values, reload
+//! through the log readers, and replay to the stored logs (a complete log
+//! exactly, a crash prefix as a prefix). The standalone host runs it at the
+//! end of every run under `verify_replay`.
 //!
 //! # Secrets
 //!
 //! Records are masked by the driver before they are appended, so every value
 //! here is post-mask: a secret reference stays `{"$secret": ...}` and a
 //! masked value stays `***`.
-//!
-//! # Inversion
-//!
-//! The stream is lossless for the records replay consumes. Every event says
-//! who appended its record ([`RunEvent::origin`]). Every coordinator record
-//! and every external engine record derives at least one event, and the
-//! first event derived from such a record (`index` 0) carries everything the
-//! record did, so [`invert`] rebuilds the records from the events alone. The
-//! core's own records (routed tokens, applied routes, splices, cascading
-//! cancels) derive events too, but replay regenerates them from the external
-//! ones, so inversion skips them by origin. [`verify_lossless`] proves the
-//! round trip over a run dir: project, invert, replay the inverted records,
-//! and compare both the regenerated logs and the re-projected stream with
-//! the originals.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -90,60 +101,50 @@ use std::{fs, io};
 use driver::lifecycle::{BUDGET_PAUSED_KIND, BUDGET_RESUMED_KIND, BudgetNote, Note};
 use driver::{BranchMap, BranchRef, BranchRole};
 use engine::{
-    Admission, CancelTarget, DecisionId, EngineExit, EngineState, EntryPoint, Event, EventOrigin,
-    EventRecord, GroupDecision, Intervention, RouteApplied, RouteDecision, WeightedDraw,
+    CancelTarget, DecisionId, EngineState, Event, EventOrigin, EventRecord, GroupDecision,
+    RouteApplied, RouteDecision,
 };
 use ir::placeholder::is_placeholder_item;
 use ir::{
-    Attempt, CancelScopeId, Control, EdgeId, EdgeTransition, FiringId, Generation, Graph,
-    LogStream, Metrics, NodeId, Outcome, RunStatus, Status, StepEvent, Token, Value,
+    Attempt, Control, EdgeTransition, FiringId, Generation, Graph, Metrics, NodeId, Outcome,
+    Status, StepEvent, Token, Value,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use smol_str::SmolStr;
-use steps::{ANSWER_KEY, Question, QuestionExpired};
+use steps::{ANSWER_KEY, Answer, Question, QuestionExpired};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
-use crate::hooks::{HOOK_ACTIVITY_NOTE_KIND, HookActivity, HookOperation};
+use crate::hooks::{HOOK_ACTIVITY_NOTE_KIND, HookActivity};
 use crate::host::EVENTS_FILE;
 use crate::store::execution_relative_dir;
 use crate::{
-    AttemptAdmission, COORDINATOR_FILE, CancelReason, CoordinatorEvent, CoordinatorRecord,
-    CoordinatorState, DecodedCoordinatorLog, DecodedEngineLog, EngineLogError, ExecutionId,
-    ExecutionObserver, GRAPHS_DIR, InvocationId, InvocationResult, ParentCallKey, SandboxBinding,
-    SecretBindings, StateError, StoreError, decode_coordinator_log, read_engine_log,
+    COORDINATOR_FILE, CancelReason, CoordinatorEvent, CoordinatorRecord, CoordinatorState,
+    DecodedCoordinatorLog, DecodedEngineLog, EngineLogError, ExecutionId, ExecutionObserver,
+    GRAPHS_DIR, InvocationId, ParentCallKey, StateError, StoreError, StoredEngineRecord,
+    decode_coordinator_log, read_engine_log,
 };
 
-pub mod invert;
+pub mod export;
 
-pub use invert::{
-    InvertError, InvertedRecord, InvertedRun, LosslessError, invert, verify_lossless,
-};
+pub use export::{ExportError, verify_export};
 
 /// The version of this contract. Bump when an existing field changes meaning
 /// or a variant is removed; adding a variant or an optional field does not.
 ///
-/// Version 2 made the stream lossless for replay (see "Inversion" in the
-/// module docs): every event carries the `origin` of its record, `run_started`
-/// carries the coordinator format version, `graph_registered` is new,
-/// `invocation_declared` carries the secret bindings and the admission gate,
-/// `execution_declared` and `execution_started` carry the whole engine start,
-/// `execution_admitted` carries the decision and its trace, a `RouteChoice`
-/// carries the weighted draw, an `AgentActivity` carries the step's own
-/// attributes beside the envelope, and a delivered answer carries the value
-/// it was decoded from.
+/// Version 2 made the stream lossless for replay: every event carried the
+/// `origin` of its record and the first event of a record carried everything
+/// the record did, under presentation names, so a reverse mapping could
+/// rebuild the records.
 ///
 /// Version 3 is one vocabulary for records and events: a public event is
 /// named after its record (`step.finished`, `routing.resolved`) and carries
 /// the stored record unchanged under `record`, with what Petri derived
-/// beside it under `derived`.
+/// beside it under `derived`. The presentation names of version 2
+/// (`attempt_finished`, `routes_resolved`, `output_line` and the rest) are
+/// gone, and so is the reverse mapping: export reads `record`.
 pub const EVENT_CONTRACT_VERSION: u32 = 3;
-
-/// The `StepEvent::Custom` key under which a backend's own event envelope
-/// rides, with `kind` naming the backend.
-pub const BACKEND_EVENT_KIND_KEY: &str = "kind";
 
 /// Which durable log an event was derived from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -153,7 +154,8 @@ pub enum EventSource {
     Execution { execution: ExecutionId },
 }
 
-/// Who appended the record an event derives from.
+/// Who appended the record an event derives from, copied from the record;
+/// or that the event has no record.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordOrigin {
@@ -167,6 +169,9 @@ pub enum RecordOrigin {
     /// applied route, a splice, a cascading cancel. Replay regenerates these
     /// from the external records.
     Core,
+    /// A view event: derived from the state alone, with no record of its
+    /// own. Never stored; replay recomputes it.
+    Derived,
 }
 
 impl From<EventOrigin> for RecordOrigin {
@@ -178,13 +183,16 @@ impl From<EventOrigin> for RecordOrigin {
     }
 }
 
-/// A stable identity for deduplication.
+/// A stable identity for deduplication: the log, the record's `seq` in it,
+/// and which of the events derived from that record this is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct EventId {
+    #[serde(flatten)]
     pub source: EventSource,
     /// The record's position in its log.
     pub seq:    u64,
-    /// Which of the events derived from that one record this is.
+    /// `0` is the record's own event; the view events attached to the record
+    /// follow at `1` and up.
     pub index:  u32,
 }
 
@@ -206,6 +214,18 @@ impl From<&ParentCallKey> for ParentLink {
             slot:      key.slot.clone(),
         }
     }
+}
+
+/// Where an event sits in the run: its invocation and execution, and the
+/// parent call for an event of a nested invocation.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Context {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation: Option<InvocationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution:  Option<ExecutionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent:     Option<ParentLink>,
 }
 
 /// A node, with the frontend's metadata so a host can tell a logical stage
@@ -239,22 +259,44 @@ pub struct Subject {
     pub branch:     BranchRole,
 }
 
+/// The stored line a record's own event carries: a coordinator log line or
+/// an engine log line, by the same types that write the logs. The log it
+/// came from is the event's [`EventId::source`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Record {
+    Coordinator(CoordinatorRecord),
+    Engine(StoredEngineRecord),
+}
+
+impl Record {
+    /// The engine event, for an engine record.
+    pub fn engine(&self) -> Option<&Event> {
+        match self {
+            Self::Engine(record) => Some(&record.body),
+            Self::Coordinator(_) => None,
+        }
+    }
+
+    /// The coordinator event, for a coordinator record.
+    pub fn coordinator(&self) -> Option<&CoordinatorEvent> {
+        match self {
+            Self::Coordinator(record) => Some(&record.body),
+            Self::Engine(_) => None,
+        }
+    }
+}
+
 /// One event of the public stream.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunEvent {
     pub id:          EventId,
-    /// Whether the host or the core appended the record this event derives
-    /// from. Inversion rebuilds the `external` records; replay regenerates
-    /// the `core` ones.
+    /// Copied from the record: who appended it. `derived` for a view event,
+    /// which has no record.
     #[serde(default)]
     pub origin:      RecordOrigin,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub invocation:  Option<InvocationId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution:   Option<ExecutionId>,
-    /// The parent call, for an event of a nested invocation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent:      Option<ParentLink>,
+    #[serde(default)]
+    pub context:     Context,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject:     Option<Subject>,
     /// Milliseconds since the Unix epoch when the projector saw the record
@@ -266,12 +308,175 @@ pub struct RunEvent {
     /// from was appended to its log: the driver's clock for an engine record,
     /// the coordinator store's for a coordinator record, read at the append
     /// and persisted beside the record. The same live and on replay; the
-    /// time an event happened, as opposed to when it was seen. Absent only
-    /// for a record replay regenerated that never reached a log (a crash's
-    /// lost tail, projected before any resume rewrote it).
+    /// time an event happened, as opposed to when it was seen. On a record's
+    /// own event it repeats `record.recorded_at`; a view event carries the
+    /// time of the record it is attached to.
+    pub recorded_at: u64,
+    /// The stored line, unchanged, on a record's own event (`index` 0).
+    /// Absent on a view event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recorded_at: Option<u64>,
-    pub body:        EventBody,
+    pub record:      Option<Record>,
+    /// What Petri derived beside the record, or the view event itself.
+    /// Absent when a record's event derives nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived:     Option<Derived>,
+}
+
+impl RunEvent {
+    /// The engine event of an engine record's own event.
+    pub fn engine(&self) -> Option<&Event> {
+        self.record.as_ref().and_then(Record::engine)
+    }
+
+    /// The coordinator event of a coordinator record's own event.
+    pub fn coordinator(&self) -> Option<&CoordinatorEvent> {
+        self.record.as_ref().and_then(Record::coordinator)
+    }
+
+    /// The view event, for an event that is one.
+    pub fn view(&self) -> Option<&ViewEvent> {
+        match &self.derived {
+            Some(Derived::View(view)) => Some(view),
+            _ => None,
+        }
+    }
+
+    /// Petri's reading of a step protocol it owns, on a
+    /// `step.progress.recorded` or `run.note.recorded` event.
+    pub fn parsed(&self) -> Option<&Parsed> {
+        match &self.derived {
+            Some(Derived::Parsed { parsed }) => Some(parsed),
+            _ => None,
+        }
+    }
+
+    /// The step-defined payload of a `step.progress.recorded` event, as
+    /// recorded: a backend's own event, a step's report, a Petri protocol.
+    pub fn custom(&self) -> Option<&Value> {
+        match self.engine() {
+            Some(Event::StepProgressRecorded {
+                ev: StepEvent::Custom(value),
+                ..
+            }) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The note a `step.progress.recorded` or `run.note.recorded` event
+    /// carries, when it is one.
+    pub fn note(&self) -> Option<&Note> {
+        match self.parsed() {
+            Some(Parsed::Note { note, .. }) => Some(note),
+            _ => None,
+        }
+    }
+}
+
+/// What Petri derived beside a record, or the view event an event is. Each
+/// record kind that derives anything has its own shape; the view events
+/// are tagged by `event`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Derived {
+    /// A view event, on an event with no record.
+    View(ViewEvent),
+    /// `step.finished`: `final` is whether the engine recorded the attempt
+    /// as the firing's outcome (a non-final attempt is followed by a
+    /// retry); `exhausted` is whether the retry policy allowed no further
+    /// attempt while the status was retryable.
+    StepFinished {
+        #[serde(rename = "final")]
+        is_final:  bool,
+        exhausted: bool,
+    },
+    /// `routing.resolved`: the node each group's decision resolved to.
+    RoutingResolved { groups: Vec<GroupTarget> },
+    /// `route.applied`: the node the route leads to, and for an edge its
+    /// transition and whether it is a `back` edge. Absent for a route that
+    /// applied nothing.
+    RouteApplied {
+        target:     NodeRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transition: Option<EdgeTransition>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        back:       Option<bool>,
+    },
+    /// `node.expanded`: each clone's entry node.
+    NodeExpanded { clones: Vec<CloneRef> },
+    /// `control.requested`: `deliverable` is whether the firing could
+    /// receive the control (a late answer is recorded but not deliverable);
+    /// `answer` is the decoding of a delivered value that reads as one.
+    ControlRequested {
+        deliverable: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answer:      Option<Answer>,
+    },
+    /// `step.progress.recorded` and `run.note.recorded`: Petri's reading of
+    /// a step protocol it owns. Absent when the payload is a log line, an
+    /// artifact, or a payload Petri does not own (a backend's own event is
+    /// forwarded as recorded, `kind` naming the backend).
+    Parsed { parsed: Parsed },
+}
+
+/// One routing group's resolved target.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GroupTarget {
+    pub group:  u32,
+    /// The node an `emit` or `jump` decision leads to. Absent for `none`
+    /// and `block`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<NodeRef>,
+}
+
+/// One expansion clone's entry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CloneRef {
+    pub index: u32,
+    pub entry: NodeRef,
+}
+
+/// Petri's reading of a step protocol it owns, from a `$question`,
+/// `$question_expired` or `$note` payload.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Parsed {
+    /// The step asked the host a question.
+    Question { question: Question },
+    /// The step's own answer deadline passed with no answer, as the step
+    /// reported it. The attempt's outcome follows as `step.finished`;
+    /// expiry is never inferred from that outcome.
+    QuestionExpired { expired: QuestionExpired },
+    /// A host extension recorded a fact (`driver::lifecycle::Note`). Kinds
+    /// the driver writes: `result_prepared`, `transition`, `budget_paused`,
+    /// `budget_resumed`. Kinds the hook adapter writes: `hook` (a hook
+    /// service report) and `hook.activity`. Two kinds get a reading beside
+    /// the note: `hook_activity` for a hook's own agent event, `budget` for
+    /// an attempt budget's pause or resume.
+    Note {
+        note:          Note,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hook_activity: Option<HookActivity>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        budget:        Option<BudgetReading>,
+    },
+}
+
+/// An attempt budget's pause or resume: an executor-enforced budget stopped
+/// counting because the attempt asked a question, or counts again because
+/// its last pending question was answered. `remaining_ms` is the active-work
+/// time left.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BudgetReading {
+    pub state: BudgetState,
+    #[serde(flatten)]
+    pub note:  BudgetNote,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetState {
+    Paused,
+    Resumed,
 }
 
 /// Where a firing stands between records.
@@ -287,25 +492,6 @@ pub enum WaitState {
     AwaitingRetry,
     /// Told to stop; the outcome is on its way.
     Cancelling,
-}
-
-/// One routing group's resolution, with the edge target resolved to a node.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct RouteChoice {
-    pub group:    u32,
-    pub decision: RouteDecision,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target:   Option<NodeRef>,
-    /// Middleware and host interventions, outermost first. An override or
-    /// jump here means the host changed the engine's proposal.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub trace:    Vec<Intervention>,
-    /// Whether the engine drew a random number for a weighted tier.
-    pub weighted: bool,
-    /// The draw itself, when `weighted`: the tier, its candidates, the roll
-    /// and the total, as the engine recorded them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub draw:     Option<WeightedDraw>,
 }
 
 /// One branch's result: the record of the last node that ran on the branch.
@@ -355,204 +541,49 @@ pub enum ForkDisposition {
     Killed,
 }
 
-/// A backend's own event, attributed. `envelope` is the backend's envelope
-/// as the step recorded it (for the native agent backend: Pebble's
-/// `CodingAgentEvent`, with `seq`, `stream_id`, `session_id`,
-/// `parent_session_id`, `tool_call_id`, `timestamp`, `event`).
+/// The view events: the projection's incremental reading of the state,
+/// never stored. Each is attached to the record whose apply produced it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct AgentActivity {
-    /// The backend name, from the custom event's `kind`.
-    pub backend:        SmolStr,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session:        Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_session: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call:      Option<String>,
-    /// The backend's own stream identity and sequence, when it has one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stream:         Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stream_seq:     Option<u64>,
-    pub envelope:       Value,
-    /// The step's own keys beside `kind` and `event` in the custom payload,
-    /// verbatim (the native backend records `node`, `firing`, `attempt` and
-    /// `scope`). Empty when the payload carried only the envelope.
-    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
-    pub attributes:     serde_json::Map<String, Value>,
-}
-
-/// What happened.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "event", rename_all = "snake_case")]
-pub enum EventBody {
-    // ── Run and invocations (coordinator log) ───────────────────────────────
-    RunStarted {
-        /// The coordinator record format the run was written in.
-        format_version:   u32,
-        root:             InvocationId,
-        middleware_chain: Vec<engine::MiddlewareKey>,
-    },
-    RunFinished {
-        status: RunStatus,
-    },
-    /// A graph is in the run's registry under its digest, before any
-    /// invocation declares it.
-    GraphRegistered {
-        digest: String,
-    },
-    InvocationDeclared {
-        invocation:      InvocationId,
-        /// Absent for the root.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        call:            Option<ParentLink>,
-        graph:           String,
-        sandbox:         SandboxBinding,
-        context:         BTreeMap<SmolStr, Value>,
-        /// The child's secret bindings, by name only; plaintext is not
-        /// representable here.
-        #[serde(default)]
-        secret_bindings: SecretBindings,
-        /// The admission gate the invocation's attempts share, when it has
-        /// one.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        admission:       Option<AttemptAdmission>,
-    },
-    InvocationFinished {
-        invocation: InvocationId,
-        result:     InvocationResult,
-    },
-    InvocationCancelRequested {
-        invocation: InvocationId,
-        /// Why, when the requester said (the watchdog, an interrupt, a
-        /// control).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reason:     Option<CancelReason>,
-    },
-    /// The stall watchdog cancelled the run: no execution activity for the
-    /// budget. Derived from the cancel record that carries the reason.
-    StallTimeout {
-        stall_timeout_ms: u64,
-        idle_ms:          u64,
-    },
-    /// The run is paused: attempts not yet admitted are held. From the
-    /// coordinator's `RunPaused` record, so replay carries it and a resume
-    /// starts paused when it is the last control recorded.
-    RunPaused,
-    /// The run is unpaused: held attempts proceed. From the coordinator's
-    /// `RunUnpaused` record.
-    RunUnpaused,
-    /// An executor-enforced attempt budget stopped counting: the attempt asked
-    /// a question. `remaining_ms` is the active-work time left.
-    BudgetPaused {
-        remaining_ms:      u64,
-        pending_questions: u32,
-    },
-    /// The attempt budget counts again: its last pending question was
-    /// answered.
-    BudgetResumed {
-        remaining_ms: u64,
-    },
-    ExecutionDeclared {
-        execution:        ExecutionId,
-        invocation:       InvocationId,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        predecessor:      Option<ExecutionId>,
-        execution_index:  u32,
-        entry:            EntryPoint,
-        /// The rest of the engine start the execution was declared with: its
-        /// initial context, the firing counts it inherits from its
-        /// predecessor, and the restart limit.
-        context:          BTreeMap<SmolStr, Value>,
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        prior_firings:    BTreeMap<NodeId, u32>,
-        max_executions:   u32,
-        /// The middleware state the execution starts from, by key: the
-        /// middleware's state version and its value.
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        middleware_state: BTreeMap<engine::MiddlewareKey, (u32, Value)>,
-    },
-    ExecutionFinished {
-        execution: ExecutionId,
-        exit:      EngineExit,
-    },
-
-    // ── Execution (engine log) ──────────────────────────────────────────────
-    ExecutionStarted {
-        entry:           EntryPoint,
-        execution_index: u32,
-        context:         BTreeMap<SmolStr, Value>,
-        /// The firing counts inherited from the predecessor execution.
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        prior_firings:   BTreeMap<NodeId, u32>,
-        /// The restart limit the execution runs under.
-        max_executions:  u32,
-    },
-    /// The execution's own admission decision, before any node fires.
-    ExecutionAdmitted {
-        admitted: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reason:   Option<SmolStr>,
-        /// The decision as the host or middleware gave it, with its trace.
-        decision: Admission,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        trace:    Vec<engine::MiddlewareKey>,
-    },
+#[serde(tag = "event")]
+pub enum ViewEvent {
     /// A node's join was satisfied and a firing exists, awaiting admission.
-    VisitStarted {
-        inputs: Vec<Token>,
-    },
-    /// The host or middleware decided on an attempt.
-    AttemptAdmitted {
-        decision: Admission,
-        trace:    Vec<engine::MiddlewareKey>,
-    },
-    /// The attempt was dispatched to its step.
-    AttemptStarted,
-    /// An attempt returned. `final` is whether the engine recorded it as the
-    /// firing's outcome; a non-final attempt is followed by a retry.
-    AttemptFinished {
-        outcome:   Outcome,
-        #[serde(rename = "final")]
-        is_final:  bool,
-        /// The retry policy allowed no further attempt and the status was
-        /// retryable: the firing exhausted its retries.
-        exhausted: bool,
-    },
-    RetryScheduled {
-        next_attempt: Attempt,
-        base_delay:   Duration,
-    },
-    RetryElapsed {
-        next_attempt: Attempt,
-    },
+    #[serde(rename = "visit.started")]
+    VisitStarted { inputs: Vec<Token> },
     /// A firing's final record exists: the node completed this visit.
     /// `executed` is false for a completion the engine synthesized (a false
     /// precondition, a cancelled scope, a blocked admission).
+    #[serde(rename = "visit.completed")]
     VisitCompleted {
         outcome:  Outcome,
         executed: bool,
         attempts: u32,
     },
-    RoutesResolved {
-        choices: Vec<RouteChoice>,
+    /// A non-final attempt returned and the next one is waiting out the
+    /// backoff.
+    #[serde(rename = "retry.scheduled")]
+    RetryScheduled {
+        next_attempt: Attempt,
+        base_delay:   Duration,
     },
-    RouteApplied {
-        route: AppliedRoute,
-    },
+    /// A firing's wait state changed.
+    #[serde(rename = "wait.state.changed")]
+    WaitStateChanged { state: WaitState },
     /// The routes of a fork node applied: its branches are starting.
+    #[serde(rename = "fork.started")]
     ForkStarted {
         occurrence: ForkOccurrence,
         branches:   Vec<BranchRef>,
     },
     /// A branch reached its end: its final token reached the join, or the
     /// fork was cancelled or killed and this is the branch's last record.
+    #[serde(rename = "branch.completed")]
     BranchCompleted {
         occurrence: ForkOccurrence,
         result:     BranchResult,
     },
     /// The fork's branches are all accounted for, in branch order:
     /// `disposition` says whether the join fired or the fork was stopped.
+    #[serde(rename = "fork.completed")]
     ForkCompleted {
         occurrence:  ForkOccurrence,
         fork:        NodeRef,
@@ -560,123 +591,14 @@ pub enum EventBody {
         #[serde(default)]
         disposition: ForkDisposition,
     },
-    /// A `for_each` expansion spliced clones in.
-    NodeExpanded {
-        clones:       Vec<CloneRef>,
-        max_parallel: Option<u32>,
-        fail_fast:    bool,
+    /// The stall watchdog cancelled the run: no execution activity for the
+    /// budget. Attached to the `invocation.cancel.requested` record that
+    /// carries the reason.
+    #[serde(rename = "run.stalled")]
+    RunStalled {
+        stall_timeout_ms: u64,
+        idle_ms:          u64,
     },
-    /// A firing asked the host a question.
-    QuestionAsked {
-        question: Question,
-    },
-    /// A firing's question expired: the step's own answer deadline passed
-    /// with no answer, as the step reported it (`steps::QuestionExpired`).
-    /// `default` is the option the step took on its own, by key, when it had
-    /// one. The attempt's outcome follows as `attempt_finished`; expiry is
-    /// never inferred from that outcome.
-    QuestionExpired {
-        question:  String,
-        waited_ms: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        default:   Option<String>,
-    },
-    /// The host delivered a control into a firing. `deliverable` is whether
-    /// the firing could receive it; a late answer is recorded but not
-    /// deliverable.
-    ControlDelivered {
-        control:     DeliveredControl,
-        deliverable: bool,
-    },
-    /// A firing's wait state changed.
-    WaitStateChanged {
-        state: WaitState,
-    },
-    /// A polite cancel. `scope` names the cancelled scope for a scope
-    /// cancel; `group` names the anchor node for a group cancel.
-    CancelRequested {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        scope: Option<CancelScopeId>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        group: Option<NodeRef>,
-    },
-    KillRequested {
-        scope: CancelScopeId,
-    },
-    OutputLine {
-        stream: LogStream,
-        line:   String,
-    },
-    ArtifactRecorded {
-        name: SmolStr,
-        uri:  String,
-    },
-    AgentActivity(AgentActivity),
-    /// A hook's own agent did something: the backend envelope a hook's agent
-    /// produced, attributed to the firing whose hook ran it and to the hook
-    /// operation, apart from the stage's own `agent_activity`. From a
-    /// `hook.activity` note.
-    HookActivity {
-        hook:     HookOperation,
-        activity: AgentActivity,
-    },
-    /// A host extension recorded a fact (`driver::lifecycle::Note`). Kinds
-    /// the driver writes: `result_prepared`, `transition`. Kinds the hook
-    /// adapter writes: `hook` (a hook service report, with each hook's
-    /// usage); its `hook.activity` notes project to `hook_activity`.
-    HostNote {
-        kind:    SmolStr,
-        payload: Value,
-    },
-    /// A step-defined progress payload this contract does not interpret.
-    StepCustom {
-        value: Value,
-    },
-}
-
-/// One applied route.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum AppliedRoute {
-    Edge {
-        group:      u32,
-        edge:       EdgeId,
-        target:     NodeRef,
-        transition: EdgeTransition,
-        back:       bool,
-    },
-    Jump {
-        target: NodeRef,
-    },
-    None {
-        group: u32,
-    },
-}
-
-/// One expansion clone.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct CloneRef {
-    pub index: u32,
-    pub entry: NodeRef,
-    pub item:  Value,
-}
-
-/// A control as delivered, decoded when it is an answer.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum DeliveredControl {
-    /// A delivered value that reads as an answer. `value` is the value as
-    /// delivered (a host may send the answer under `$answer`, as a bare
-    /// object, or as a bare string), `answer` its decoding.
-    Answer {
-        answer: steps::Answer,
-        value:  Value,
-    },
-    Deliver {
-        value: Value,
-    },
-    Cancel,
-    Kill,
 }
 
 // ── Projection ─────────────────────────────────────────────────────────────
@@ -694,16 +616,17 @@ struct ExecutionTrack {
     asking:     BTreeSet<FiringId>,
     history:    usize,
     branches:   BranchMap,
-    /// Fork firings whose `ForkStarted` was emitted.
+    /// Fork firings whose `fork.started` was emitted.
     announced:  BTreeSet<FiringId>,
-    /// Forks whose `ForkCompleted` is still to come, by the fork's firing.
+    /// Forks whose `fork.completed` is still to come, by the fork's firing.
     open:       BTreeMap<FiringId, OpenFork>,
 }
 
-/// A fork between its `ForkStarted` and its `ForkCompleted`. The generation
-/// ties the branches and the join to this occurrence of the fork: the engine
-/// fires one `(node, generation)` at most once, and the tokens a fork routes
-/// to its branches and on to the join keep the fork firing's generation.
+/// A fork between its `fork.started` and its `fork.completed`. The
+/// generation ties the branches and the join to this occurrence of the
+/// fork: the engine fires one `(node, generation)` at most once, and the
+/// tokens a fork routes to its branches and on to the join keep the fork
+/// firing's generation.
 struct OpenFork {
     occurrence: ForkOccurrence,
     branches:   Vec<BranchRef>,
@@ -736,6 +659,9 @@ impl ExecutionTrack {
     }
 }
 
+/// A view event with the subject it is about, before it is given an id.
+type View = (Option<Subject>, ViewEvent);
+
 /// The stateless-by-record derivation, with the little state it needs across
 /// records. One per run; fed both logs.
 #[derive(Default)]
@@ -749,135 +675,58 @@ impl Projection {
         Self::default()
     }
 
-    /// Derive the events of one coordinator record.
+    /// Derive the events of one coordinator record: the record's own event,
+    /// then any view event attached to it.
     pub fn lifecycle(&mut self, record: &CoordinatorRecord) -> Vec<RunEvent> {
-        let id = EventId {
-            source: EventSource::Coordinator,
-            seq:    record.seq,
-            index:  0,
-        };
-        let (invocation, execution, body) = match &record.body {
-            CoordinatorEvent::RunStarted {
-                format_version,
-                root,
-                middleware_chain,
-            } => (Some(*root), None, EventBody::RunStarted {
-                format_version:   *format_version,
-                root:             *root,
-                middleware_chain: middleware_chain.clone(),
-            }),
-            CoordinatorEvent::GraphRegistered { digest } => {
-                (None, None, EventBody::GraphRegistered {
-                    digest: digest.to_hex(),
-                })
-            }
+        let mut views: Vec<ViewEvent> = Vec::new();
+        let (invocation, execution, derived) = match &record.body {
+            CoordinatorEvent::RunStarted { root, .. } => (Some(*root), None, None),
+            CoordinatorEvent::GraphRegistered { .. }
+            | CoordinatorEvent::RunPaused
+            | CoordinatorEvent::RunUnpaused
+            | CoordinatorEvent::RunFinished { .. } => (None, None, None),
             CoordinatorEvent::InvocationDeclared {
-                invocation,
-                call,
-                graph,
-                context,
-                secret_bindings,
-                sandbox,
-                admission,
+                invocation, call, ..
             } => {
                 let link = call.as_ref().map(ParentLink::from);
-                self.invocations.insert(*invocation, link.clone());
-                (Some(*invocation), None, EventBody::InvocationDeclared {
-                    invocation:      *invocation,
-                    call:            link,
-                    graph:           graph.to_hex(),
-                    sandbox:         *sandbox,
-                    context:         context.clone(),
-                    secret_bindings: secret_bindings.clone(),
-                    admission:       admission.clone(),
-                })
+                self.invocations.insert(*invocation, link);
+                (Some(*invocation), None, None)
             }
             CoordinatorEvent::ExecutionDeclared {
                 execution,
                 invocation,
-                predecessor,
-                start,
-                middleware_state,
+                ..
             } => {
                 let track = self.executions.entry(*execution).or_default();
                 track.invocation = Some(*invocation);
                 track.parent = self.invocations.get(invocation).cloned().flatten();
-                (
-                    Some(*invocation),
-                    Some(*execution),
-                    EventBody::ExecutionDeclared {
-                        execution:        *execution,
-                        invocation:       *invocation,
-                        predecessor:      *predecessor,
-                        execution_index:  start.execution_index,
-                        entry:            start.entry,
-                        context:          start.context.clone(),
-                        prior_firings:    start.prior_firings.clone(),
-                        max_executions:   start.max_executions,
-                        middleware_state: middleware_state.clone(),
-                    },
-                )
+                (Some(*invocation), Some(*execution), None)
             }
-            CoordinatorEvent::ExecutionFinished { execution, exit } => (
+            CoordinatorEvent::ExecutionFinished { execution, .. } => (
                 self.executions
                     .get(execution)
                     .and_then(|track| track.invocation),
                 Some(*execution),
-                EventBody::ExecutionFinished {
-                    execution: *execution,
-                    exit:      exit.clone(),
-                },
+                None,
             ),
-            CoordinatorEvent::InvocationFinished { invocation, result } => (
-                Some(*invocation),
-                Some(result.final_execution),
-                EventBody::InvocationFinished {
-                    invocation: *invocation,
-                    result:     result.clone(),
-                },
-            ),
+            CoordinatorEvent::InvocationFinished { invocation, result } => {
+                (Some(*invocation), Some(result.final_execution), None)
+            }
             CoordinatorEvent::InvocationCancelRequested { invocation, reason } => {
-                let mut events = vec![RunEvent {
-                    id,
-                    origin: RecordOrigin::External,
-                    invocation: Some(*invocation),
-                    execution: None,
-                    parent: self.invocations.get(invocation).cloned().flatten(),
-                    subject: None,
-                    observed_at: None,
-                    recorded_at: Some(record.recorded_at),
-                    body: EventBody::InvocationCancelRequested {
-                        invocation: *invocation,
-                        reason:     reason.clone(),
-                    },
-                }];
                 if let Some(CancelReason::StallTimeout {
                     stall_timeout_ms,
                     idle_ms,
                 }) = reason
                 {
-                    events.push(RunEvent {
-                        id:          EventId { index: 1, ..id },
-                        origin:      RecordOrigin::External,
-                        invocation:  Some(*invocation),
-                        execution:   None,
-                        parent:      None,
-                        subject:     None,
-                        observed_at: None,
-                        recorded_at: Some(record.recorded_at),
-                        body:        EventBody::StallTimeout {
-                            stall_timeout_ms: *stall_timeout_ms,
-                            idle_ms:          *idle_ms,
-                        },
+                    views.push(ViewEvent::RunStalled {
+                        stall_timeout_ms: *stall_timeout_ms,
+                        idle_ms:          *idle_ms,
                     });
                 }
-                return events;
+                (Some(*invocation), None, None)
             }
-            CoordinatorEvent::RunPaused => (None, None, EventBody::RunPaused),
-            CoordinatorEvent::RunUnpaused => (None, None, EventBody::RunUnpaused),
-            // A run-level hook report: the same `host_note` a firing's hook
-            // report is (and a hook's agent activity the same
-            // `hook_activity`), with no subject, since no firing owns it.
+            // A run-level note reads the way a firing's note does, with no
+            // subject, since no firing owns it.
             CoordinatorEvent::RunNoteRecorded {
                 execution,
                 kind,
@@ -885,111 +734,105 @@ impl Projection {
             } => (
                 None,
                 *execution,
-                note_body(Note::new(kind.clone(), payload.clone())),
+                Some(Derived::Parsed {
+                    parsed: note_parsed(Note::new(kind.clone(), payload.clone())),
+                }),
             ),
-            CoordinatorEvent::RunFinished { status } => {
-                (None, None, EventBody::RunFinished { status: *status })
-            }
         };
-        let parent = invocation
-            .and_then(|invocation| self.invocations.get(&invocation).cloned())
-            .flatten();
-        vec![RunEvent {
-            id,
-            origin: RecordOrigin::External,
+        let context = Context {
             invocation,
             execution,
-            parent,
+            parent: invocation
+                .and_then(|invocation| self.invocations.get(&invocation).cloned())
+                .flatten(),
+        };
+        let id = |index: u32| EventId {
+            source: EventSource::Coordinator,
+            seq: record.seq,
+            index,
+        };
+        let mut out = vec![RunEvent {
+            id: id(0),
+            origin: record.origin.into(),
+            context: context.clone(),
             subject: None,
             observed_at: None,
-            recorded_at: Some(record.recorded_at),
-            body,
-        }]
+            recorded_at: record.recorded_at,
+            record: Some(Record::Coordinator(record.clone())),
+            derived,
+        }];
+        out.extend(views.into_iter().enumerate().map(|(index, view)| RunEvent {
+            id:          id(u32::try_from(index + 1).unwrap_or(u32::MAX)),
+            origin:      RecordOrigin::Derived,
+            context:     context.clone(),
+            subject:     None,
+            observed_at: None,
+            recorded_at: record.recorded_at,
+            record:      None,
+            derived:     Some(Derived::View(view)),
+        }));
+        out
     }
 
-    /// Derive the events of one engine record, given its recording time (when
-    /// the record reached a log; `None` for a regenerated record that never
-    /// did) and the post-apply state.
+    /// Derive the events of one engine record, given its recording time
+    /// (when the record reached its log) and the post-apply state: the
+    /// record's own event, then the view events attached to it.
     pub fn engine(
         &mut self,
         execution: ExecutionId,
         record: &EventRecord,
-        recorded_at: Option<u64>,
+        recorded_at: u64,
         state: &EngineState,
     ) -> Vec<RunEvent> {
         let track = self.executions.entry(execution).or_default();
         if !track.branches.covers(state.graph()) {
             track.branches = BranchMap::of(state.graph()).with_expansions(state);
         }
-        let mut out = Vec::new();
-        let mut emit = |subject: Option<Subject>, body: EventBody| {
-            out.push((subject, body));
+        let mut views: Vec<View> = Vec::new();
+        let mut emit = |subject: Option<Subject>, view: ViewEvent| {
+            views.push((subject, view));
         };
 
-        match &record.event {
-            Event::ExecutionStarted { start } => emit(None, EventBody::ExecutionStarted {
-                entry:           start.entry,
-                execution_index: start.execution_index,
-                context:         start.context.clone(),
-                prior_firings:   start.prior_firings.clone(),
-                max_executions:  start.max_executions,
-            }),
-            Event::TokenEmitted { .. } => {}
+        let (subject, derived): (Option<Subject>, Option<Derived>) = match &record.event {
+            Event::ExecutionStarted { .. }
+            | Event::KillRequested { .. }
+            | Event::CancelRequested {
+                target: CancelTarget::Scope(_),
+            } => (None, None),
+            Event::CancelRequested {
+                target: CancelTarget::Group(node),
+            } => (node_subject(state, track, *node), None),
+            Event::TokenEmitted { token } => (subject_of(state, track, token.from), None),
             Event::StepStarted { firing, .. } => {
                 track.started.insert(*firing);
-                emit(subject_of(state, track, *firing), EventBody::AttemptStarted);
-                emit(
-                    subject_of(state, track, *firing),
-                    EventBody::WaitStateChanged {
-                        state: WaitState::Running,
-                    },
-                );
+                let subject = subject_of(state, track, *firing);
+                emit(subject.clone(), ViewEvent::WaitStateChanged {
+                    state: WaitState::Running,
+                });
+                (subject, None)
             }
             Event::StepProgressRecorded { firing, ev } => {
                 let subject = subject_of(state, track, *firing);
-                match ev {
-                    StepEvent::Log { stream, line } => emit(subject, EventBody::OutputLine {
-                        stream: *stream,
-                        line:   line.clone(),
-                    }),
-                    StepEvent::Artifact { name, uri } => {
-                        emit(subject, EventBody::ArtifactRecorded {
-                            name: name.clone(),
-                            uri:  uri.clone(),
+                let parsed = parse_progress(ev);
+                match &parsed {
+                    Some(Parsed::Question { .. }) => {
+                        track.asking.insert(*firing);
+                        emit(subject.clone(), ViewEvent::WaitStateChanged {
+                            state: WaitState::AwaitingAnswer,
                         });
                     }
-                    StepEvent::Custom(value) => {
-                        if let Some(question) = Question::from_event(ev) {
-                            track.asking.insert(*firing);
-                            emit(subject.clone(), EventBody::QuestionAsked { question });
-                            emit(subject, EventBody::WaitStateChanged {
-                                state: WaitState::AwaitingAnswer,
-                            });
-                        } else if let Some(expired) = QuestionExpired::from_event(ev) {
-                            // The step ended its own wait: the question is
-                            // no longer out, as after an answer.
-                            let was_asking = track.asking.remove(firing);
-                            emit(subject.clone(), EventBody::QuestionExpired {
-                                question:  expired.question,
-                                waited_ms: expired.waited_ms,
-                                default:   expired.default,
-                            });
-                            if was_asking {
-                                emit(subject, EventBody::WaitStateChanged {
-                                    state: WaitState::Running,
-                                });
-                            }
-                        } else if let Some(note) = Note::from_step_event(ev) {
-                            emit(subject, note_body(note));
-                        } else if let Some(activity) = agent_activity(value) {
-                            emit(subject, EventBody::AgentActivity(activity));
-                        } else {
-                            emit(subject, EventBody::StepCustom {
-                                value: value.clone(),
+                    Some(Parsed::QuestionExpired { .. }) => {
+                        // The step ended its own wait: the question is no
+                        // longer out, as after an answer.
+                        if track.asking.remove(firing) {
+                            emit(subject.clone(), ViewEvent::WaitStateChanged {
+                                state: WaitState::Running,
                             });
                         }
                     }
+                    Some(Parsed::Note { .. }) | None => {}
                 }
+                (subject, parsed.map(|parsed| Derived::Parsed { parsed }))
             }
             Event::StepFinished {
                 firing,
@@ -1010,69 +853,47 @@ impl Projection {
                 });
                 track.asking.remove(firing);
                 let subject = subject_of(state, track, *firing);
-                emit(subject.clone(), EventBody::AttemptFinished {
-                    outcome: outcome.clone(),
-                    is_final,
-                    exhausted,
-                });
                 if !is_final && let Some(node) = node {
-                    emit(subject.clone(), EventBody::RetryScheduled {
+                    emit(subject.clone(), ViewEvent::RetryScheduled {
                         next_attempt: attempt.next(),
                         base_delay:   node.retry.base_delay(*attempt),
                     });
-                    emit(subject, EventBody::WaitStateChanged {
+                    emit(subject.clone(), ViewEvent::WaitStateChanged {
                         state: WaitState::AwaitingRetry,
                     });
                 }
+                (
+                    subject,
+                    Some(Derived::StepFinished {
+                        is_final,
+                        exhausted,
+                    }),
+                )
             }
-            Event::AdmissionDecided {
-                decision_id,
-                decision,
-                trace,
-            } => match decision_id {
-                DecisionId::ExecutionStart => {
-                    let (admitted, reason) = match decision {
-                        Admission::Block { reason } => (false, Some(reason.clone())),
-                        _ => (true, None),
-                    };
-                    emit(None, EventBody::ExecutionAdmitted {
-                        admitted,
-                        reason,
-                        decision: decision.clone(),
-                        trace: trace.clone(),
-                    });
-                }
+            Event::AdmissionDecided { decision_id, .. } => match decision_id {
                 DecisionId::AttemptStart { firing, .. } => {
-                    emit(
-                        subject_of(state, track, *firing),
-                        EventBody::AttemptAdmitted {
-                            decision: decision.clone(),
-                            trace:    trace.clone(),
-                        },
-                    );
+                    (subject_of(state, track, *firing), None)
                 }
-                DecisionId::Route { .. } => {}
+                DecisionId::ExecutionStart | DecisionId::Route { .. } => (None, None),
             },
             Event::RoutingResolved {
                 decision_id,
                 groups,
-            } => {
-                if let DecisionId::Route { firing, .. } = decision_id {
-                    let choices = groups
-                        .iter()
-                        .map(|group| route_choice(state, group))
-                        .collect();
-                    emit(
-                        subject_of(state, track, *firing),
-                        EventBody::RoutesResolved { choices },
-                    );
-                }
-            }
+            } => match decision_id {
+                DecisionId::Route { firing, .. } => (
+                    subject_of(state, track, *firing),
+                    Some(Derived::RoutingResolved {
+                        groups: groups
+                            .iter()
+                            .map(|group| group_target(state, group))
+                            .collect(),
+                    }),
+                ),
+                DecisionId::ExecutionStart | DecisionId::AttemptStart { .. } => (None, None),
+            },
             Event::RouteApplied { applied } => {
                 let firing = applied.firing();
                 let subject = subject_of(state, track, firing);
-                let route = applied_route(state, applied);
-                emit(subject.clone(), EventBody::RouteApplied { route });
                 if let (Some(subject), RouteApplied::Edge { .. }) = (&subject, applied)
                     && let BranchRole::Fork { branches } = subject.branch
                     && track.announced.insert(firing)
@@ -1085,22 +906,18 @@ impl Projection {
                         .collect();
                     if let Some(occurrence) = occurrence_of(execution, subject) {
                         track.open_fork(occurrence.clone(), &branches);
-                        emit(Some(subject.clone()), EventBody::ForkStarted {
+                        emit(Some(subject.clone()), ViewEvent::ForkStarted {
                             occurrence,
                             branches,
                         });
                     }
                 }
+                (subject, applied_target(state, applied))
             }
-            Event::RetryElapsed {
-                firing,
-                next_attempt,
-            } => emit(subject_of(state, track, *firing), EventBody::RetryElapsed {
-                next_attempt: *next_attempt,
-            }),
+            Event::RetryElapsed { firing, .. } => (subject_of(state, track, *firing), None),
             Event::NodeExpanded { node, splice } => {
-                emit(node_subject(state, track, *node), EventBody::NodeExpanded {
-                    clones:       splice
+                let derived = Derived::NodeExpanded {
+                    clones: splice
                         .clones
                         .iter()
                         .map(|clone| CloneRef {
@@ -1116,28 +933,20 @@ impl Projection {
                                         kind: SmolStr::new(""),
                                         meta: Value::Null,
                                     },
-                                    |n| NodeRef {
-                                        id:   n.id,
-                                        name: n.name.clone(),
-                                        kind: SmolStr::new(n.step.kind.as_str()),
-                                        meta: n.meta.clone(),
-                                    },
+                                    node_ref,
                                 ),
-                            item:  clone.item.clone(),
                         })
                         .collect(),
-                    max_parallel: splice.max_parallel,
-                    fail_fast:    splice.fail_fast,
-                });
+                };
                 // An expansion is a fork: its clones are the branches, in
                 // item order, and the node that fanned out into the template
                 // (the branch map's fork for it) announces them once. The
                 // records of one engine turn are derived against the state
-                // after the whole turn, so the fork's own `route_applied`
+                // after the whole turn, so the fork's own `route.applied`
                 // may already see its role and announce it above; the guard
                 // is the same firing set, so whichever record comes first
                 // announces and the other stays quiet. The join derives
-                // `branch_completed` and `fork_completed` from the same roles
+                // `branch.completed` and `fork.completed` from the same roles
                 // the static path uses.
                 if let Some(fork) = track.branches.expansion_fork(*node) {
                     // The fork's own firing: the record of the fork node in
@@ -1170,67 +979,41 @@ impl Projection {
                         && let Some(occurrence) = occurrence_of(execution, &subject)
                     {
                         track.open_fork(occurrence.clone(), &branches);
-                        emit(Some(subject), EventBody::ForkStarted {
+                        emit(Some(subject), ViewEvent::ForkStarted {
                             occurrence,
                             branches,
                         });
                     }
                 }
-            }
-            Event::CancelRequested {
-                target: CancelTarget::Scope(scope),
-            } => emit(None, EventBody::CancelRequested {
-                scope: Some(*scope),
-                group: None,
-            }),
-            Event::CancelRequested {
-                target: CancelTarget::Group(node),
-            } => {
-                let group = state.graph().node(*node).map(node_ref);
-                emit(None, EventBody::CancelRequested { scope: None, group });
-            }
-            Event::KillRequested { scope } => {
-                emit(None, EventBody::KillRequested { scope: *scope });
+                (node_subject(state, track, *node), Some(derived))
             }
             Event::ControlRequested { firing, ctl } => {
                 let deliverable = state
                     .firing(*firing)
                     .is_some_and(|f| !f.cancelling && !f.awaiting_retry)
                     && !state.is_awaiting_admission(*firing);
-                let control = match ctl {
-                    Control::Cancel => DeliveredControl::Cancel,
-                    Control::Kill => DeliveredControl::Kill,
-                    Control::Deliver(value) => match value.get(ANSWER_KEY) {
-                        Some(_) => steps::Answer::from_value(value).map_or_else(
-                            || DeliveredControl::Deliver {
-                                value: value.clone(),
-                            },
-                            |answer| DeliveredControl::Answer {
-                                answer,
-                                value: value.clone(),
-                            },
-                        ),
-                        None => DeliveredControl::Deliver {
-                            value: value.clone(),
-                        },
-                    },
-                    _ => DeliveredControl::Deliver { value: Value::Null },
+                let answer = match ctl {
+                    Control::Deliver(value) if value.get(ANSWER_KEY).is_some() => {
+                        Answer::from_value(value)
+                    }
+                    _ => None,
                 };
-                let answered = matches!(control, DeliveredControl::Answer { .. })
-                    && deliverable
-                    && track.asking.remove(firing);
+                let answered = answer.is_some() && deliverable && track.asking.remove(firing);
                 let subject = subject_of(state, track, *firing);
-                emit(subject.clone(), EventBody::ControlDelivered {
-                    control,
-                    deliverable,
-                });
                 if answered {
-                    emit(subject, EventBody::WaitStateChanged {
+                    emit(subject.clone(), ViewEvent::WaitStateChanged {
                         state: WaitState::Running,
                     });
                 }
+                (
+                    subject,
+                    Some(Derived::ControlRequested {
+                        deliverable,
+                        answer,
+                    }),
+                )
             }
-        }
+        };
 
         // State-derived facts every record may carry: new firings (visits
         // starting) and new final records (visits completing).
@@ -1266,8 +1049,8 @@ impl Projection {
                         );
                     }
                 }
-                emit(subject.clone(), EventBody::VisitStarted { inputs });
-                emit(subject, EventBody::WaitStateChanged {
+                emit(subject.clone(), ViewEvent::VisitStarted { inputs });
+                emit(subject, ViewEvent::WaitStateChanged {
                     state: WaitState::AwaitingAdmission,
                 });
             }
@@ -1284,7 +1067,7 @@ impl Projection {
             for firing in cancelling {
                 emit(
                     subject_of(state, track, firing),
-                    EventBody::WaitStateChanged {
+                    ViewEvent::WaitStateChanged {
                         state: WaitState::Cancelling,
                     },
                 );
@@ -1328,7 +1111,7 @@ impl Projection {
                         disposition,
                     );
                 }
-                emit(subject, EventBody::VisitCompleted {
+                emit(subject, ViewEvent::VisitCompleted {
                     outcome: entry.outcome.clone(),
                     executed,
                     attempts,
@@ -1373,26 +1156,43 @@ impl Projection {
             );
         }
 
-        let invocation = track.invocation;
-        let parent = track.parent.clone();
-        out.into_iter()
-            .enumerate()
-            .map(|(index, (subject, body))| RunEvent {
-                id: EventId {
-                    source: EventSource::Execution { execution },
-                    seq:    record.seq,
-                    index:  u32::try_from(index).unwrap_or(u32::MAX),
-                },
-                origin: record.origin.into(),
-                invocation,
-                execution: Some(execution),
-                parent: parent.clone(),
-                subject,
-                observed_at: None,
-                recorded_at,
-                body,
-            })
-            .collect()
+        let context = Context {
+            invocation: track.invocation,
+            execution:  Some(execution),
+            parent:     track.parent.clone(),
+        };
+        let id = |index: u32| EventId {
+            source: EventSource::Execution { execution },
+            seq: record.seq,
+            index,
+        };
+        let mut out = Vec::with_capacity(1 + views.len());
+        out.push(RunEvent {
+            id: id(0),
+            origin: record.origin.into(),
+            context: context.clone(),
+            subject,
+            observed_at: None,
+            recorded_at,
+            record: Some(Record::Engine(StoredEngineRecord::new(record, recorded_at))),
+            derived,
+        });
+        out.extend(
+            views
+                .into_iter()
+                .enumerate()
+                .map(|(index, (subject, view))| RunEvent {
+                    id: id(u32::try_from(index + 1).unwrap_or(u32::MAX)),
+                    origin: RecordOrigin::Derived,
+                    context: context.clone(),
+                    subject,
+                    observed_at: None,
+                    recorded_at,
+                    record: None,
+                    derived: Some(Derived::View(view)),
+                }),
+        );
+        out
     }
 }
 
@@ -1441,7 +1241,8 @@ fn subject_of(state: &EngineState, track: &ExecutionTrack, firing: FiringId) -> 
     })
 }
 
-fn route_choice(state: &EngineState, group: &GroupDecision) -> RouteChoice {
+/// The node one routing group's decision leads to.
+fn group_target(state: &EngineState, group: &GroupDecision) -> GroupTarget {
     let target = match &group.decision {
         RouteDecision::Emit(edge) => state
             .graph()
@@ -1451,49 +1252,32 @@ fn route_choice(state: &EngineState, group: &GroupDecision) -> RouteChoice {
         RouteDecision::Jump(node) => state.graph().node(*node).map(node_ref),
         RouteDecision::None | RouteDecision::Block { .. } => None,
     };
-    RouteChoice {
+    GroupTarget {
         group: group.group,
-        decision: group.decision.clone(),
         target,
-        trace: group.trace.clone(),
-        weighted: group.draw.is_some(),
-        draw: group.draw.clone(),
     }
 }
 
-fn applied_route(state: &EngineState, applied: &RouteApplied) -> AppliedRoute {
+/// What an applied route derives: the node it leads to, and for an edge the
+/// edge's transition and `back`. Nothing for a route that applied nothing
+/// or one whose target the graph no longer names.
+fn applied_target(state: &EngineState, applied: &RouteApplied) -> Option<Derived> {
     match applied {
-        RouteApplied::Edge { group, edge, .. } => {
-            let arm = state.graph().edge(*edge);
-            let target = arm.and_then(|arm| state.graph().node(arm.to)).map_or_else(
-                || NodeRef {
-                    id:   NodeId::new(u32::MAX),
-                    name: SmolStr::new(""),
-                    kind: SmolStr::new(""),
-                    meta: Value::Null,
-                },
-                node_ref,
-            );
-            AppliedRoute::Edge {
-                group: *group,
-                edge: *edge,
+        RouteApplied::Edge { edge, .. } => {
+            let arm = state.graph().edge(*edge)?;
+            let target = state.graph().node(arm.to).map(node_ref)?;
+            Some(Derived::RouteApplied {
                 target,
-                transition: arm.map_or(EdgeTransition::Continue, |arm| arm.transition),
-                back: arm.is_some_and(|arm| arm.back),
-            }
+                transition: Some(arm.transition),
+                back: Some(arm.back),
+            })
         }
-        RouteApplied::Jump { target, .. } => AppliedRoute::Jump {
-            target: state.graph().node(*target).map_or_else(
-                || NodeRef {
-                    id:   *target,
-                    name: SmolStr::new(""),
-                    kind: SmolStr::new(""),
-                    meta: Value::Null,
-                },
-                node_ref,
-            ),
-        },
-        RouteApplied::None { group, .. } => AppliedRoute::None { group: *group },
+        RouteApplied::Jump { target, .. } => Some(Derived::RouteApplied {
+            target:     state.graph().node(*target).map(node_ref)?,
+            transition: None,
+            back:       None,
+        }),
+        RouteApplied::None { .. } => None,
     }
 }
 
@@ -1559,11 +1343,11 @@ fn recover_occurrence(
     occurrence_of(execution, &subject)
 }
 
-/// Emit `branch_completed` per result, each on its branch's last firing,
-/// then `fork_completed` on `subject` (the join's firing when there is one,
+/// Emit `branch.completed` per result, each on its branch's last firing,
+/// then `fork.completed` on `subject` (the join's firing when there is one,
 /// else the fork's own).
 fn close_fork(
-    emit: &mut impl FnMut(Option<Subject>, EventBody),
+    emit: &mut impl FnMut(Option<Subject>, ViewEvent),
     state: &EngineState,
     track: &ExecutionTrack,
     subject: &Subject,
@@ -1574,14 +1358,14 @@ fn close_fork(
     for result in &results {
         emit(
             subject_of(state, track, result.firing),
-            EventBody::BranchCompleted {
+            ViewEvent::BranchCompleted {
                 occurrence: occurrence.clone(),
                 result:     result.clone(),
             },
         );
     }
     if let Some(fork_node) = state.graph().node(occurrence.fork).map(node_ref) {
-        emit(Some(subject.clone()), EventBody::ForkCompleted {
+        emit(Some(subject.clone()), ViewEvent::ForkCompleted {
             occurrence,
             fork: fork_node,
             results,
@@ -1624,42 +1408,40 @@ fn member_results(
     results.into_values().collect()
 }
 
-/// Read a backend's envelope out of a `StepEvent::Custom` value: an object
-/// with a string `kind` and an `event` object is a backend event; its
-/// identities are read from the conventional envelope fields when present.
-fn agent_activity(value: &Value) -> Option<AgentActivity> {
-    let object = value.as_object()?;
-    let backend = object.get(BACKEND_EVENT_KIND_KEY)?.as_str()?;
-    // A step's own payload may carry a string `event` (a hook report names
-    // its hook event); only an object is a backend envelope.
-    let envelope = object.get("event").filter(|event| event.is_object())?;
-    let text = |key: &str| envelope.get(key).and_then(Value::as_str).map(str::to_owned);
-    let attributes = object
-        .iter()
-        .filter(|(key, _)| key.as_str() != BACKEND_EVENT_KIND_KEY && key.as_str() != "event")
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
-    Some(AgentActivity {
-        backend: SmolStr::new(backend),
-        session: text("session_id"),
-        parent_session: text("parent_session_id"),
-        tool_call: text("tool_call_id"),
-        stream: text("stream_id"),
-        stream_seq: envelope.get("seq").and_then(Value::as_u64),
-        envelope: envelope.clone(),
-        attributes,
-    })
+/// Petri's reading of a progress payload, when it is a protocol Petri owns.
+fn parse_progress(ev: &StepEvent) -> Option<Parsed> {
+    if let Some(question) = Question::from_event(ev) {
+        return Some(Parsed::Question { question });
+    }
+    if let Some(expired) = QuestionExpired::from_event(ev) {
+        return Some(Parsed::QuestionExpired { expired });
+    }
+    Note::from_step_event(ev).map(note_parsed)
 }
 
-/// A `hook.activity` note's payload as the operation and the backend
-/// activity it carries, read the way a stage's own envelope is.
-fn hook_activity(payload: &Value) -> Option<(HookOperation, AgentActivity)> {
-    let record: HookActivity = serde_json::from_value(payload.clone()).ok()?;
-    let activity = agent_activity(&json!({
-        BACKEND_EVENT_KIND_KEY: record.backend,
-        "event": record.envelope,
-    }))?;
-    Some((record.hook, activity))
+/// A note, with the reading two kinds get beside it: a hook's own agent
+/// event, and an attempt budget's pause or resume. A note whose payload
+/// does not read as its kind says stays a bare note.
+fn note_parsed(note: Note) -> Parsed {
+    let budget = |state: BudgetState| {
+        serde_json::from_value::<BudgetNote>(note.payload.clone())
+            .ok()
+            .map(|note| BudgetReading { state, note })
+    };
+    let (hook_activity, budget) = match note.kind.as_str() {
+        HOOK_ACTIVITY_NOTE_KIND => (
+            serde_json::from_value::<HookActivity>(note.payload.clone()).ok(),
+            None,
+        ),
+        BUDGET_PAUSED_KIND => (None, budget(BudgetState::Paused)),
+        BUDGET_RESUMED_KIND => (None, budget(BudgetState::Resumed)),
+        _ => (None, None),
+    };
+    Parsed::Note {
+        note,
+        hook_activity,
+        budget,
+    }
 }
 
 // ── Live delivery ──────────────────────────────────────────────────────────
@@ -1989,51 +1771,13 @@ impl ExecutionObserver for EventProjector {
     ) {
         let events = self
             .projection()
-            .engine(execution, record, Some(recorded_at), state);
+            .engine(execution, record, recorded_at, state);
         self.push(events);
     }
 
     fn on_lifecycle(&self, record: &CoordinatorRecord) {
         let events = self.projection().lifecycle(record);
         self.push(events);
-    }
-}
-
-/// The body a driver or host note projects to: the driver's budget notes
-/// have bodies of their own, every other note is a `host_note`.
-fn note_body(note: Note) -> EventBody {
-    let budget = || serde_json::from_value::<BudgetNote>(note.payload.clone()).ok();
-    match note.kind.as_str() {
-        HOOK_ACTIVITY_NOTE_KIND => match hook_activity(&note.payload) {
-            Some((hook, activity)) => EventBody::HookActivity { hook, activity },
-            None => EventBody::HostNote {
-                kind:    note.kind,
-                payload: note.payload,
-            },
-        },
-        BUDGET_PAUSED_KIND => match budget() {
-            Some(budget) => EventBody::BudgetPaused {
-                remaining_ms:      budget.remaining_ms,
-                pending_questions: budget.pending_questions,
-            },
-            None => EventBody::HostNote {
-                kind:    note.kind,
-                payload: note.payload,
-            },
-        },
-        BUDGET_RESUMED_KIND => match budget() {
-            Some(budget) => EventBody::BudgetResumed {
-                remaining_ms: budget.remaining_ms,
-            },
-            None => EventBody::HostNote {
-                kind:    note.kind,
-                payload: note.payload,
-            },
-        },
-        _ => EventBody::HostNote {
-            kind:    note.kind,
-            payload: note.payload,
-        },
     }
 }
 
@@ -2134,6 +1878,9 @@ pub(crate) struct LoadedExecution {
     /// The graph the execution started from, before any splice.
     pub(crate) graph:     Graph,
     pub(crate) log:       DecodedEngineLog,
+    /// Whether the coordinator recorded the execution's exit: a finished
+    /// execution's log is complete, or the crash that cut it is the error.
+    pub(crate) finished:  bool,
 }
 
 /// Read a run dir's logs and the graphs its executions ran.
@@ -2170,6 +1917,7 @@ pub(crate) fn load_run(run_dir: &Path) -> Result<LoadedRun, ReplayError> {
             execution: *execution,
             graph,
             log,
+            finished: declared.exit.is_some(),
         });
     }
     Ok(LoadedRun {
@@ -2179,8 +1927,10 @@ pub(crate) fn load_run(run_dir: &Path) -> Result<LoadedRun, ReplayError> {
 }
 
 /// Project one execution's log through `projection`, external event by
-/// external event. `recorded_at` is the log's recording time per seq; a
-/// regenerated record past its end (a lost tail) carries none.
+/// external event. `recorded_at` is the log's recording time per seq. Only
+/// the stored prefix is published: a regenerated record past the log's end
+/// (a crash's lost tail) is applied, so the state is right, and derives no
+/// event until a resume stores it.
 pub fn replay_execution(
     projection: &mut Projection,
     execution: ExecutionId,
@@ -2195,10 +1945,13 @@ pub fn replay_execution(
         let (next, _) = engine::apply(state, event.clone());
         state = next;
         for record in &state.log.records()[before..] {
-            let at = usize::try_from(record.seq)
+            let stored = usize::try_from(record.seq)
                 .ok()
+                .filter(|seq| *seq < log.len())
                 .and_then(|seq| recorded_at.get(seq).copied());
-            events.extend(projection.engine(execution, record, at, &state));
+            if let Some(at) = stored {
+                events.extend(projection.engine(execution, record, at, &state));
+            }
         }
     }
     events
@@ -2216,50 +1969,97 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_an_event_object_is_a_backend_envelope() {
-        let envelope = json!({
-            "kind": "pebble",
-            "event": { "session_id": "ses_1", "seq": 3, "event": { "TurnStarted": {} } },
-        });
-        let activity = agent_activity(&envelope).expect("a backend envelope");
-        assert_eq!(activity.backend, "pebble");
-        assert_eq!(activity.session.as_deref(), Some("ses_1"));
-        assert_eq!(activity.stream_seq, Some(3));
-        // A hook report names its hook event in a string `event`; it is the
-        // step's own payload, a `step_custom`, not agent activity.
-        let report = json!({
-            "kind": "fabro.hook",
-            "node": "write",
-            "event": "pre_tool_use",
-            "report": { "decision": { "decision": "block" }, "hooks": [] },
-        });
-        assert!(agent_activity(&report).is_none());
-        assert!(agent_activity(&json!({ "kind": "fabro.skills", "dirs": [] })).is_none());
-    }
-
-    #[test]
-    fn budget_notes_project_to_their_own_bodies_and_other_notes_stay_host_notes() {
+    fn budget_notes_and_hook_activity_read_beside_the_note_and_other_notes_stay_bare() {
         let paused = Note::new(
             BUDGET_PAUSED_KIND,
             json!({ "attempt": 1, "remaining_ms": 4000, "pending_questions": 1 }),
         );
-        assert_eq!(note_body(paused), EventBody::BudgetPaused {
-            remaining_ms:      4000,
-            pending_questions: 1,
-        });
+        let Parsed::Note { budget, .. } = note_parsed(paused.clone()) else {
+            panic!("a note");
+        };
+        assert_eq!(
+            budget,
+            Some(BudgetReading {
+                state: BudgetState::Paused,
+                note:  BudgetNote {
+                    attempt:           Attempt::new(1),
+                    remaining_ms:      4000,
+                    pending_questions: 1,
+                },
+            })
+        );
         let resumed = Note::new(
             BUDGET_RESUMED_KIND,
             json!({ "attempt": 1, "remaining_ms": 4000, "pending_questions": 0 }),
         );
-        assert_eq!(note_body(resumed), EventBody::BudgetResumed {
-            remaining_ms: 4000,
-        });
+        let Parsed::Note { budget, .. } = note_parsed(resumed) else {
+            panic!("a note");
+        };
+        assert_eq!(
+            budget.map(|budget| budget.state),
+            Some(BudgetState::Resumed)
+        );
         let hook = Note::new("hook", json!({ "point": "before_attempt" }));
-        assert_eq!(note_body(hook), EventBody::HostNote {
-            kind:    "hook".into(),
-            payload: json!({ "point": "before_attempt" }),
+        assert_eq!(note_parsed(hook.clone()), Parsed::Note {
+            note:          hook,
+            hook_activity: None,
+            budget:        None,
         });
         let malformed = Note::new(BUDGET_PAUSED_KIND, json!("not a budget"));
-        assert!(matches!(note_body(malformed), EventBody::HostNote { .. }));
+        assert!(matches!(note_parsed(malformed), Parsed::Note {
+            budget: None,
+            ..
+        }));
+    }
+
+    /// The step protocols Petri owns parse; a backend's own event, a log
+    /// line and an artifact do not: they are forwarded as recorded.
+    #[test]
+    fn only_petri_s_own_protocols_parse() {
+        let backend = StepEvent::Custom(json!({
+            "kind": "pebble",
+            "event": { "session_id": "ses_1", "seq": 3, "event": { "TurnStarted": {} } },
+        }));
+        assert!(parse_progress(&backend).is_none());
+        assert!(
+            parse_progress(&StepEvent::Log {
+                stream: ir::LogStream::Stdout,
+                line:   "x".into(),
+            })
+            .is_none()
+        );
+        let note = StepEvent::Custom(json!({ "$note": { "kind": "transition", "payload": 1 } }));
+        assert!(matches!(parse_progress(&note), Some(Parsed::Note { .. })));
+    }
+
+    /// A record's own event carries the stored line verbatim, the derived
+    /// values apart from it, and the envelope repeats the record's identity.
+    #[test]
+    fn a_record_event_carries_its_line_and_derived_values_apart() {
+        let record = CoordinatorRecord::external(3, 1_789, CoordinatorEvent::RunNoteRecorded {
+            execution: Some(ExecutionId::new(1)),
+            kind:      "hook".into(),
+            payload:   json!({ "point": "run_finished" }),
+        });
+        let events = Projection::new().lifecycle(&record);
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.origin, RecordOrigin::External);
+        assert_eq!(event.recorded_at, 1_789);
+        assert_eq!(event.context.execution, Some(ExecutionId::new(1)));
+        let json = serde_json::to_value(event).expect("encodes");
+        assert_eq!(
+            json["id"],
+            json!({ "log": "coordinator", "seq": 3, "index": 0 })
+        );
+        assert_eq!(
+            json["record"],
+            serde_json::to_value(&record).expect("encodes"),
+            "the record is the stored line"
+        );
+        assert_eq!(json["record"]["body"]["event"], json!("run.note.recorded"));
+        assert_eq!(json["derived"]["parsed"]["kind"], json!("note"));
+        let back: RunEvent = serde_json::from_value(json).expect("decodes");
+        assert_eq!(&back, event);
     }
 }

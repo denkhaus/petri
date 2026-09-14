@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use execution::events::{EventBody, RunEvent, replay_run};
+use execution::events::{RunEvent, replay_run};
 use execution::host;
 use fabro_steps::agent::THREAD_EVENT;
 use fabro_steps::compaction::{CompactionPolicyHandle, EVENT};
@@ -38,7 +38,7 @@ use runtime::engine::{EngineState, Event, EventRecord};
 use runtime::executor::Retention;
 use runtime::{RunOptions, Runtime};
 use serde_json::json;
-use testkit::{RunDir, output_of, status_of};
+use testkit::{RunDir, backend_event, output_of, status_of};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -759,15 +759,16 @@ async fn public_events_account_for_the_compaction_and_later_activity() {
     let activity: Vec<(usize, String, Option<String>, String)> = events
         .iter()
         .enumerate()
-        .filter_map(|(index, event)| match &event.body {
-            EventBody::AgentActivity(activity) if activity.backend == "pebble" => {
-                let name = activity.envelope["event"]
-                    .as_object()
-                    .and_then(|o| o.keys().next().cloned())
-                    .or_else(|| activity.envelope["event"].as_str().map(str::to_owned))?;
-                Some((index, node_of(event), activity.session.clone(), name))
+        .filter_map(|(index, event)| {
+            let activity = event.custom().and_then(backend_event)?;
+            if activity.backend != "pebble" {
+                return None;
             }
-            _ => None,
+            let name = activity.envelope["event"]
+                .as_object()
+                .and_then(|o| o.keys().next().cloned())
+                .or_else(|| activity.envelope["event"].as_str().map(str::to_owned))?;
+            Some((index, node_of(event), activity.session.clone(), name))
         })
         .collect();
     let started = activity
@@ -798,10 +799,11 @@ async fn public_events_account_for_the_compaction_and_later_activity() {
     let usage_event = events
         .iter()
         .enumerate()
-        .find_map(|(index, event)| match &event.body {
-            EventBody::StepCustom { value } if value["kind"] == EVENT => {
-                Some((index, value.clone()))
-            }
+        .find_map(|(index, event)| match event.engine() {
+            Some(Event::StepProgressRecorded {
+                ev: StepEvent::Custom(value),
+                ..
+            }) if value["kind"] == EVENT => Some((index, value.clone())),
             _ => None,
         })
         .expect("fabro.compaction");
@@ -813,8 +815,8 @@ async fn public_events_account_for_the_compaction_and_later_activity() {
     // The attempt's metrics carry the totals.
     let finished_a = events
         .iter()
-        .find_map(|event| match &event.body {
-            EventBody::AttemptFinished { outcome, .. } if node_of(event) == "a" => {
+        .find_map(|event| match event.engine() {
+            Some(Event::StepFinished { outcome, .. }) if node_of(event) == "a" => {
                 Some(outcome.metrics.custom.clone())
             }
             _ => None,
@@ -830,12 +832,11 @@ async fn public_events_account_for_the_compaction_and_later_activity() {
     // The later node reused the thread and reported its own activity.
     let thread_b = events
         .iter()
-        .find_map(|event| match &event.body {
-            EventBody::StepCustom { value }
-                if value["kind"] == THREAD_EVENT && value["node"] == "b" =>
-            {
-                Some(value.clone())
-            }
+        .find_map(|event| match event.engine() {
+            Some(Event::StepProgressRecorded {
+                ev: StepEvent::Custom(value),
+                ..
+            }) if value["kind"] == THREAD_EVENT && value["node"] == "b" => Some(value.clone()),
             _ => None,
         })
         .expect("b's thread resolution");

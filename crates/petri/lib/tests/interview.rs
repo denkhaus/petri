@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use petri::execution::events::{
-    CollectingSink, DeliveredControl, EventBody, EventProjector, RunEvent, WaitState, replay_run,
+    CollectingSink, Derived, EventProjector, Parsed, RunEvent, ViewEvent, WaitState, replay_run,
 };
 use petri::execution::host::{self, HostRun};
 use petri::execution::{
@@ -18,7 +18,7 @@ use petri::execution::{
 use petri::executor::Retention;
 use petri::frontend::{CompileInputs, Lowered};
 use petri::ir::{FailureClass, RunStatus, Status};
-use petri::steps::Answer;
+use petri::steps::{Answer, QuestionExpired};
 use petri::{RunOptions, Runtime, driver};
 use serde_json::json;
 use testkit::RunDir;
@@ -149,7 +149,7 @@ fn ran(report: &driver::ExecutionReport) -> Vec<&str> {
 fn expiries(events: &[RunEvent]) -> Vec<&RunEvent> {
     events
         .iter()
-        .filter(|event| matches!(event.body, EventBody::QuestionExpired { .. }))
+        .filter(|event| matches!(event.parsed(), Some(Parsed::QuestionExpired { .. })))
         .collect()
 }
 
@@ -620,9 +620,12 @@ fn the_expiry(dir: &RunDir, events: &[RunEvent]) -> RunEvent {
         .iter()
         .position(|e| e.id == event.id)
         .expect("in the stream");
-    assert_eq!(events[position + 1].body, EventBody::WaitStateChanged {
-        state: WaitState::Running,
-    });
+    assert_eq!(
+        events[position + 1].view(),
+        Some(&ViewEvent::WaitStateChanged {
+            state: WaitState::Running,
+        })
+    );
     let replayed = replay_run(dir.path()).expect("projects");
     let from_log = replayed
         .iter()
@@ -675,11 +678,16 @@ async fn an_expired_question_is_recorded_as_timed_out_with_the_default_it_took()
     });
     assert_eq!(record.delivery, Delivery::Expired);
     let expiry = the_expiry(&dir, &events);
-    assert_eq!(expiry.body, EventBody::QuestionExpired {
-        question:  record.question.clone(),
-        waited_ms: 300,
-        default:   Some("N".to_owned()),
-    });
+    assert_eq!(
+        expiry.parsed(),
+        Some(&Parsed::QuestionExpired {
+            expired: QuestionExpired {
+                question:  record.question.clone(),
+                waited_ms: 300,
+                default:   Some("N".to_owned()),
+            },
+        })
+    );
     let subject = expiry.subject.expect("a firing's event");
     assert_eq!(subject.firing, Some(record.firing));
     assert_eq!(subject.attempt, Some(record.attempt));
@@ -707,11 +715,16 @@ async fn an_expired_question_without_a_default_is_timed_out_and_the_gate_asks_fo
     assert_eq!(record.reply, ReplyRecord::TimedOut { default: None });
     assert_eq!(record.delivery, Delivery::Expired);
     let expiry = the_expiry(&dir, &events);
-    assert_eq!(expiry.body, EventBody::QuestionExpired {
-        question:  record.question.clone(),
-        waited_ms: 300,
-        default:   None,
-    });
+    assert_eq!(
+        expiry.parsed(),
+        Some(&Parsed::QuestionExpired {
+            expired: QuestionExpired {
+                question:  record.question.clone(),
+                waited_ms: 300,
+                default:   None,
+            },
+        })
+    );
 }
 
 /// An interviewer that says to cancel is recorded as cancelled and
@@ -744,11 +757,11 @@ async fn a_cancelled_reply_is_delivered_and_recorded_apart_from_a_timeout() {
     assert!(expiries(&events).is_empty(), "nothing expired");
     assert!(
         events.iter().any(|event| matches!(
-            &event.body,
-            EventBody::ControlDelivered {
-                control: DeliveredControl::Answer { answer, .. },
+            &event.derived,
+            Some(Derived::ControlRequested {
                 deliverable: true,
-            } if answer.cancelled
+                answer: Some(answer),
+            }) if answer.cancelled
         )),
         "the cancellation was delivered as an answer"
     );
@@ -799,12 +812,13 @@ async fn a_reply_after_the_deadline_never_lands_and_the_record_keeps_the_timeout
     assert_eq!(receipt.questions[0].delivery, Delivery::Expired);
     assert_eq!(expiries(&events).len(), 1);
     assert!(
-        !events
-            .iter()
-            .any(|event| matches!(&event.body, EventBody::ControlDelivered {
-                control: DeliveredControl::Answer { .. },
+        !events.iter().any(|event| matches!(
+            event.derived,
+            Some(Derived::ControlRequested {
+                answer: Some(_),
                 ..
-            })),
+            })
+        )),
         "no answer reached the gate"
     );
 }

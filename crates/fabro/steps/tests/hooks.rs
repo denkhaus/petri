@@ -11,10 +11,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
-use execution::events::{EventBody, RunEvent, replay_run};
+use execution::events::{Parsed, RunEvent, replay_run};
 use execution::hooks::{
-    HookAdapter, HookDecision, HookPoint, HookReport, HookRequest, HookRun, HookService,
-    HookServiceHandle,
+    HookActivity, HookAdapter, HookDecision, HookPoint, HookReport, HookRequest, HookRun,
+    HookService, HookServiceHandle,
 };
 use execution::host::{self, HostRun};
 use fabro_steps::agent::THREAD_EVENT;
@@ -37,7 +37,7 @@ use runtime::engine::{EngineState, Event, EventRecord};
 use runtime::executor::Retention;
 use runtime::{RunOptions, Runtime};
 use serde_json::json;
-use testkit::{RunDir, output_of, status_of};
+use testkit::{RunDir, backend_event, output_of, status_of};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
 use tokio::time::sleep;
@@ -1232,34 +1232,32 @@ script = "echo tool-guard-ran >> tool-hooks.log"
     let events = replay_run(dir.path()).expect("replays");
     let replayed: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e.body, EventBody::HookActivity { .. }))
+        .filter(|e| hook_activity_of(e).is_some())
         .collect();
     assert_eq!(replayed.len(), activity.len(), "{replayed:#?}");
     assert!(replayed.iter().all(|e| {
         e.subject.as_ref().is_some_and(|s| s.node.name == "b")
-            && matches!(
-                &e.body,
-                EventBody::HookActivity { hook, activity }
-                    if hook.hook == "verify" && activity.backend == "pebble" && activity.session.is_some()
-            )
+            && hook_activity_of(e).is_some_and(|activity| {
+                activity.hook.hook == "verify"
+                    && activity.backend == "pebble"
+                    && activity.envelope["session_id"].is_string()
+            })
     }));
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e.body, EventBody::AgentActivity(_))),
+            .any(|e| e.custom().and_then(backend_event).is_some()),
         "no stage ran an agent of its own"
     );
     let hook_note = events
         .iter()
         .find(|e| {
-            matches!(&e.body, EventBody::HostNote { kind, payload }
-            if kind == "hook" && payload["point"] == "before_attempt"
-                && e.subject.as_ref().is_some_and(|s| s.node.name == "b"))
+            e.note().is_some_and(|note| {
+                note.kind == "hook" && note.payload["point"] == "before_attempt"
+            }) && e.subject.as_ref().is_some_and(|s| s.node.name == "b")
         })
         .expect("the hook note on b");
-    let EventBody::HostNote { payload, .. } = &hook_note.body else {
-        unreachable!()
-    };
+    let payload = &hook_note.note().expect("a note").payload;
     assert_eq!(payload["hooks"][0]["usage"]["requests"], 2);
 }
 
@@ -1317,8 +1315,8 @@ model = "test/model"
     let finished = events
         .iter()
         .filter(on_b)
-        .find_map(|e| match &e.body {
-            EventBody::AttemptFinished { outcome, .. } => Some(outcome.clone()),
+        .find_map(|e| match e.engine() {
+            Some(Event::StepFinished { outcome, .. }) => Some(outcome.clone()),
             _ => None,
         })
         .expect("b's attempt");
@@ -1329,11 +1327,9 @@ model = "test/model"
     let hook_note = events
         .iter()
         .filter(on_b)
-        .find_map(|e| match &e.body {
-            EventBody::HostNote { kind, payload }
-                if kind == "hook" && payload["point"] == "before_attempt" =>
-            {
-                Some(payload.clone())
+        .find_map(|e| match e.note() {
+            Some(note) if note.kind == "hook" && note.payload["point"] == "before_attempt" => {
+                Some(note.payload.clone())
             }
             _ => None,
         })
@@ -1347,17 +1343,14 @@ model = "test/model"
     let stage_sessions: BTreeSet<String> = events
         .iter()
         .filter(on_b)
-        .filter_map(|e| match &e.body {
-            EventBody::AgentActivity(activity) => activity.session.clone(),
-            _ => None,
-        })
+        .filter_map(|e| e.custom().and_then(backend_event)?.session)
         .collect();
     let hook_sessions: BTreeSet<String> = events
         .iter()
         .filter(on_b)
-        .filter_map(|e| match &e.body {
-            EventBody::HookActivity { hook, activity } if hook.hook == "verify" => {
-                activity.session.clone()
+        .filter_map(|e| match hook_activity_of(e) {
+            Some(activity) if activity.hook.hook == "verify" => {
+                activity.envelope["session_id"].as_str().map(str::to_owned)
             }
             _ => None,
         })
@@ -1369,8 +1362,9 @@ model = "test/model"
         .iter()
         .filter(on_b)
         .filter(|e| {
-            matches!(&e.body, EventBody::AgentActivity(a)
-            if a.envelope["event"].get("ToolCallStarted").is_some())
+            e.custom()
+                .and_then(backend_event)
+                .is_some_and(|a| a.envelope["event"].get("ToolCallStarted").is_some())
         })
         .count();
     assert_eq!(
@@ -1380,8 +1374,8 @@ model = "test/model"
     let hook_tool_calls = events
         .iter()
         .filter(|e| {
-            matches!(&e.body, EventBody::HookActivity { activity, .. }
-            if activity.envelope["event"].get("ToolCallStarted").is_some())
+            hook_activity_of(e)
+                .is_some_and(|activity| activity.envelope["event"].get("ToolCallStarted").is_some())
         })
         .count();
     assert_eq!(hook_tool_calls, 1);
@@ -1389,9 +1383,17 @@ model = "test/model"
     let live = customs.hook_activity().len();
     let replayed = events
         .iter()
-        .filter(|e| matches!(e.body, EventBody::HookActivity { .. }))
+        .filter(|e| hook_activity_of(e).is_some())
         .count();
     assert_eq!(replayed, live);
+}
+
+/// The hook activity a `step.progress.recorded` event's note reads as.
+fn hook_activity_of(event: &RunEvent) -> Option<&HookActivity> {
+    match event.parsed() {
+        Some(Parsed::Note { hook_activity, .. }) => hook_activity.as_ref(),
+        _ => None,
+    }
 }
 
 /// A `pgrep -f` pattern for the tool process [`ticking_tool`] starts: the

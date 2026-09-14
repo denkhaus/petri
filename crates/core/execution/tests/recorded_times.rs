@@ -5,12 +5,12 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use execution::events::{
-    EventBody, EventId, EventProjector, RunEvent, RunEventSink, SinkError, replay_run,
-};
+use execution::CoordinatorEvent;
+use execution::events::{EventId, EventProjector, RunEvent, RunEventSink, SinkError, replay_run};
 use execution::host::{self, HostRun};
 use ir::{GraphBuilder, RunStatus, ScopeId};
 use runtime::driver::recorded_now;
+use runtime::engine::Event;
 use runtime::{RunOptions, Runtime};
 use testkit::{RunDir, add_script};
 
@@ -25,12 +25,12 @@ impl RunEventSink for Collecting {
     }
 }
 
-fn time_of(events: &[RunEvent], pick: impl Fn(&EventBody) -> bool) -> u64 {
+fn time_of(events: &[RunEvent], pick: impl Fn(&RunEvent) -> bool) -> u64 {
     events
         .iter()
-        .find(|event| pick(&event.body))
-        .and_then(|event| event.recorded_at)
-        .expect("the event exists and carries its recording time")
+        .find(|event| pick(event))
+        .map(|event| event.recorded_at)
+        .expect("the event exists")
 }
 
 #[tokio::test]
@@ -67,9 +67,7 @@ async fn replay_recovers_the_recorded_times_and_observed_at_stays_live_only() {
     let live = sink.0.lock().expect("not poisoned").clone();
     assert!(!live.is_empty());
     for event in &live {
-        let recorded = event
-            .recorded_at
-            .expect("a live event carries the time its record was appended");
+        let recorded = event.recorded_at;
         assert!(
             (before..=after).contains(&recorded),
             "the recording time is the run's wall clock: {event:?}"
@@ -89,21 +87,33 @@ async fn replay_recovers_the_recorded_times_and_observed_at_stays_live_only() {
     }
     for events in by_source.values_mut() {
         events.sort_by_key(|event| event.id);
-        let times: Vec<u64> = events.iter().filter_map(|e| e.recorded_at).collect();
+        let times: Vec<u64> = events.iter().map(|e| e.recorded_at).collect();
         assert!(
             times.windows(2).all(|pair| pair[0] <= pair[1]),
             "recording times never decrease along a log: {times:?}"
         );
     }
     // The boundaries a host reconstructs a timeline from are ordered.
-    let run_started = time_of(&live, |body| matches!(body, EventBody::RunStarted { .. }));
-    let run_finished = time_of(&live, |body| matches!(body, EventBody::RunFinished { .. }));
+    let run_started = time_of(&live, |event| {
+        matches!(
+            event.coordinator(),
+            Some(CoordinatorEvent::RunStarted { .. })
+        )
+    });
+    let run_finished = time_of(&live, |event| {
+        matches!(
+            event.coordinator(),
+            Some(CoordinatorEvent::RunFinished { .. })
+        )
+    });
     assert!(run_started <= run_finished);
-    let first_started = time_of(&live, |body| matches!(body, EventBody::AttemptStarted));
+    let first_started = time_of(&live, |event| {
+        matches!(event.engine(), Some(Event::StepStarted { .. }))
+    });
     let last_finished = live
         .iter()
-        .filter(|event| matches!(event.body, EventBody::AttemptFinished { .. }))
-        .filter_map(|event| event.recorded_at)
+        .filter(|event| matches!(event.engine(), Some(Event::StepFinished { .. })))
+        .map(|event| event.recorded_at)
         .max()
         .expect("attempts finished");
     assert!(run_started <= first_started && first_started <= last_finished);
@@ -111,11 +121,11 @@ async fn replay_recovers_the_recorded_times_and_observed_at_stays_live_only() {
 
     // Replay: the same times, read back from the logs; no observation time.
     let replayed = replay_run(dir.path()).expect("the run dir projects");
-    let live_times: BTreeMap<EventId, Option<u64>> = live
+    let live_times: BTreeMap<EventId, u64> = live
         .iter()
         .map(|event| (event.id, event.recorded_at))
         .collect();
-    let replayed_times: BTreeMap<EventId, Option<u64>> = replayed
+    let replayed_times: BTreeMap<EventId, u64> = replayed
         .iter()
         .map(|event| (event.id, event.recorded_at))
         .collect();

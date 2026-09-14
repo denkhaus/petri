@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use petri::execution::ExecutionId;
-use petri::execution::events::{EventBody, replay_run};
+use petri::execution::events::replay_run;
 use serde_json::{Value, json};
 use support::fabro::interview;
 use support::fabro::launch::{Case, Finished, Launch};
@@ -344,10 +344,14 @@ fn assert_run_level_notes(finished: &Finished, points: &[&str]) {
     let reports: Vec<&Value> = events
         .iter()
         .filter(|event| event.subject.is_none())
-        .filter_map(|event| match &event.body {
-            EventBody::HostNote { kind, payload } if kind == "hook" => {
-                assert_eq!(event.execution.map(ExecutionId::raw), Some(0), "{event:?}");
-                Some(payload)
+        .filter_map(|event| match event.note() {
+            Some(note) if note.kind == "hook" => {
+                assert_eq!(
+                    event.context.execution.map(ExecutionId::raw),
+                    Some(0),
+                    "{event:?}"
+                );
+                Some(&note.payload)
             }
             _ => None,
         })

@@ -13,14 +13,14 @@ use std::time::{Duration, Instant};
 use petri::engine::{EngineState, Event, EventRecord, RunError};
 use petri::execution::controls::{ControlError, ControlService};
 use petri::execution::events::{
-    CollectingSink, EventBody, EventProjector, EventSource, replay_run,
+    CollectingSink, EventProjector, EventSource, ViewEvent, replay_run,
 };
 use petri::execution::host::{self, HostRun};
 use petri::execution::inspect::inspect_run;
 use petri::execution::watchdog::StallWatchdog;
 use petri::execution::{
-    CancelReason, CoordinatorRecord, ExecutionId, ExecutionObserver, InterviewDispatcher,
-    InterviewReply, InterviewRequest, Interviewer,
+    CancelReason, CoordinatorEvent, CoordinatorRecord, ExecutionId, ExecutionObserver,
+    InterviewDispatcher, InterviewReply, InterviewRequest, Interviewer,
 };
 use petri::executor::Retention;
 use petri::fabro::{
@@ -402,33 +402,34 @@ async fn an_idle_run_is_cancelled_by_the_watchdog() {
     let events = sink.events();
     let stalls: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e.body, EventBody::StallTimeout { .. }))
+        .filter(|e| matches!(e.view(), Some(ViewEvent::RunStalled { .. })))
         .collect();
     assert_eq!(stalls.len(), 1, "{events:#?}");
     assert!(matches!(
-        stalls[0].body,
-        EventBody::StallTimeout {
+        stalls[0].view(),
+        Some(ViewEvent::RunStalled {
             stall_timeout_ms: 400,
             idle_ms
-        } if idle_ms >= 400
+        }) if *idle_ms >= 400
     ));
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(&e.body, EventBody::InvocationCancelRequested {
+        events.iter().any(|e| matches!(
+            e.coordinator(),
+            Some(CoordinatorEvent::InvocationCancelRequested {
                 reason: Some(CancelReason::StallTimeout {
                     stall_timeout_ms: 400,
                     ..
                 }),
                 ..
-            })),
+            })
+        )),
         "the cancel names its reason: {events:#?}"
     );
     let replayed = replay_run(dir.path()).expect("replays");
     assert!(
         replayed
             .iter()
-            .any(|e| matches!(e.body, EventBody::StallTimeout { .. })),
+            .any(|e| matches!(e.view(), Some(ViewEvent::RunStalled { .. }))),
         "the stall survives replay"
     );
 }
@@ -573,11 +574,22 @@ async fn pause_holds_admission_and_unpause_releases_it() {
     let events = sink.events();
     let notices: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e.body, EventBody::RunPaused | EventBody::RunUnpaused))
+        .filter(|e| {
+            matches!(
+                e.coordinator(),
+                Some(CoordinatorEvent::RunPaused | CoordinatorEvent::RunUnpaused)
+            )
+        })
         .collect();
     assert_eq!(notices.len(), 2, "{events:#?}");
-    assert!(matches!(notices[0].body, EventBody::RunPaused));
-    assert!(matches!(notices[1].body, EventBody::RunUnpaused));
+    assert!(matches!(
+        notices[0].coordinator(),
+        Some(CoordinatorEvent::RunPaused)
+    ));
+    assert!(matches!(
+        notices[1].coordinator(),
+        Some(CoordinatorEvent::RunUnpaused)
+    ));
     assert!(
         notices
             .iter()
@@ -587,22 +599,30 @@ async fn pause_holds_admission_and_unpause_releases_it() {
     assert!(notices[0].id.seq < notices[1].id.seq);
     let first_attempt = events
         .iter()
-        .position(|e| matches!(e.body, EventBody::AttemptStarted))
+        .position(|e| matches!(e.engine(), Some(Event::StepStarted { .. })))
         .expect("an attempt started");
     let unpaused = events
         .iter()
-        .position(|e| matches!(e.body, EventBody::RunUnpaused))
+        .position(|e| matches!(e.coordinator(), Some(CoordinatorEvent::RunUnpaused)))
         .expect("unpaused");
     assert!(unpaused < first_attempt, "{events:#?}");
     let replayed = replay_run(dir.path()).expect("replays");
     let durable: Vec<_> = replayed
         .iter()
-        .filter(|e| matches!(e.body, EventBody::RunPaused | EventBody::RunUnpaused))
-        .map(|e| e.body.clone())
+        .filter(|e| {
+            matches!(
+                e.coordinator(),
+                Some(CoordinatorEvent::RunPaused | CoordinatorEvent::RunUnpaused)
+            )
+        })
+        .map(|e| e.coordinator().cloned())
         .collect();
     assert_eq!(
         durable,
-        [EventBody::RunPaused, EventBody::RunUnpaused],
+        [
+            Some(CoordinatorEvent::RunPaused),
+            Some(CoordinatorEvent::RunUnpaused)
+        ],
         "replay carries both controls"
     );
 }
@@ -862,11 +882,22 @@ async fn a_pause_survives_resume_and_holds_admission_until_unpaused() {
     let replayed = replay_run(dir.path()).expect("replays");
     let controls_seen: Vec<_> = replayed
         .iter()
-        .filter(|e| matches!(e.body, EventBody::RunPaused | EventBody::RunUnpaused))
+        .filter(|e| {
+            matches!(
+                e.coordinator(),
+                Some(CoordinatorEvent::RunPaused | CoordinatorEvent::RunUnpaused)
+            )
+        })
         .collect();
     assert_eq!(controls_seen.len(), 2, "{replayed:#?}");
-    assert!(matches!(controls_seen[0].body, EventBody::RunPaused));
-    assert!(matches!(controls_seen[1].body, EventBody::RunUnpaused));
+    assert!(matches!(
+        controls_seen[0].coordinator(),
+        Some(CoordinatorEvent::RunPaused)
+    ));
+    assert!(matches!(
+        controls_seen[1].coordinator(),
+        Some(CoordinatorEvent::RunUnpaused)
+    ));
     assert!(
         controls_seen
             .iter()
