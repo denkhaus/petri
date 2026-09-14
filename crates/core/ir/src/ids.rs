@@ -304,3 +304,72 @@ impl CancelScopeId {
     /// The run's own cancel scope. Cancelling it cancels everything.
     pub const ROOT: Self = Self(0);
 }
+
+/// A run-level id: numbered by the coordinator, never by the engine, so it
+/// reads and writes as a plain number and has no id space.
+macro_rules! run_id {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(
+            Clone,
+            Copy,
+            Debug,
+            Default,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            Serialize,
+            Deserialize,
+        )]
+        #[serde(transparent)]
+        pub struct $name(u64);
+
+        impl $name {
+            pub const fn new(raw: u64) -> Self {
+                Self(raw)
+            }
+
+            pub const fn raw(self) -> u64 {
+                self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(formatter, "{}", self.0)
+            }
+        }
+    };
+}
+
+run_id!(
+    /// One invocation of a graph within a run: the root, or a nested call.
+    InvocationId
+);
+run_id!(
+    /// One engine execution of an invocation: the first, or a successor
+    /// after a restart. Names an engine log.
+    ExecutionId
+);
+
+impl InvocationId {
+    pub const ROOT: Self = Self(0);
+
+    /// The workspace-prefix fragment this invocation contributes to scope
+    /// identities: durable lease records and the driver's workspace names
+    /// both build on it, so it has exactly one spelling.
+    pub fn workspace_prefix(self) -> String {
+        format!("invocation-{self}")
+    }
+}
+
+impl ExecutionId {
+    /// The environment-prefix fragment this execution contributes to scope
+    /// identities — the per-execution counterpart of
+    /// [`InvocationId::workspace_prefix`].
+    pub fn environment_prefix(self) -> String {
+        format!("execution-{self}")
+    }
+}

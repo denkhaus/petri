@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/core/ir",
+    "crates/core/store",
     "crates/core/engine",
     "crates/core/executor",
     "crates/core/executor-sandbox",
@@ -74,6 +75,7 @@ pebble-agent = { git = "https://github.com/lithoscomputer/pebble.git", rev = "69
 lithos-llm = { git = "https://github.com/lithoscomputer/lithos-llm", rev = "a1e3fd37b7153870411701327ac117606753fe90", default-features = false }
 globset = "0.4"
 ir = { package = "petri-ir", path = "crates/core/ir" }
+store = { package = "petri-store", path = "crates/core/store" }
 engine = { package = "petri-engine", path = "crates/core/engine" }
 executor = { package = "petri-executor", path = "crates/core/executor" }
 executor-sandbox = { package = "petri-executor-sandbox", path = "crates/core/executor-sandbox" }

@@ -1625,6 +1625,7 @@ dependencies = [
  "petri-ir",
  "petri-runtime",
  "petri-steps",
+ "petri-store",
  "petri-testkit",
  "regex",
  "serde",
@@ -1889,6 +1890,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "petri-store"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "getrandom 0.3.4",
+ "petri-ir",
+ "petri-testkit",
+ "serde",
+ "serde_json",
+ "smol_str",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "petri-testkit"
 version = "0.1.0"
 dependencies = [
@@ -1899,6 +1915,7 @@ dependencies = [
  "petri-executor-sandbox",
  "petri-ir",
  "petri-steps",
+ "petri-store",
  "serde",
  "serde_json",
  "smol_str",

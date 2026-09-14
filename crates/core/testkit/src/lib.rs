@@ -21,6 +21,8 @@ use steps::PROCESS_KIND;
 use tokio::process::Command;
 use tokio::time;
 
+pub mod store;
+
 /// A process-unique counter, for run ids and directory names.
 pub fn unique_id() -> u64 {
     static COUNTER: AtomicU64 = AtomicU64::new(0);

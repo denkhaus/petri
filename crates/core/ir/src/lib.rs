@@ -50,8 +50,8 @@ pub use graph::{
     TimeoutPolicy, WorkspacePolicy,
 };
 pub use ids::{
-    Attempt, CancelScopeId, EdgeId, ExprId, FiringId, Generation, Live, Local, NodeId, ScopeId,
-    StepKindId,
+    Attempt, CancelScopeId, EdgeId, ExecutionId, ExprId, FiringId, Generation, InvocationId, Live,
+    Local, NodeId, ScopeId, StepKindId,
 };
 pub use splice::{
     Attachment, ExistingNodeRef, FragmentErrorKind, FragmentValidationError, GraphFragment,
