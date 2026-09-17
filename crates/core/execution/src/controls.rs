@@ -40,8 +40,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use driver::lifecycle::{
-    AdmitAttempt, AttemptDecision, ExecutionHooks, Note, PrepareError, PrepareResult, Prepared,
-    Recorded, RunFinished, ScopeReleased, Transition, TransitionError, TransitionReport,
+    AdmitAttempt, AttemptDecision, ExecutionHooks, HookContext, Note, PrepareError, PrepareResult,
+    Prepared, Recorded, RunFinished, ScopeReleased, Transition, TransitionError, TransitionReport,
 };
 use engine::{EngineState, Event, EventRecord};
 use ir::FiringId;
@@ -64,7 +64,11 @@ pub struct PauseHooks {
 
 #[async_trait::async_trait]
 impl ExecutionHooks for PauseHooks {
-    async fn before_attempt(&self, request: AdmitAttempt) -> AttemptDecision {
+    async fn before_attempt(
+        &self,
+        context: &HookContext,
+        request: AdmitAttempt,
+    ) -> AttemptDecision {
         let mut paused = self.paused.clone();
         if *paused.borrow() {
             tracing::info!(
@@ -87,45 +91,50 @@ impl ExecutionHooks for PauseHooks {
             );
         }
         match &self.inner {
-            Some(inner) => inner.before_attempt(request).await,
+            Some(inner) => inner.before_attempt(context, request).await,
             None => AttemptDecision::admit(),
         }
     }
 
-    async fn prepare_result(&self, request: PrepareResult) -> Result<Prepared, PrepareError> {
+    async fn prepare_result(
+        &self,
+        context: &HookContext,
+        request: PrepareResult,
+    ) -> Result<Prepared, PrepareError> {
         match &self.inner {
-            Some(inner) => inner.prepare_result(request).await,
+            Some(inner) => inner.prepare_result(context, request).await,
             None => Ok(Prepared::unchanged()),
         }
     }
 
-    async fn after_record(&self, recorded: Recorded) -> Vec<Note> {
+    async fn after_record(&self, context: &HookContext, recorded: Recorded) -> Vec<Note> {
         match &self.inner {
-            Some(inner) => inner.after_record(recorded).await,
+            Some(inner) => inner.after_record(context, recorded).await,
             None => Vec::new(),
         }
     }
 
     async fn transition(
         &self,
+        context: &HookContext,
         transition: Transition,
     ) -> Result<TransitionReport, TransitionError> {
         match &self.inner {
-            Some(inner) => inner.transition(transition).await,
+            Some(inner) => inner.transition(context, transition).await,
             None => Ok(TransitionReport::default()),
         }
     }
 
-    async fn run_finished(&self, finished: RunFinished) -> Vec<Note> {
+    async fn run_finished(&self, context: &HookContext, finished: RunFinished) -> Vec<Note> {
         match &self.inner {
-            Some(inner) => inner.run_finished(finished).await,
+            Some(inner) => inner.run_finished(context, finished).await,
             None => Vec::new(),
         }
     }
 
-    async fn scope_released(&self, released: ScopeReleased) -> Vec<Note> {
+    async fn scope_released(&self, context: &HookContext, released: ScopeReleased) -> Vec<Note> {
         match &self.inner {
-            Some(inner) => inner.scope_released(released).await,
+            Some(inner) => inner.scope_released(context, released).await,
             None => Vec::new(),
         }
     }

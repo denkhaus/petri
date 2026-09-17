@@ -130,6 +130,41 @@ coordinator format version 2: a log without it replays as before. A
 forward `run_finished` and `scope_released` as they forward the other points
 and return the inner notes, or the run-level hooks never run or never record.
 
+## The hook context
+
+`RunRuntime` installs one `ExecutionHooks` object for every execution of a
+run. Every callback receives a `driver::lifecycle::HookContext` beside its
+request, `run_finished` and `scope_released` included. The context carries:
+
+- `run_key`: the run's identity in its store (`store::RunKey`).
+- `invocation`: the invocation this execution belongs to.
+- `execution`: the execution, which names one engine log.
+- `parent`: the `ParentLink` of a nested invocation (the calling execution,
+  firing, attempt and call slot), or `None` for the root.
+
+`FiringView` has no run-level fields; the context is where the identity
+lives. Two child invocations of the same workflow reuse the same local
+firing and attempt ids, and only the context tells their callbacks apart.
+A wrapper forwards the context it was given, unchanged.
+
+### Operation identities
+
+A host that performs an external effect from a callback (a commit, a push, a
+pull request, a child run) keys it on:
+
+```text
+(run key, execution id, DecisionId, effect kind)
+```
+
+`DecisionId` is the decision the callback belongs to: `AttemptStart` at
+`before_attempt`, `Route` at `transition`. A crash and resume reissues a
+pending decision under the same `DecisionId`, in the same execution, so the
+key is the same both times. The host looks the key up before it acts and
+performs each effect once. A sibling child in the same run has a different
+execution id, so its effect has a different key even when its `DecisionId`
+matches. `execution::tests::hook_context` exercises both cases: two
+siblings produce two effects, and a reissued routing decision produces one.
+
 ## Recording
 
 Every non-silent report is recorded as a `hook` note on the firing, so it is in

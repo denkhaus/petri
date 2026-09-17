@@ -21,9 +21,9 @@ use petri::attractor::{
     WAIT_KIND, WORKFLOW_KIND,
 };
 use petri::driver::lifecycle::{
-    AdmitAttempt, AttemptDecision, ExecutionHooks, Note, PrepareError, PrepareResult, Prepared,
-    RESULT_PREPARED_KIND, Recorded, ResultAdjustment, RouteOverride, TRANSITION_KIND, Transition,
-    TransitionError, TransitionReport,
+    AdmitAttempt, AttemptDecision, ExecutionHooks, HookContext, Note, PrepareError, PrepareResult,
+    Prepared, RESULT_PREPARED_KIND, Recorded, ResultAdjustment, RouteOverride, TRANSITION_KIND,
+    Transition, TransitionError, TransitionReport,
 };
 use petri::driver::{BranchRole, FiringView};
 use petri::engine::{Admission, DecisionId, Event, Intervention, RouteApplied, RouteDecision};
@@ -347,7 +347,11 @@ impl FakeHost {
 
 #[async_trait::async_trait]
 impl ExecutionHooks for FakeHost {
-    async fn before_attempt(&self, request: AdmitAttempt) -> AttemptDecision {
+    async fn before_attempt(
+        &self,
+        _context: &HookContext,
+        request: AdmitAttempt,
+    ) -> AttemptDecision {
         let view = &request.view;
         let name = view.node_name();
         self.call(format!("before_attempt {name} {}", view.attempt.raw()));
@@ -372,7 +376,11 @@ impl ExecutionHooks for FakeHost {
         }
     }
 
-    async fn prepare_result(&self, request: PrepareResult) -> Result<Prepared, PrepareError> {
+    async fn prepare_result(
+        &self,
+        _context: &HookContext,
+        request: PrepareResult,
+    ) -> Result<Prepared, PrepareError> {
         let view = &request.view;
         let name = view.node_name();
         self.call(format!("prepare_result {name} {}", view.attempt.raw()));
@@ -421,7 +429,7 @@ impl ExecutionHooks for FakeHost {
         Ok(prepared)
     }
 
-    async fn after_record(&self, recorded: Recorded) -> Vec<Note> {
+    async fn after_record(&self, _context: &HookContext, recorded: Recorded) -> Vec<Note> {
         let view = &recorded.view;
         self.call(format!("after_record {}", view.node_name()));
         vec![marker("after_record", view)]
@@ -429,6 +437,7 @@ impl ExecutionHooks for FakeHost {
 
     async fn transition(
         &self,
+        _context: &HookContext,
         transition: Transition,
     ) -> Result<TransitionReport, TransitionError> {
         let view = &transition.view;

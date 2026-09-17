@@ -195,14 +195,9 @@ pub struct EventId {
     pub index:  u32,
 }
 
-/// The firing that called a nested invocation.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ParentLink {
-    pub execution: ExecutionId,
-    pub firing:    FiringId,
-    pub attempt:   Attempt,
-    pub slot:      SmolStr,
-}
+/// The firing that called a nested invocation: the driver's type, so the
+/// hook context and the event context name a parent the same way.
+pub use driver::ParentLink;
 
 impl From<&ParentCallKey> for ParentLink {
     fn from(key: &ParentCallKey) -> Self {

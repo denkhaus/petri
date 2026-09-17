@@ -33,8 +33,8 @@ use std::sync::Arc;
 
 use driver::FiringView;
 use driver::lifecycle::{
-    AdmitAttempt, AttemptDecision, ExecutionHooks, Note, PrepareError, PrepareResult, Prepared,
-    Recorded, RouteOverride, RunFinished, ScopeReleased, Transition, TransitionError,
+    AdmitAttempt, AttemptDecision, ExecutionHooks, HookContext, Note, PrepareError, PrepareResult,
+    Prepared, Recorded, RouteOverride, RunFinished, ScopeReleased, Transition, TransitionError,
     TransitionReport,
 };
 use engine::{Admission, RouteDecision};
@@ -365,7 +365,11 @@ fn step_admits(view: &FiringView) -> bool {
 
 #[async_trait::async_trait]
 impl ExecutionHooks for HookAdapter {
-    async fn before_attempt(&self, request: AdmitAttempt) -> AttemptDecision {
+    async fn before_attempt(
+        &self,
+        _context: &HookContext,
+        request: AdmitAttempt,
+    ) -> AttemptDecision {
         if is_synthetic(&request.view) || step_admits(&request.view) {
             return AttemptDecision::admit();
         }
@@ -409,7 +413,11 @@ impl ExecutionHooks for HookAdapter {
         AttemptDecision { admission, notes }
     }
 
-    async fn prepare_result(&self, request: PrepareResult) -> Result<Prepared, PrepareError> {
+    async fn prepare_result(
+        &self,
+        _context: &HookContext,
+        request: PrepareResult,
+    ) -> Result<Prepared, PrepareError> {
         if is_synthetic(&request.view) {
             return Ok(Prepared::unchanged());
         }
@@ -432,7 +440,7 @@ impl ExecutionHooks for HookAdapter {
         Ok(prepared)
     }
 
-    async fn after_record(&self, recorded: Recorded) -> Vec<Note> {
+    async fn after_record(&self, _context: &HookContext, recorded: Recorded) -> Vec<Note> {
         if is_synthetic(&recorded.view) {
             return Vec::new();
         }
@@ -451,6 +459,7 @@ impl ExecutionHooks for HookAdapter {
 
     async fn transition(
         &self,
+        _context: &HookContext,
         transition: Transition,
     ) -> Result<TransitionReport, TransitionError> {
         if is_synthetic(&transition.view) {
@@ -485,7 +494,7 @@ impl ExecutionHooks for HookAdapter {
         }
     }
 
-    async fn run_finished(&self, finished: RunFinished) -> Vec<Note> {
+    async fn run_finished(&self, _context: &HookContext, finished: RunFinished) -> Vec<Note> {
         let report = self
             .run_level(HookPoint::RunFinished, RunFinishedPayload {
                 status:  finished.status,
@@ -496,7 +505,7 @@ impl ExecutionHooks for HookAdapter {
         report.notes()
     }
 
-    async fn scope_released(&self, released: ScopeReleased) -> Vec<Note> {
+    async fn scope_released(&self, _context: &HookContext, released: ScopeReleased) -> Vec<Note> {
         let report = self
             .run_level(HookPoint::ScopeReleased, ScopeReleasedPayload {
                 scope:   released.scope,

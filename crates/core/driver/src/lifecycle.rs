@@ -48,14 +48,25 @@
 //! re-dispatches an attempt whose finish never landed; a callback may
 //! therefore run twice for one operation across a crash, and a host that
 //! performs external effects deduplicates on the operation identity.
+//!
+//! # Context
+//!
+//! Every callback receives a [`HookContext`] beside its request: the run
+//! key, the invocation, the execution, and the parent call when the
+//! execution is a child. One hooks object serves every execution of a run,
+//! so the context is what tells a child's callback apart from its sibling's
+//! when both carry the same local firing and attempt ids. The operation
+//! identity a host deduplicates an external effect on is `(run key,
+//! execution, `DecisionId`, effect kind)`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use engine::{Admission, DecisionId, GroupDecision, RouteDecision};
-use ir::{Attempt, EdgeId, Outcome, Status, StepEvent, Value};
+use ir::{Attempt, EdgeId, ExecutionId, FiringId, InvocationId, Outcome, Status, StepEvent, Value};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
+use store::RunKey;
 
 use crate::view::FiringView;
 
@@ -156,6 +167,56 @@ pub struct TransitionNote {
     pub overrides: Vec<RouteOverride>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked:   Option<String>,
+}
+
+/// The firing that called a nested invocation: where a child execution's
+/// context points back to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentLink {
+    /// The calling execution.
+    pub execution: ExecutionId,
+    pub firing:    FiringId,
+    pub attempt:   Attempt,
+    /// The call slot the calling step named.
+    pub slot:      SmolStr,
+}
+
+/// Which execution a callback belongs to. The driver hands the same
+/// [`ExecutionHooks`] object every execution of a run, and hands this beside
+/// every request so the host can tell them apart: two child invocations of
+/// one workflow reuse the same local firing and attempt ids, and only the
+/// execution differs.
+///
+/// A host that performs an external effect from a callback keys it on
+/// `(run_key, execution, DecisionId, effect kind)` and deduplicates on that
+/// key: a resume reissues a pending decision under the same `DecisionId` in
+/// the same execution, so the key is stable across a crash.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookContext {
+    /// The run's identity in its store.
+    pub run_key:    RunKey,
+    pub invocation: InvocationId,
+    pub execution:  ExecutionId,
+    /// The call that started this invocation; `None` for the root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent:     Option<ParentLink>,
+}
+
+impl HookContext {
+    pub fn new(run_key: RunKey, invocation: InvocationId, execution: ExecutionId) -> Self {
+        Self {
+            run_key,
+            invocation,
+            execution,
+            parent: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_parent(mut self, parent: ParentLink) -> Self {
+        self.parent = Some(parent);
+        self
+    }
 }
 
 /// The awaited admission of one attempt.
@@ -381,14 +442,19 @@ impl TransitionError {
 /// on the driver loop. They see an immutable [`FiringView`] and change the
 /// run only through their return values. A callback that never returns holds
 /// its firing open; a root kill aborts pending callbacks and records the
-/// original results.
+/// original results. Every callback receives the [`HookContext`] of the
+/// execution it belongs to; a wrapper forwards it unchanged.
 #[async_trait::async_trait]
 pub trait ExecutionHooks: Send + Sync {
     /// Before an attempt is dispatched, once per attempt. The view carries
     /// the resolved config. Returning `Skip` or `Block` ends the visit without
     /// an attempt; `Admit` hands on to the decision resolver.
-    async fn before_attempt(&self, request: AdmitAttempt) -> AttemptDecision {
-        let _ = request;
+    async fn before_attempt(
+        &self,
+        context: &HookContext,
+        request: AdmitAttempt,
+    ) -> AttemptDecision {
+        let _ = (context, request);
         AttemptDecision::admit()
     }
 
@@ -396,15 +462,19 @@ pub trait ExecutionHooks: Send + Sync {
     /// node's exhaustion policy applied, and before its record is appended.
     /// Once per attempt; the one with `will_retry == false` is the final
     /// completion, and what it returns is what routing sees.
-    async fn prepare_result(&self, request: PrepareResult) -> Result<Prepared, PrepareError> {
-        let _ = request;
+    async fn prepare_result(
+        &self,
+        context: &HookContext,
+        request: PrepareResult,
+    ) -> Result<Prepared, PrepareError> {
+        let _ = (context, request);
         Ok(Prepared::unchanged())
     }
 
     /// After a final outcome is recorded, before routing is resolved. Notes
     /// returned here are appended before the `RoutingResolved` record.
-    async fn after_record(&self, recorded: Recorded) -> Vec<Note> {
-        let _ = recorded;
+    async fn after_record(&self, context: &HookContext, recorded: Recorded) -> Vec<Note> {
+        let _ = (context, recorded);
         Vec::new()
     }
 
@@ -412,9 +482,10 @@ pub trait ExecutionHooks: Send + Sync {
     /// once per completed firing, no-route completions included.
     async fn transition(
         &self,
+        context: &HookContext,
         transition: Transition,
     ) -> Result<TransitionReport, TransitionError> {
-        let _ = transition;
+        let _ = (context, transition);
         Ok(TransitionReport::default())
     }
 
@@ -423,15 +494,15 @@ pub trait ExecutionHooks: Send + Sync {
     /// The notes come back to the driver, which hands them to its host in
     /// the [`ExecutionReport`](crate::ExecutionReport) (`run_notes`); a
     /// coordinator records them at run level, since no firing owns them.
-    async fn run_finished(&self, finished: RunFinished) -> Vec<Note> {
-        let _ = finished;
+    async fn run_finished(&self, context: &HookContext, finished: RunFinished) -> Vec<Note> {
+        let _ = (context, finished);
         Vec::new()
     }
 
     /// A scope's environment is about to be released. Awaited: the release
     /// waits for it. Notes travel as for [`Self::run_finished`].
-    async fn scope_released(&self, released: ScopeReleased) -> Vec<Note> {
-        let _ = released;
+    async fn scope_released(&self, context: &HookContext, released: ScopeReleased) -> Vec<Note> {
+        let _ = (context, released);
         Vec::new()
     }
 }

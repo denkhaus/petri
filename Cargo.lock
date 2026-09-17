@@ -1625,6 +1625,7 @@ dependencies = [
  "petri-executor-sandbox",
  "petri-ir",
  "petri-steps",
+ "petri-store",
  "petri-testkit",
  "serde",
  "serde_json",

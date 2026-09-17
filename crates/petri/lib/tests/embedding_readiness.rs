@@ -27,8 +27,8 @@ use petri::attractor::pebble::PebbleClient;
 use petri::attractor::register;
 use petri::attractor::skills::FabroHome;
 use petri::driver::lifecycle::{
-    AdmitAttempt, AttemptDecision, ExecutionHooks, Note, PrepareError, PrepareResult, Prepared,
-    Recorded, RunFinished, ScopeReleased, Transition, TransitionError, TransitionReport,
+    AdmitAttempt, AttemptDecision, ExecutionHooks, HookContext, Note, PrepareError, PrepareResult,
+    Prepared, Recorded, RunFinished, ScopeReleased, Transition, TransitionError, TransitionReport,
 };
 use petri::engine::Event;
 use petri::execution::events::{
@@ -578,46 +578,55 @@ impl EmbeddingHost {
 
 #[async_trait::async_trait]
 impl ExecutionHooks for EmbeddingHost {
-    async fn before_attempt(&self, request: AdmitAttempt) -> AttemptDecision {
+    async fn before_attempt(
+        &self,
+        context: &HookContext,
+        request: AdmitAttempt,
+    ) -> AttemptDecision {
         let node = request.view.node_name().to_owned();
         if node == self.pause && self.paused.fetch_add(1, Ordering::SeqCst) == 0 {
             self.release.notified().await;
         }
-        let mut decision = self.inner.before_attempt(request).await;
+        let mut decision = self.inner.before_attempt(context, request).await;
         decision.notes.push(Self::marker("before_attempt", &node));
         decision
     }
 
-    async fn prepare_result(&self, request: PrepareResult) -> Result<Prepared, PrepareError> {
+    async fn prepare_result(
+        &self,
+        context: &HookContext,
+        request: PrepareResult,
+    ) -> Result<Prepared, PrepareError> {
         let node = request.view.node_name().to_owned();
-        let mut prepared = self.inner.prepare_result(request).await?;
+        let mut prepared = self.inner.prepare_result(context, request).await?;
         prepared.notes.push(Self::marker("prepare_result", &node));
         Ok(prepared)
     }
 
-    async fn after_record(&self, recorded: Recorded) -> Vec<Note> {
+    async fn after_record(&self, context: &HookContext, recorded: Recorded) -> Vec<Note> {
         let node = recorded.view.node_name().to_owned();
-        let mut notes = self.inner.after_record(recorded).await;
+        let mut notes = self.inner.after_record(context, recorded).await;
         notes.push(Self::marker("after_record", &node));
         notes
     }
 
     async fn transition(
         &self,
+        context: &HookContext,
         transition: Transition,
     ) -> Result<TransitionReport, TransitionError> {
         let node = transition.view.node_name().to_owned();
-        let mut report = self.inner.transition(transition).await?;
+        let mut report = self.inner.transition(context, transition).await?;
         report.notes.push(Self::marker("transition", &node));
         Ok(report)
     }
 
-    async fn run_finished(&self, finished: RunFinished) -> Vec<Note> {
-        self.inner.run_finished(finished).await
+    async fn run_finished(&self, context: &HookContext, finished: RunFinished) -> Vec<Note> {
+        self.inner.run_finished(context, finished).await
     }
 
-    async fn scope_released(&self, released: ScopeReleased) -> Vec<Note> {
-        self.inner.scope_released(released).await
+    async fn scope_released(&self, context: &HookContext, released: ScopeReleased) -> Vec<Note> {
+        self.inner.scope_released(context, released).await
     }
 }
 

@@ -12,8 +12,8 @@ use std::time::Duration;
 use std::{env, fs, io, mem, process};
 
 use driver::{
-    Driver, EventObserver, ExecutionHooks, ExecutionReport, ResumeError, ResumeInfo, RunConfig,
-    RunGuard, SandboxAssignment,
+    Driver, EventObserver, ExecutionHooks, ExecutionReport, HookContext, ResumeError, ResumeInfo,
+    RunConfig, RunGuard, SandboxAssignment,
 };
 use engine::{EngineStart, EventLog, ReplayMismatch};
 use executor::{
@@ -21,7 +21,7 @@ use executor::{
 };
 use executor_sandbox::{LeaseLedger, RoutingExecutor, SandboxOptions};
 use frontend::{CompileInputs, DirFiles, Frontend, Lowered, REPOSITORY_VAR, Span};
-use ir::Graph;
+use ir::{ExecutionId, Graph, InvocationId};
 use serde_json::Value;
 use smol_str::SmolStr;
 use store::{Access, OwnerId, RunDirStore, RunKey, RunLogs, RunStore, StoreError};
@@ -683,12 +683,15 @@ pub struct RunRuntime {
 
 impl RunRuntime {
     /// A standalone driver's completion owns this run's service teardown.
+    /// It is the run's one execution: the root invocation's first.
     fn equip_standalone(self, driver: Driver) -> Driver {
+        let context = HookContext::new(self.key.clone(), InvocationId::ROOT, ExecutionId::new(0));
         let driver = attach(
             driver.with_capabilities(self.caps.clone()),
             &self.observers,
             self.progress.as_ref(),
             self.hooks.as_ref(),
+            context,
         );
         driver.with_run_guard(Box::new(self))
     }
@@ -774,13 +777,14 @@ impl RunRuntime {
     }
 
     /// Build one execution driver without provisioning run services again.
+    /// `context` names the execution: its ids supply the scope identities,
+    /// and the installed hooks receive it with every callback.
     pub fn driver(
         &self,
         graph: Graph,
         start: EngineStart,
         execution_dir: impl Into<PathBuf>,
-        environment_prefix: impl Into<smol_str::SmolStr>,
-        workspace_prefix: impl Into<smol_str::SmolStr>,
+        context: HookContext,
         sandbox: SandboxAssignment,
         secrets: Arc<dyn SecretProvider>,
     ) -> Driver {
@@ -789,12 +793,7 @@ impl RunRuntime {
             self.executor.clone(),
             self.steps.clone(),
             secrets,
-            self.execution_config(
-                execution_dir.into(),
-                environment_prefix.into(),
-                workspace_prefix.into(),
-                sandbox,
-            ),
+            self.execution_config(execution_dir.into(), &context, sandbox),
         )
         .with_engine_start(start)
         .with_capabilities(self.caps.clone());
@@ -803,6 +802,7 @@ impl RunRuntime {
             &self.observers,
             self.progress.as_ref(),
             self.hooks.as_ref(),
+            context,
         )
     }
 
@@ -812,8 +812,7 @@ impl RunRuntime {
         graph: Graph,
         log: EventLog,
         execution_dir: impl Into<PathBuf>,
-        environment_prefix: impl Into<smol_str::SmolStr>,
-        workspace_prefix: impl Into<smol_str::SmolStr>,
+        context: HookContext,
         sandbox: SandboxAssignment,
         secrets: Arc<dyn SecretProvider>,
     ) -> Result<(Driver, ResumeInfo), ResumeError> {
@@ -823,12 +822,7 @@ impl RunRuntime {
             self.executor.clone(),
             self.steps.clone(),
             secrets,
-            self.execution_config(
-                execution_dir.into(),
-                environment_prefix.into(),
-                workspace_prefix.into(),
-                sandbox,
-            ),
+            self.execution_config(execution_dir.into(), &context, sandbox),
         )?;
         let driver = driver.with_capabilities(self.caps.clone());
         Ok((
@@ -837,6 +831,7 @@ impl RunRuntime {
                 &self.observers,
                 self.progress.as_ref(),
                 self.hooks.as_ref(),
+                context,
             ),
             info,
         ))
@@ -863,8 +858,7 @@ impl RunRuntime {
     fn execution_config(
         &self,
         execution_dir: PathBuf,
-        environment_prefix: smol_str::SmolStr,
-        workspace_prefix: smol_str::SmolStr,
+        context: &HookContext,
         sandbox: SandboxAssignment,
     ) -> RunConfig {
         // An execution ends before its invocation can restart. Workspace
@@ -872,7 +866,10 @@ impl RunRuntime {
         // individual driver release.
         base_run_config(&self.options, execution_dir)
             .with_retention(Retention::Always)
-            .with_scope_identities(environment_prefix, workspace_prefix)
+            .with_scope_identities(
+                context.execution.environment_prefix(),
+                context.invocation.workspace_prefix(),
+            )
             .with_sandbox_assignment(sandbox)
     }
 }
@@ -896,12 +893,14 @@ fn base_run_config(options: &RunOptions, run_dir: PathBuf) -> RunConfig {
 }
 
 /// Attach the runtime-registered observers, progress sink and hooks to a
-/// driver.
+/// driver. The hooks are one object per runtime; `context` is what tells
+/// them which execution each callback belongs to.
 fn attach(
     mut driver: Driver,
     observers: &[Arc<dyn EventObserver>],
     progress: Option<&Arc<dyn ProgressSink>>,
     hooks: Option<&Arc<dyn ExecutionHooks>>,
+    context: HookContext,
 ) -> Driver {
     for observer in observers {
         driver = driver.observe(observer.clone());
@@ -910,7 +909,7 @@ fn attach(
         driver = driver.with_progress(progress.clone());
     }
     if let Some(hooks) = hooks {
-        driver = driver.with_hooks(hooks.clone());
+        driver = driver.with_hooks(hooks.clone(), context);
     }
     driver
 }
