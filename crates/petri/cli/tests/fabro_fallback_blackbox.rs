@@ -103,12 +103,14 @@ fn plan_routes_of(records: &[Value], node: &str) -> Vec<String> {
         .collect()
 }
 
-/// A `[run.model.fallbacks]` table the run cannot use fails the run at
-/// `start`, before any node runs and before any request leaves: Fabro's
-/// server refuses such a table at run start, and the first LLM stage is
-/// too late to learn about a configuration error.
+/// A `[run.model.fallbacks]` table the run cannot use is refused when the
+/// workflow is loaded, before a run directory exists and before any request
+/// leaves: with a model client the runner resolves every model at
+/// `Runtime::check` (`attractor.model.*`), where Fabro's server refuses such
+/// a table at run creation. A graph admitted without a client meets the same
+/// check at its `start` stage (`attractor_steps` `admission` tests).
 #[tokio::test]
-async fn a_bad_fallback_table_fails_the_run_at_start() {
+async fn a_bad_fallback_table_is_refused_at_load() {
     let mut case = Case::new("fallback-bad-table");
     let openai = Twin::start(OPENAI, &case.root.join("twin-openai"), vec![]).await;
     case.redirect(&openai);
@@ -121,34 +123,63 @@ async fn a_bad_fallback_table_fails_the_run_at_start() {
     );
     let finished = case.run_with(&workflow, &[], no_client_retries()).await;
     finished.assert_code(1);
-    assert_eq!(
-        finished.status_line(),
-        Some("failed"),
+    assert!(
+        finished.stderr.contains("error[attractor.model.fallbacks]")
+            && finished.stderr.contains("names provider `openai`"),
+        "the diagnostic names the code, the key and the provider:\n{}",
+        finished.stderr
+    );
+    assert!(
+        finished
+            .stderr
+            .contains("rejected: 1 error(s); nothing to run"),
         "{}",
         finished.stderr
     );
-    let nodes = finished.finished_nodes();
+    assert_eq!(finished.status_line(), None, "no run started");
+    assert!(finished.finished_nodes().is_empty(), "nothing ran");
     assert!(
-        nodes.contains(&("failure".to_owned(), "start".to_owned())),
-        "{nodes:?}"
-    );
-    assert!(
-        !nodes.iter().any(|(_, node)| node == "agent"),
-        "nothing ran after start: {nodes:?}"
-    );
-    let context = finished.final_context();
-    assert_eq!(context["failure_class"], json!("bad_config"), "{context:?}");
-    let document = finished.inspect();
-    let failure =
-        document["executions"][0]["engine"]["context"]["nodes"]["start"]["failure"].to_string();
-    assert!(
-        failure.contains("names provider `openai`"),
-        "the failure names the key and the provider: {failure}"
+        !finished.run_dir.join("run.json").exists(),
+        "no run directory was written"
     );
     assert!(
         requests(&openai, &case).is_empty(),
         "no request left the runner"
     );
+    finished.assert_no_leaked_processes().await;
+    openai.stop();
+}
+
+/// A selector no available provider offers is refused at load the same
+/// way, at the node's line, with `attractor.model.unknown`. (An unknown
+/// model name on `openai` is not one: that row takes passthrough models.)
+#[tokio::test]
+async fn an_unknown_provider_is_refused_at_load() {
+    let mut case = Case::new("fallback-unknown-provider");
+    let openai = Twin::start(OPENAI, &case.root.join("twin-openai"), vec![]).await;
+    case.redirect(&openai);
+    let workflow = case.workflow(
+        r#"digraph Unknown {
+    graph [backend="api", goal="Answer the question"]
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    agent [prompt="Say hello.", model="claude-sonnet-5", provider="nowhere", on_failure="exit"]
+    start -> agent -> exit
+}"#,
+        None,
+    );
+    let finished = case.run_with(&workflow, &[], no_client_retries()).await;
+    finished.assert_code(1);
+    assert!(
+        finished
+            .stderr
+            .contains(":5:5: error[attractor.model.unknown]")
+            && finished.stderr.contains("`nowhere/claude-sonnet-5`"),
+        "the diagnostic is at the node's span and names the selector:\n{}",
+        finished.stderr
+    );
+    assert!(finished.finished_nodes().is_empty(), "nothing ran");
+    assert!(requests(&openai, &case).is_empty());
     finished.assert_no_leaked_processes().await;
     openai.stop();
 }

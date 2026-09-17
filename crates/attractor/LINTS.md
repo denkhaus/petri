@@ -19,13 +19,19 @@ Classifications:
 - **Platform**: the rule checks Fabro's settings, not the language. None of
   the 38 does.
 - **Obsolete**: the construct does not exist in Petri's dialect.
-- **Covered by P1.5**: the three catalog rules; admission-time model
-  resolution raises `attractor.model.unknown` (decision 4 of the plan's
-  review). Nothing stays in Fabro for them.
+- **Covered at admission**: the three catalog rules. They need the model
+  catalog, which the frontend does not have and the runtime does: with the
+  `PebbleClient` capability installed, `Runtime::check` resolves every
+  agent and prompt node's model against it
+  (`attractor_steps::admission`, FORMAT.md "Model resolution at
+  admission") and a selector or chain entry it cannot resolve is
+  `attractor.model.unknown` (a malformed or provider-keyed table is
+  `attractor.model.fallbacks`). Nothing stays in Fabro for them (decision 4
+  of the plan's review).
 
 Counts: 24 covered, 9 language (7 whole rules and one clause each of
-`backend_valid` and `for_each_contract`), 3 covered by P1.5, 1 obsolete,
-1 helper file that is not a rule, 0 platform.
+`backend_valid` and `for_each_contract`), 3 covered at admission, 1
+obsolete, 1 helper file that is not a rule, 0 platform.
 
 A diagnostic's severity is Fabro's unless the notes say otherwise. Where Petri
 is stricter the notes say so, and `crates/fabro/acceptance/CONTRACT.md` lists
@@ -51,8 +57,8 @@ code; `crates/attractor/frontend/tests/lowering.rs` exercises each row below
 | `inert_attribute` | Language | `attractor.inert_attribute` (warning) | Fabro's table of handler-specific attributes. Recorded difference: a prompted `tripleoctagon` is a prompt node in Petri and reads `output_schema` and `output_retries`, so they are not inert on it. |
 | `script_prompt_conflict` (raised by `inert_attribute.rs`) | Language | `attractor.script_prompt_conflict` (error) | |
 | `join_policy_removed` | Obsolete | `attractor.unknown_attribute` (error) | `join_policy` is not in the dialect's attribute tables. The hint says to remove it: a parallel node always waits for every branch. |
-| `model_support` | Covered by P1.5 | `attractor.model.unknown` | The helper the two catalog rules share (unknown model, unknown provider). |
-| `node_model_known` | Covered by P1.5 | `attractor.model.unknown` | |
+| `model_support` | Covered at admission | `attractor.model.unknown` | The helper the two catalog rules share (unknown model, unknown provider). Raised by `Runtime::check` with a model client, not by the lowering; `crates/attractor/steps/tests/admission.rs`. |
+| `node_model_known` | Covered at admission | `attractor.model.unknown` | A node's `model` and `provider`, and a provider named alone whose catalog row has no default model. |
 | `on_failure_valid` | Covered | `attractor.bad_on_failure` (error); on an edge, `attractor.unknown_attribute` (error) | Fabro warns for `on_failure` on an edge; Petri refuses every attribute the edge table does not list. Petri also accepts `partially_succeed`, with the `attractor.petri_extension` warning (see FORMAT.md). |
 | `orphan_custom_outcome` | Covered | `attractor.all_conditional_edges` (error) | A node with an `outcome=` condition and no unconditional edge has only conditional edges, so the ported error covers it. Fabro's rule is a warning; the error it always accompanies wins. |
 | `parallel_branch` | Helper, not a rule | | The branch analysis the two rules below share. Petri's is `threads::is_branch_first` and the fork-edge check in `threads::edge_payload`. |
@@ -67,7 +73,7 @@ code; `crates/attractor/frontend/tests/lowering.rs` exercises each row below
 | `start_no_incoming` | Covered | `attractor.start_has_incoming` (error) | |
 | `start_node` | Covered | `attractor.no_start`, `attractor.multiple_starts` (errors) | Petri also reads `type=start`. |
 | `stdin_source_valid` | Covered | `attractor.bad_stdin_source` (error) | An empty key. Fabro also refuses a non-string value; Petri reads any scalar as the text it was written as. |
-| `stylesheet_model_known` | Covered by P1.5 | `attractor.model.unknown` | |
+| `stylesheet_model_known` | Covered at admission | `attractor.model.unknown` | A stylesheet writes `model` on the node before the lowering reads it, so the pass sees the styled value. |
 | `stylesheet_syntax` | Covered | `attractor.stylesheet.syntax` (error) | Petri also warns on a property the stylesheet cannot set, `attractor.stylesheet.unknown_property`. |
 | `terminal_node` | Covered | `attractor.no_exit`, `attractor.multiple_exits` (errors) | Petri also reads `type=exit`. |
 | `thread_id_requires_fidelity_full` | Covered | `attractor.thread_id_requires_fidelity_full` (warning) | Node, edge and the graph's `default_thread`. A fork edge or a branch's first node gets `attractor.parallel_branch_inert_attribute` instead, as in Fabro. |

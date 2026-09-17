@@ -115,6 +115,7 @@ crates/github/frontend/tests/lowering.rs     frontend §7 3-6, the pure half: wh
 crates/core/frontend-native/tests/native.rs  frontend §7 7, the pure half; invariant 8 hint
 crates/github/acceptance/tests/gha_e2e.rs    frontend §7 3-6, run for real: truth table, matrix, composites
 crates/core/runtime/tests/native_e2e.rs      frontend §7 7: the cycle, run end to end
+crates/core/runtime/tests/admission.rs       the admission seam: a pass rewrites the root and the children with the static capabilities, a problem is a diagnostic on the node's span, a changed child's digest is followed through the parent's reference
 crates/github/acceptance/tests/harness.rs    frontend §7 8: every corpus workflow lowers or is rejected specifically
 crates/github/acceptance/tests/e2e.rs        frontend §7 9: two real corpus workflows run on the executor
 
@@ -131,6 +132,7 @@ crates/attractor/steps/tests/manager.rs          readiness item 4: the manager l
 crates/attractor/steps/tests/parallel.rs         readiness item 3: branches as child invocations; static, mixed and all-failed forks, promotion, duplicate targets, empty `for_each`, item labels, repeated forks, nested forks, cancellation, resume; the fork snapshot offloaded (a 50-item fork's children, resume through the store, two forks in sequence)
 crates/core/execution/tests/admission.rs      readiness item 3: `max_parallel` as a bound on a fork's live children (dispatch in declaration order, a branch in backoff holds none, cancel while queued, redispatch on resume) and the run-wide 10,000 invocation ceiling (boundary, nested, finished children, lower limits, refusals, resume)
 crates/attractor/steps/tests/prompt.rs           readiness item 4: `attractor/prompt` against a scripted model client, contracts and repair turns, the prompted fan-in, prompt events
+crates/attractor/steps/tests/admission.rs        model resolution at admission: concrete routes and frozen plans on every LLM node, `attractor.model.unknown` and `attractor.model.fallbacks` at the node's span, the graph unchanged without a client, the `start` stage's table check without a catalog
 crates/fabro/acceptance/tests/e2e.rs         Fabro plan §7 6: gh-list, hello, a for_each fan-out, random selection, two 1,000-item forks in one run, end to end
 crates/petri/cli/tests/fabro_cli.rs          Fabro plan §6: `petri run --auto-approve` answers a human gate
 crates/petri/cli/tests/inspect_cli.rs        black box phase 2: `petri inspect` over finished, restarted, failed, cancelled and damaged run dirs
@@ -152,6 +154,7 @@ crates/petri/cli/tests/fabro_mcp_blackbox.rs  readiness item 9b (milestone C2) t
 crates/petri/cli/tests/fabro_fallback_blackbox.rs  readiness item 9a (milestone C1) through the binary: `[run.model.fallbacks]` with the twins injecting failures: a successful primary, qualifying and non-qualifying failures, a third provider after two failures, chain exhaustion, a tool effect not repeated across a failover, cancellation during fallback, refusal versus other content filters, a request timeout, client retries spent before the chain advances, a workflow retry that is not a failover, reasoning effort mapping with `NoNearbyReasoningLevel` and `ChainEmpty`, repair turns on the plan with a target's chain inert, a retained thread on the fallback route, a prompt node
 crates/petri/cli/tests/llm_client.rs         the client `petri::llm_client` builds, against a twin: its same-route retries and its call budget
 crates/petri/lib/tests/fallback_events.rs    readiness item 9a: a stage's fallback plan, routes, failover decision, per-route usage and outcome rebuilt from public `RunEvent`s alone
+crates/petri/lib/tests/model_admission.rs    admitted routes survive catalog changes before dispatch and before resume (alias, default provider, eligible providers), read from the plan event and Pebble's session route; a pinned route the client cannot address fails with `llm:pinned_route_unavailable`
 crates/petri/cli/tests/fabro_hooks_blackbox.rs  readiness item 5 through the binary: a configured hook blocks a real tool effect of a native agent (`a_configured_hook_blocks_a_real_tool_effect_in_the_native_backend`); two `full` nodes share one conversation
 crates/attractor/steps/src/fallback.rs (unit)     readiness item 9a: chain resolution keyed by the canonical model, refused keys, skipped candidates with Fabro's notices, per-target reasoning effort with `NoNearbyReasoningLevel` and `ChainEmpty`, the plan's positions, the typed failure's eligibility (`lithos-llm`'s `failover_eligible`) for every `lithos-llm` kind, and every Pebble error's class
 crates/fabro/frontend/tests/skills.rs        readiness item 9c: Fabro's skill directories in order on real scopes, precedence across the three, the reference prompt section and tool definition, `/name` expansion, `[run.agent] skills`, malformed and missing skills diagnosed (fixtures `crates/fabro/acceptance/testdata/skills`)
@@ -1256,6 +1259,15 @@ no platform vocabulary in them:
   Petri derived beside it under `derived`; `verify_export` proves the
   exported records are the stored logs at the end of every run beside
   `verify_replay`.
+- **Admission passes.** `Runtime::admission` registers an `AdmissionPass`
+  that `Runtime::check` runs over every graph the step registry accepted,
+  the root and the pre-lowered children, with the runtime's static
+  capabilities: how a component resolves what the frontend cannot and
+  writes it into the graph a run persists. A problem is an error diagnostic
+  on the node's `meta.span`; a changed child's digest is followed through
+  the parent's reference. The Attractor component's pass pins every LLM
+  node's model against the host's catalog (`crates/attractor/FORMAT.md`,
+  "Model resolution at admission").
 - **Awaited extension points.** `Runtime::hooks` installs
   `driver::lifecycle::ExecutionHooks`: `before_attempt` (pause, skip or block
   an attempt), `prepare_result` (adjust the effective result; the original is

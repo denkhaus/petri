@@ -17,9 +17,11 @@
 //! section; here the results ride the fan-in's inputs and are rendered the
 //! same way, with each branch's id, status and updates.
 //!
-//! The one-shot request runs on a fallback plan ([`crate::fallback`]): a
-//! provider-local model error re-sends the same messages on the next
-//! configured route, and the repair turns stay on that plan.
+//! The one-shot request runs on a fallback plan ([`crate::fallback`]): the
+//! one admission froze on the node's config when the runtime had a catalog
+//! ([`crate::admission`]), else the one the node builds. A provider-local
+//! model error re-sends the same messages on the next configured route,
+//! and the repair turns stay on that plan.
 //!
 //! The step emits two `StepEvent::Custom` payloads a host can map onto
 //! Fabro's `stage.prompt` and `prompt.completed` events, each with a stable
@@ -35,7 +37,7 @@ use std::time::{Duration, Instant};
 use frontend_attractor::Policy;
 use frontend_attractor::kinds::{PROMPT_KIND, StageOutcome};
 use ir::{Control, LogStream, Metrics, Outcome, StepEvent, StepKindId, Value};
-use lithos_llm::types::{Message, ReasoningEffort, Request, Response, ResponseFormat, Role, Usage};
+use lithos_llm::types::{Message, Request, Response, ResponseFormat, Role, Usage};
 use lithos_llm::{Client, Error};
 use pebble_coding_agent::{MemoryDiscovery, ProjectMemory};
 use serde::Deserialize;
@@ -46,14 +48,15 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::AgentBackend;
+use crate::agent::backend::AgentError;
 use crate::blobs::{self, OutputStore};
 use crate::contract::{Contract, Parsed, repair_message, validate};
-use crate::fallback::{self, ModelFailure, PlanError, Requested};
+use crate::fallback::{self, FrozenPlan, ModelFailure, StageRequest};
 use crate::fidelity::{self, Fidelity, Incoming, Preamble, StageInfo, ThreadConfig};
 use crate::outcome::{ExplicitRoutes, Stage};
 use crate::parallel::{BRANCH_COUNT_KEY, RESULTS_KEY, parallel_complete, strip_placeholders};
 use crate::pebble::environment::PebbleEnvironment;
-use crate::pebble::{PebbleClient, profile_of, speed_of};
+use crate::pebble::{PebbleClient, profile_of};
 use crate::preamble;
 use crate::stage::{self, RunInfo};
 
@@ -115,9 +118,15 @@ pub struct PromptConfig {
     pub speed:                Option<String>,
     #[serde(default)]
     pub max_tokens:           Option<i64>,
-    /// `[run.model.fallbacks]` as lowered.
+    /// `[run.model.fallbacks]` as lowered. Absent once admission resolved
+    /// them.
     #[serde(default)]
     pub fallbacks:            BTreeMap<String, Vec<String>>,
+    /// The plan admission froze for this node (`crate::admission`). Absent
+    /// when the graph was admitted without a catalog; the node then builds
+    /// its own.
+    #[serde(default)]
+    pub plan:                 Option<FrozenPlan>,
     #[serde(default)]
     pub stages:               Value,
     #[serde(default)]
@@ -301,15 +310,6 @@ impl Step for PromptStep {
             Ok(selector) => selector,
             Err(message) => return fail(message, "bad_config"),
         };
-        let reasoning = match config
-            .reasoning_effort
-            .as_ref()
-            .map(|value| serde_json::from_value::<ReasoningEffort>(json!(value)))
-            .transpose()
-        {
-            Ok(reasoning) => reasoning,
-            Err(error) => return fail(error.to_string(), "bad_config"),
-        };
         let store = ctx.capability::<OutputStore>();
         let mut results = match &store {
             Some(store) => blobs::hydrate(config.branch_results.clone(), store.0.as_ref()).await,
@@ -326,40 +326,23 @@ impl Step for PromptStep {
             .map(|run| run.run_id.clone())
             .unwrap_or_default();
         let prompt = config.assemble(&contract, &results, &run_id);
-        let speed = match config.speed.as_deref() {
-            None => None,
-            Some(text) => match speed_of(text) {
-                Some(speed) => Some(speed),
-                None => {
-                    return fail(
-                        format!(
-                            "Invalid speed \"{text}\" for node \"{}\"; expected one of: standard, \
-                             fast",
-                            config.node
-                        ),
-                        "bad_config",
-                    );
-                }
-            },
+        let request = StageRequest {
+            node:             &config.node,
+            provider:         config.provider.as_deref(),
+            model:            config.model.as_deref(),
+            reasoning_effort: config.reasoning_effort.as_deref(),
+            speed:            config.speed.as_deref(),
+            fallbacks:        &config.fallbacks,
+            plan:             config.plan.as_ref(),
         };
-        let requested = Requested {
-            provider: config.provider.as_deref(),
-            model: config.model.as_deref().unwrap_or_default(),
-            reasoning_effort: reasoning,
-            speed,
+        let frozen = match fallback::plan_for_stage(&mut ctx, &client.0, &request).await {
+            Ok(frozen) => frozen,
+            Err(AgentError::Failed { class, message }) => return fail(message, &class),
+            Err(AgentError::Cancelled) => return Outcome::cancelled(),
+            Err(AgentError::Model(failure)) => return fail(failure.to_string(), &failure.class()),
         };
-        let planned =
-            match fallback::plan_for(&mut ctx, &client.0, &config.fallbacks, &requested).await {
-                Ok(planned) => planned,
-                Err(PlanError::Config(error)) => return fail(error.to_string(), "bad_config"),
-                Err(error @ PlanError::Primary { .. }) => {
-                    return fail(error.to_string(), "llm:model_selection");
-                }
-            };
-        let mut plan = planned.plan;
-        fallback::Stage::of(&ctx)
-            .plan(&plan, &planned.notices)
-            .await;
+        let mut plan = frozen.plan();
+        fallback::Stage::of(&ctx).plan(&plan, &frozen.notices).await;
         // Fabro's prompt handler: with `project_memory` on, the working
         // directory's instruction files for the model's profile become the
         // system prompt. Petri selects the paths; Pebble's loader, the one a

@@ -10,9 +10,12 @@
 //!
 //! [`register`] also installs the run's output-reference store
 //! ([`blobs::OutputStore`], a [`blobs::LocalBlobStore`] under
-//! `<run_dir>/blobs`) unless the host registered its own before the run.
+//! `<run_dir>/blobs`) unless the host registered its own before the run,
+//! and the admission pass that pins every LLM node's model at
+//! `Runtime::check` when the runtime has a catalog ([`admission`]).
 
 pub mod acp;
+pub mod admission;
 pub mod agent;
 pub mod blobs;
 pub mod checkout;
@@ -66,7 +69,9 @@ pub const BLOBS_DIR: &str = "blobs";
 /// service (installed as the driver's awaited hooks and as the
 /// `HookServiceHandle` capability, unless the host installed its own), the
 /// retained-session service, the model fallback service, and the run
-/// identity hooks read.
+/// identity hooks read. The model admission pass
+/// ([`admission::ModelAdmission`]) is registered here too: with a
+/// `PebbleClient` capability, `Runtime::check` pins every LLM node's route.
 ///
 /// A host that supplies its own `HookService` registers a `HookServiceHandle`
 /// capability and its own `Runtime::hooks` before calling this; the local
@@ -86,7 +91,8 @@ pub fn register(runtime: Runtime) -> Runtime {
             .step(StageStep)
             .step(ForkStep)
             .step(BranchStep)
-            .step(FanInStep),
+            .step(FanInStep)
+            .admission(admission::ModelAdmission),
     )
 }
 

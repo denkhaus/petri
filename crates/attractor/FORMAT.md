@@ -833,29 +833,90 @@ unknown) beside it, with `pebble.cost_usd_micros`,
 `pebble.compaction_cost_usd_micros` and `prompt.cost_usd_micros` as their
 own metrics; those fields are gone.
 
+### Model resolution at admission
+
+Fabro resolves every model selector to a concrete provider and model against
+the eligible providers when a run is created, and persists the result. Petri
+does the same at `Runtime::check` when the runtime has a catalog: with the
+`PebbleClient` capability installed, the admission pass
+`attractor_steps::admission::ModelAdmission` (registered by
+`attractor_steps::register`, an `AdmissionPass` of `petri-runtime`) resolves
+every `attractor/agent` node on the API backend and every `attractor/prompt`
+node (a `tab`, or a `tripleoctagon` with a `prompt`) exactly as the stage
+would at its first firing: the provider's default model when the node names
+a provider alone, the canonical route the `model` and `provider` resolve
+to, the `[run.model.fallbacks]` chain keyed by that model, and the
+reasoning effort mapped per target. The result is written on the node's
+config and the persisted graph is what dispatch and resume read, so the
+choices are frozen with the run whatever the catalog says later (an alias
+that moves, a default provider that changes, a provider that leaves the
+eligible set). `petri run` admits this way when the client builds; `petri
+check` and `petri run --dry-run` lower on the simulated runtime, which has
+no client, so their graphs keep the selectors.
+
+What the pass writes: `model` and `provider` become the original route's
+catalog model id and provider id; the `fallbacks` table is removed; and
+`plan` is the frozen plan,
+`{ original: Route, remaining: [Route], notices: [{code, level, message}] }`
+with each `Route` a concrete `{provider, model, reasoning_effort?, speed?}`
+and the notices the resolution produced. The node's `meta` keeps `model`,
+`provider` and `reasoning_effort` as written: it is the frontend's display
+record. The `start` stage's copy of the table is checked here and removed
+too, so `start` does not check a table already admitted against a catalog
+that may have changed since. Pre-lowered children (parallel branches,
+nested workflows) are resolved with the root; a changed child's digest
+moves and `Runtime::check` rewrites the reference to it. A nested workflow
+the workflow step lowers during the run is not admitted here and resolves
+at its stages.
+
+What refuses the graph, each an error diagnostic on the node's span (the
+file's, for the table):
+
+| Problem | Code |
+|---|---|
+| a `model` or `provider` no available provider offers, a provider not in the catalog, a provider named alone with no default model, or a chain key or reference that names a model or provider the catalog does not know | `attractor.model.unknown` |
+| a `[run.model.fallbacks]` table that is malformed, a reference that does not parse, a key that names a provider or a provider-qualified model, or two keys that resolve to one model | `attractor.model.fallbacks` |
+
+A node with no model and no provider is left for the stage to refuse with
+`bad_config`, as it does today.
+
+At the stage, a frozen plan is used as it stands. The stage first checks
+that the plan's original route is still one the client can address
+(`Client::resolve_route` on its `provider/model` selector); when it is not,
+the stage fails with class `llm:pinned_route_unavailable` and a message
+naming the route, and no request leaves. The remaining routes stay as
+frozen: a fallback target that is gone fails at request time, where Pebble's
+failover handles it. The plan event and the once-per-run stderr notices are
+emitted from the frozen data exactly as they are from a plan built at the
+stage. Without a catalog at admission the graph keeps its selectors and
+each stage resolves them at its first firing, as described next.
+
 ### Model fallback
 
 `[run.model.fallbacks]` is applied by the native agent and prompt steps
 (`attractor_steps::fallback`). A stage runs on a *plan*: the canonical route its
 `model` and `provider` resolve to, then the targets the chain keyed by that
-canonical model id lists, in order. Petri builds the plan; on a native agent
-node Pebble runs it (the plan's remaining routes are the builder's
+canonical model id lists, in order. Petri builds the plan, at admission when
+the runtime has a catalog (above) and at the stage otherwise; on a native
+agent node Pebble runs it (the plan's remaining routes are the builder's
 `fallback_routes`) and reports every move on its own event stream, which is
 the record of the routes (below). The chain is resolved once per run as
-Fabro's server resolves it at run start, and so does Petri: the `start`
-stage checks the table against the catalog before anything runs, so a key
-that names a provider, a provider-qualified key, two keys that resolve to one
-model, or an unknown key fail the run at `start` with class `bad_config`,
-before a checkout, a hook or a node (a stage that reads the table later
-meets the same error); a candidate on a provider
-that is not available (`PETRI_LLM_PROVIDERS`, credentials) is skipped with
-Fabro's `model_fallback_skipped` notice, as is a bare provider with no
-offering of the requested model, a bare model no available provider offers,
-a duplicate target, and (at plan time) a target with no reasoning level near
-the requested effort (`NoNearbyReasoningLevel`). A configured chain left
-with nothing usable warns `model_fallback_chain_empty` and the stage runs on
-its primary alone. Each notice is printed once per run on stderr
-(`warn: ...`) and always carried on the stage's plan event.
+Fabro's server resolves it at run start, and so does Petri: admission
+refuses a table the catalog cannot resolve (`attractor.model.unknown`,
+`attractor.model.fallbacks`), and for a graph admitted without a catalog the
+`start` stage checks the table before anything runs, so a key that names a
+provider, a provider-qualified key, two keys that resolve to one model, or
+an unknown key fail the run at `start` with class `bad_config`, before a
+checkout, a hook or a node (a stage that reads the table later meets the
+same error); a candidate on a provider that is not available
+(`PETRI_LLM_PROVIDERS`, credentials) is skipped with Fabro's
+`model_fallback_skipped` notice, as is a bare provider with no offering of
+the requested model, a bare model no available provider offers, a duplicate
+target, and (at plan time) a target with no reasoning level near the
+requested effort (`NoNearbyReasoningLevel`). A configured chain left with
+nothing usable warns `model_fallback_chain_empty` and the stage runs on its
+primary alone. Each notice is printed once per run on stderr (`warn: ...`)
+and always carried on the stage's plan event.
 
 The requested reasoning effort maps per target through the catalog: the
 nearest advertised level, a tie going up, as Fabro's `closest_supported`;
@@ -912,14 +973,15 @@ as Pebble's `LlmRetry` event, with `phase` `open` for a client retry and
 `consume` for a turn replay: Petri installs Pebble's `RetryEventObserver` on
 the client it builds.
 
-Recovery: nothing of a plan is durable. A run resumed after a crash starts
-the interrupted node's attempt again with a new plan at position 0, on the
-primary; the thread it may have continued is gone (the node degrades to
-`summary:high` as documented under "Fidelity and threads"). Any model request
-that was in flight when the process died may therefore be sent again, on the
-primary, and a tool effect that ran before the crash may run again: the
-existing at-least-once limit for external effects applies to fallback as to
-every other stage.
+Recovery: nothing of a plan's progress is durable. A run resumed after a
+crash starts the interrupted node's attempt again at position 0 of its plan,
+on the primary (the frozen plan from the stored graph when the run was
+admitted with a catalog, else a new plan); the thread it may have continued
+is gone (the node degrades to `summary:high` as documented under "Fidelity
+and threads"). Any model request that was in flight when the process died
+may therefore be sent again, on the primary, and a tool effect that ran
+before the crash may run again: the existing at-least-once limit for
+external effects applies to fallback as to every other stage.
 
 Events. Petri emits one `StepEvent::Custom` kind, for the fact Pebble cannot
 know: `attractor.fallback.plan`, once per stage that builds a plan (`node`,
@@ -1184,6 +1246,8 @@ call to the prompt that compacted, so these two are a breakdown of
 | `for_each` on a node that is not a `component` | `attractor.for_each.not_parallel` |
 | an agent on `backend="acp"` with no `acp.command` or `acp.config` on the node or the graph | `attractor.acp_requires_command` |
 | an agent on `backend="acp"` that sets `model`, `provider`, `reasoning_effort`, `max_tokens` or `speed` itself (a stylesheet's value does not count) | `attractor.acp_api_only_attributes` |
+| with a model client at `Runtime::check`: a model, provider, or chain entry the catalog cannot resolve (see "Model resolution at admission") | `attractor.model.unknown` |
+| with a model client at `Runtime::check`: a `[run.model.fallbacks]` table that is malformed or keyed by a provider | `attractor.model.fallbacks` |
 
 **Fabro's validator rules.** Fabro checks a workflow with the rules in
 `fabro-validate` before it creates a run. Every rule about the language is

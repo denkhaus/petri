@@ -68,12 +68,14 @@ fn runtime(dir: &RunDir) -> Runtime {
 }
 
 /// A one-agent graph on the ACP backend. The backend is named because the
-/// default is the native agent, as Fabro's own default is.
+/// default is the native agent, as Fabro's own default is. The node names
+/// no `model`: an ACP agent chooses its own, and the lowering refuses one
+/// (`attractor.acp_api_only_attributes`).
 fn agent_dot(agent: &Path, extra: &str) -> String {
     dot(&format!(
         r#"
         graph [goal="Greet", backend="acp", acp.command="python3 {} "]
-        a [prompt="Say hello", model="claude-opus"{extra}]
+        a [prompt="Say hello"{extra}]
         start -> a -> exit
     "#,
         agent.display()
@@ -247,20 +249,30 @@ async fn an_agent_that_exits_before_answering_is_retried_while_attempts_remain()
     );
 }
 
-#[tokio::test]
-async fn an_unconfigured_agent_fails_with_a_specific_class() {
-    let dir = RunDir::new("fabro-agent-unconfigured");
-    // An ACP node with no command anywhere: the node names the backend,
-    // since the default is the native agent.
-    let graph = lower(&dot(r#"
+/// An ACP node with no command anywhere is refused when the workflow is
+/// loaded (Fabro's `backend_valid` rule, ported as
+/// `attractor.acp_requires_command`), so the step's own `acp_unconfigured`
+/// refusal is reached only by a graph built without the lowering.
+#[test]
+fn an_unconfigured_agent_is_refused_at_load() {
+    // The node names the backend, since the default is the native agent.
+    let lowered = load(
+        "test.fabro",
+        &dot(r#"
         a [prompt="Say hello", backend="acp"]
         start -> a -> exit
-    "#));
-    let report = run(&dir, graph).await;
-    assert_eq!(status_of(&report, "a").as_deref(), Some("failure"));
-    assert_eq!(
-        output_of(&report, "a")["failure_class"],
-        json!("acp_unconfigured")
+    "#),
+        &NoFiles,
+        &CompileInputs::new(),
+    );
+    assert!(lowered.graph.is_none());
+    assert!(
+        lowered
+            .diagnostics
+            .errors()
+            .any(|d| d.code == "attractor.acp_requires_command"),
+        "{:?}",
+        lowered.diagnostics
     );
 }
 

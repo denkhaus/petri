@@ -13,7 +13,9 @@
 //!
 //! A native node runs on a fallback plan ([`crate::fallback`]): the route
 //! its model and provider resolve to, then the targets `[run.model.fallbacks]`
-//! configures for that model. Pebble runs the plan's remaining routes: a
+//! configures for that model. The plan is the one admission froze on the
+//! node's config when the runtime had a catalog ([`crate::admission`]),
+//! else the node builds it. Pebble runs the plan's remaining routes: a
 //! provider-local model error moves the conversation to the next route, and
 //! the session mirrors each move as Petri's events; a retained thread
 //! carries its plan, at the route reached, to the next node.
@@ -40,7 +42,7 @@ use crate::acp::AgentCommand;
 use crate::blobs::{self, OutputStore};
 use crate::compaction;
 use crate::contract::{Contract, Parsed, repair_message, validate};
-use crate::fallback::{self, Plan, Planned, Route};
+use crate::fallback::{self, FrozenPlan, Plan, Route, StageRequest};
 use crate::fidelity::{self, Fidelity, Incoming, Preamble, Resolved, StageInfo, ThreadConfig};
 use crate::outcome::{ExplicitRoutes, Stage};
 use crate::pebble::{PebbleClient, Resume};
@@ -98,9 +100,14 @@ pub struct AgentConfig {
     #[serde(default)]
     pub max_tokens:           Option<i64>,
     /// `[run.model.fallbacks]` as lowered: the chains keyed by the requested
-    /// model, references as written.
+    /// model, references as written. Absent once admission resolved them.
     #[serde(default)]
     pub fallbacks:            BTreeMap<String, Vec<String>>,
+    /// The plan admission froze for this node (`crate::admission`): the
+    /// concrete routes and the notices. Absent when the graph was admitted
+    /// without a catalog; the node then builds its own.
+    #[serde(default)]
+    pub plan:                 Option<FrozenPlan>,
     /// Context compaction, Fabro's values unless the frontend says otherwise
     /// (`crate::compaction`).
     #[serde(default)]
@@ -289,7 +296,7 @@ impl Step for AgentStep {
         // A native node's fallback plan: its route, then the configured
         // chain for that model. An ACP node has no plan (the command owns
         // its model).
-        let mut planned: Option<Planned> = None;
+        let mut planned: Option<FrozenPlan> = None;
         if config.backend == AgentBackend::Api {
             let Some(client) = ctx.capability::<PebbleClient>() else {
                 return fail(
@@ -309,7 +316,8 @@ impl Step for AgentStep {
                     "bad_config",
                 );
             }
-            planned = match fallback::plan_for_agent(&config, &mut ctx, &client.0).await {
+            let request = StageRequest::for_agent(&config);
+            planned = match fallback::plan_for_stage(&mut ctx, &client.0, &request).await {
                 Ok(planned) => Some(planned),
                 Err(AgentError::Cancelled) => return Outcome::cancelled(),
                 Err(AgentError::Failed { class, message }) => return fail(message, &class),
@@ -320,7 +328,7 @@ impl Step for AgentStep {
         }
         let requested_selector = planned
             .as_ref()
-            .map(|p| p.plan.original().selector())
+            .map(|p| p.original.selector())
             .unwrap_or_default();
         if config.backend == AgentBackend::Api
             && resolved.fidelity == Fidelity::Full
@@ -384,8 +392,9 @@ impl Step for AgentStep {
                     plan,
                 })
             }
-            (None, Some(Planned { plan, notices })) => {
-                fallback::Stage::of(&ctx).plan(&plan, &notices).await;
+            (None, Some(frozen)) => {
+                let plan = frozen.plan();
+                fallback::Stage::of(&ctx).plan(&plan, &frozen.notices).await;
                 (plan.clone(), Resume::Fresh(plan))
             }
             (None, None) => {

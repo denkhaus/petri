@@ -105,6 +105,46 @@ type RunProvisioner = Arc<
         + Sync,
 >;
 
+/// A problem an admission pass found: the diagnostic code it is reported
+/// under, the node it belongs to (by name) or `None` for a problem of the
+/// whole graph, and the message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdmissionProblem {
+    pub code:    SmolStr,
+    pub node:    Option<SmolStr>,
+    pub message: String,
+}
+
+impl AdmissionProblem {
+    pub fn new(code: &str, node: Option<&str>, message: impl Into<String>) -> Self {
+        Self {
+            code:    SmolStr::new(code),
+            node:    node.map(SmolStr::new),
+            message: message.into(),
+        }
+    }
+}
+
+/// A pass [`Runtime::check`] runs over a lowered graph after the step
+/// registry accepted it: the seam a component uses to resolve what the
+/// frontend could not (a model selector against the host's catalog) and to
+/// write the result into the graph, so the graph a run persists is what its
+/// steps read.
+///
+/// A pass sees the runtime's static capabilities (`Runtime::capability`),
+/// never a run's services or its directory. It returns every problem it
+/// found; `check` turns each into an error diagnostic on the node's span and
+/// hands out no graph. A pass must not panic on any graph the registry
+/// accepted.
+///
+/// A pass may change a pre-lowered child graph as freely as the root: the
+/// parent names its child by content digest, and `check` re-digests every
+/// child a pass changed and rewrites the references to it, so the child is
+/// still found by its digest at run time.
+pub trait AdmissionPass: Send + Sync {
+    fn admit(&self, graph: &mut Graph, caps: &::steps::Capabilities) -> Vec<AdmissionProblem>;
+}
+
 /// The assembled system: frontends, step kinds, executors, secrets, options.
 pub struct Runtime {
     frontends:    Vec<Box<dyn Frontend>>,
@@ -119,6 +159,7 @@ pub struct Runtime {
     hooks:        Option<Arc<dyn ExecutionHooks>>,
     caps:         ::steps::CapabilitiesBuilder,
     provisioners: Vec<RunProvisioner>,
+    admissions:   Vec<Arc<dyn AdmissionPass>>,
     options:      RunOptions,
 }
 
@@ -153,6 +194,7 @@ impl Runtime {
             hooks:        None,
             caps:         ::steps::Capabilities::builder(),
             provisioners: Vec::new(),
+            admissions:   Vec::new(),
             options:      RunOptions::new(
                 env::temp_dir().join(format!("petri-run-{}", process::id())),
             ),
@@ -173,6 +215,7 @@ impl Runtime {
             hooks:        None,
             caps:         ::steps::Capabilities::builder(),
             provisioners: Vec::new(),
+            admissions:   Vec::new(),
             options:      RunOptions::new(
                 env::temp_dir().join(format!("petri-run-{}", process::id())),
             ),
@@ -288,6 +331,16 @@ impl Runtime {
             + 'static,
     {
         self.provisioners.push(Arc::new(provision));
+        self
+    }
+
+    /// Register an admission pass: [`Runtime::check`] runs it over every
+    /// graph the step registry accepted, the root and the pre-lowered
+    /// children, in registration order, with the runtime's static
+    /// capabilities.
+    #[must_use]
+    pub fn admission(mut self, pass: impl AdmissionPass + 'static) -> Self {
+        self.admissions.push(Arc::new(pass));
         self
     }
 
@@ -411,7 +464,10 @@ impl Runtime {
     /// child graph — against the step registry, so an unregistered kind or a
     /// bad literal config is a diagnostic here rather than a step failure at
     /// firing time. Only the registry pass runs: the frontend already ran the
-    /// structural passes when it lowered.
+    /// structural passes when it lowered. Then every registered
+    /// [`AdmissionPass`] runs over the accepted graphs; a problem a pass
+    /// reports is an error diagnostic on its node's span, and the graph is
+    /// withheld as it is for a registry error.
     pub fn check(
         &self,
         file: &Path,
@@ -420,7 +476,8 @@ impl Runtime {
         inputs: &CompileInputs,
     ) -> Result<Lowered, LoadError> {
         let mut lowered = self.lower(file, format, repo, inputs)?;
-        let span = Span::file(file.to_string_lossy().as_ref());
+        let file = file.to_string_lossy();
+        let span = Span::file(&file);
         let mut errors = Vec::new();
         if let Some(graph) = &lowered.graph {
             errors.extend(
@@ -446,8 +503,53 @@ impl Runtime {
                     .diagnostics
                     .error(error.code(), span.clone(), error.to_string());
             }
+            return Ok(lowered);
+        }
+        let problems = self.admit(&mut lowered);
+        if !problems.is_empty() {
+            lowered.graph = None;
+            lowered.children.clear();
+            for (problem, span) in problems {
+                lowered
+                    .diagnostics
+                    .error(&problem.code, span_of(&file, span), problem.message);
+            }
         }
         Ok(lowered)
+    }
+
+    /// Run every admission pass over the root graph and the children, in
+    /// registration order, then follow every changed child's new digest
+    /// through the references to it. Each problem comes back with its
+    /// node's source position, read from the frontend's `meta.span`, when
+    /// it names a node the graph has.
+    fn admit(&self, lowered: &mut Lowered) -> Vec<(AdmissionProblem, Option<(u32, u32)>)> {
+        if self.admissions.is_empty() {
+            return Vec::new();
+        }
+        let caps = self.caps.clone().build();
+        let before: Vec<String> = lowered
+            .children
+            .iter()
+            .map(frontend::graph_digest)
+            .collect();
+        let mut problems = Vec::new();
+        let graphs = lowered.graph.iter_mut().chain(lowered.children.iter_mut());
+        for graph in graphs {
+            for pass in &self.admissions {
+                for problem in pass.admit(graph, &caps) {
+                    let position = problem
+                        .node
+                        .as_deref()
+                        .and_then(|name| node_position(graph, name));
+                    problems.push((problem, position));
+                }
+            }
+        }
+        if problems.is_empty() {
+            redigest_children(lowered, before);
+        }
+        problems
     }
 
     // ── Running ────────────────────────────────────────────────────────────
@@ -878,6 +980,76 @@ impl RunRuntime {
 impl RunGuard for RunRuntime {
     async fn teardown(self: Box<Self>) {
         self.finish().await;
+    }
+}
+
+/// The `{line, column}` the frontend recorded under a node's `meta.span`,
+/// when the node exists and the position is known.
+fn node_position(graph: &Graph, name: &str) -> Option<(u32, u32)> {
+    let node = graph.body.nodes.iter().find(|node| node.name == name)?;
+    let span = node.meta.get("span")?;
+    let read = |key: &str| span.get(key)?.as_u64().and_then(|n| u32::try_from(n).ok());
+    let line = read("line")?;
+    (line > 0).then(|| (line, read("column").unwrap_or(0)))
+}
+
+/// Rewrite every reference to a child whose content changed. A parent names
+/// a child by the digest the frontend computed; a step config string equal
+/// to a changed child's old digest becomes the new one, in the root and in
+/// every child. A child that references a changed child changes too, so the
+/// rewrite repeats until every digest is stable; references form a tree, so
+/// that takes at most one round per level.
+fn redigest_children(lowered: &mut Lowered, mut before: Vec<String>) {
+    for _ in 0..=lowered.children.len() {
+        let after: Vec<String> = lowered
+            .children
+            .iter()
+            .map(frontend::graph_digest)
+            .collect();
+        let changed: Vec<(&String, &String)> = before
+            .iter()
+            .zip(&after)
+            .filter(|(old, new)| old != new)
+            .collect();
+        if changed.is_empty() {
+            return;
+        }
+        let graphs = lowered.graph.iter_mut().chain(lowered.children.iter_mut());
+        for graph in graphs {
+            for node in &mut graph.body.nodes {
+                for (old, new) in &changed {
+                    replace_string(&mut node.step.config, old, new);
+                }
+            }
+        }
+        before = after;
+    }
+}
+
+/// Replace every string in `value` equal to `from` with `to`.
+fn replace_string(value: &mut Value, from: &str, to: &str) {
+    match value {
+        Value::String(text) if text == from => to.clone_into(text),
+        Value::Array(items) => {
+            for item in items {
+                replace_string(item, from, to);
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values_mut() {
+                replace_string(item, from, to);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A span in `file`: at `position` when a node supplied one, else the file
+/// alone.
+fn span_of(file: &str, position: Option<(u32, u32)>) -> Span {
+    match position {
+        Some((line, column)) => Span::new(file, line, column),
+        None => Span::file(file),
     }
 }
 
