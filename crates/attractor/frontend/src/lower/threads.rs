@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use frontend::{Diagnostics, Span};
+use frontend::{Diagnostic, Diagnostics, Span};
 use ir::{ExprId, ExprTable, Value};
 use serde_json::{Map, json};
 
@@ -20,8 +20,30 @@ use crate::model::{Attrs, EdgeDecl, NodeDecl, Workflow};
 
 /// The validation rule Fabro names, as a warning code.
 const THREAD_RULE: &str = "attractor.thread_id_requires_fidelity_full";
-/// Fabro's lint for a `thread_id` on a parallel branch, where it is inert.
+/// Fabro's lint for a `thread_id` on a parallel branch, where it is inert,
+/// and for a `fidelity="full"` there, which the branch degrades.
 const BRANCH_INERT: &str = "attractor.parallel_branch_inert_attribute";
+
+/// The `fidelity="full"` clause of Fabro's `parallel_branch_inert_attribute`:
+/// a branch runs at most at `summary:high`, because concurrent branches
+/// cannot share a conversation.
+fn branch_full_fidelity(what: &str, span: Span, diags: &mut Diagnostics) {
+    diags.push(
+        Diagnostic::warning(
+            BRANCH_INERT,
+            span,
+            format!(
+                "`fidelity=\"full\"` on {what} is degraded: a parallel branch runs at most at \
+                 `summary:high`, because concurrent branches cannot share a conversation"
+            ),
+        )
+        .with_hint(
+            "use `fidelity=\"summary:high\"` or a lower mode on the branch; to reuse a full \
+             session before the fan-out, set `fidelity=\"full\"` on the parallel node or its \
+             incoming edge",
+        ),
+    );
+}
 
 /// Parse a `fidelity` attribute on `attrs`, diagnosing a bad mode as an
 /// error. `None` when absent or bad.
@@ -113,6 +135,13 @@ impl ThreadAttrs {
                 );
             }
         }
+        if branch_first && fidelity == Some(Fidelity::Full) {
+            branch_full_fidelity(
+                &format!("`{}`", node.id),
+                node.attrs.span_of("fidelity", &node.span),
+                diags,
+            );
+        }
         let project_memory = node.attrs.bool("project_memory", diags).unwrap_or(true);
         let speed = node
             .attrs
@@ -195,6 +224,25 @@ pub(super) fn check_graph(workflow: &Workflow, diags: &mut Diagnostics) {
     }
 }
 
+/// The checks on an edge out of a parallel node, which starts a branch and
+/// carries no payload: a bad `fidelity` is an error, a `thread_id` is inert
+/// and `fidelity="full"` is degraded (Fabro's
+/// `parallel_branch_inert_attribute`).
+pub(super) fn check_fork_edge(edge: &EdgeDecl, diags: &mut Diagnostics) {
+    let what = format!("edge `{} -> {}`", edge.from, edge.to);
+    let fidelity = fidelity_attr(&edge.attrs, "fidelity", &edge.span, &what, diags);
+    if edge.attrs.text("thread_id").is_some_and(|t| !t.is_empty()) {
+        diags.warning(
+            BRANCH_INERT,
+            edge.attrs.span_of("thread_id", &edge.span),
+            format!("`thread_id` on {what} is inert: a fork edge starts a parallel branch"),
+        );
+    }
+    if fidelity == Some(Fidelity::Full) {
+        branch_full_fidelity(&what, edge.attrs.span_of("fidelity", &edge.span), diags);
+    }
+}
+
 /// The payload an edge into an agent or prompt node carries: which node the
 /// token left, and the edge's own `fidelity` and `thread_id`. `None` when the
 /// target is not an agent or prompt node, or the edge leaves a parallel fork
@@ -210,20 +258,13 @@ pub(super) fn edge_payload(
     if !target.is_llm() {
         return None;
     }
+    if kinds.get(&edge.from) == Some(&Kind::Parallel) {
+        // A fork edge is the parallel lowering's; `check_fork_edge` diagnoses it.
+        return None;
+    }
     let what = format!("edge `{} -> {}`", edge.from, edge.to);
     let fidelity = fidelity_attr(&edge.attrs, "fidelity", &edge.span, &what, diags);
     let thread = edge.attrs.text("thread_id").filter(|t| !t.is_empty());
-    let from_fork = kinds.get(&edge.from) == Some(&Kind::Parallel);
-    if from_fork {
-        if thread.is_some() {
-            diags.warning(
-                BRANCH_INERT,
-                edge.attrs.span_of("thread_id", &edge.span),
-                format!("`thread_id` on {what} is inert: a fork edge starts a parallel branch"),
-            );
-        }
-        return None;
-    }
     if thread.is_some() && fidelity != Some(Fidelity::Full) && !graph_fidelity_full {
         diags.warning(
             THREAD_RULE,

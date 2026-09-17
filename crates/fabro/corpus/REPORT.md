@@ -6,7 +6,7 @@
 |---|---|---|
 | lowered clean | 17 | 53% |
 | lowered with warnings | 14 | 43% |
-| rejected with a specific code (`unsupported.*`, `attractor.unknown_attribute`) | 1 | 3% |
+| rejected with a specific code (`unsupported.*`, `attractor.unknown_attribute`, a Fabro validator rule) | 1 | 3% |
 | **failed for any other reason** | 0 | 0% |
 | **panicked** | 0 | 0% |
 
@@ -72,14 +72,14 @@
 | `test/attractor/batch_clean.dot` | clean | 3 |  |
 | `test/attractor/batch_has_errors.dot` | clean | 3 |  |
 | `test/attractor/batch_warnings_only.dot` | warnings | 3 | `attractor.prompt_missing` |
-| `test/attractor/consensus_task.dot` | unsupported | 0 | `attractor.prompt_missing`, `attractor.unknown_attribute`, `info.budget.default`, `unsupported.legacy_dialect`, `unsupported.outcome_value` |
-| `test/attractor/green_test_complex.dot` | unsupported | 0 | `info.budget.default`, `unsupported.legacy_dialect` |
-| `test/attractor/green_test_moderate.dot` | unsupported | 0 | `info.budget.default`, `unsupported.legacy_dialect` |
-| `test/attractor/green_test_vague.dot` | unsupported | 0 | `info.budget.default`, `unsupported.legacy_dialect` |
-| `test/attractor/refactor_test_complex.dot` | warnings | 38 | `info.budget.default` |
-| `test/attractor/refactor_test_moderate.dot` | warnings | 27 | `deprecated.auto_status`, `info.budget.default` |
-| `test/attractor/refactor_test_vague.dot` | warnings | 21 | `deprecated.auto_status`, `info.budget.default` |
+| `test/attractor/consensus_task.dot` | unsupported | 0 | `attractor.all_conditional_edges`, `attractor.prompt_missing`, `attractor.unknown_attribute`, `info.budget.default`, `unsupported.legacy_dialect`, `unsupported.outcome_value` |
+| `test/attractor/green_test_complex.dot` | unsupported | 0 | `attractor.all_conditional_edges`, `info.budget.default`, `unsupported.legacy_dialect` |
+| `test/attractor/green_test_moderate.dot` | unsupported | 0 | `attractor.all_conditional_edges`, `info.budget.default`, `unsupported.legacy_dialect` |
+| `test/attractor/green_test_vague.dot` | unsupported | 0 | `attractor.all_conditional_edges`, `info.budget.default`, `unsupported.legacy_dialect` |
+| `test/attractor/refactor_test_complex.dot` | unsupported | 0 | `attractor.all_conditional_edges`, `info.budget.default` |
+| `test/attractor/refactor_test_moderate.dot` | unsupported | 0 | `attractor.all_conditional_edges`, `deprecated.auto_status`, `info.budget.default` |
+| `test/attractor/refactor_test_vague.dot` | unsupported | 0 | `attractor.all_conditional_edges`, `deprecated.auto_status`, `info.budget.default` |
 | `test/attractor/reference_template.dot` | unsupported | 0 | `attractor.prompt_missing`, `attractor.unknown_attribute`, `deprecated.auto_status`, `info.budget.default`, `unsupported.outcome_value` |
-| `test/attractor/semport.dot` | unsupported | 0 | `attractor.prompt_missing`, `attractor.unknown_attribute`, `info.budget.default`, `unsupported.legacy_dialect`, `unsupported.outcome_value` |
+| `test/attractor/semport.dot` | unsupported | 0 | `attractor.all_conditional_edges`, `attractor.prompt_missing`, `attractor.unknown_attribute`, `info.budget.default`, `unsupported.legacy_dialect`, `unsupported.outcome_value` |
 | `test/attractor/simple_example.dot` | clean | 4 |  |
 | `test/attractor/solitaire_fast.dot` | warnings | 21 | `deprecated.auto_status`, `info.budget.default` |

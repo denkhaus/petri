@@ -1812,3 +1812,392 @@ fn attractor_lowers_the_same_graph_beside_fabro_settings_files() {
     assert_eq!(beside.params["attractor.hooks"], json!([]));
     assert!(!beside.params.contains_key("fabro.launch"));
 }
+
+// ── Fabro's lint rules (`crates/attractor/LINTS.md`) ───────────────────────
+
+/// The first diagnostic with `code`, when the workflow raises one.
+fn diagnostic_with(text: &str, code: &str) -> Option<frontend::Diagnostic> {
+    diagnostics(text).into_iter().find(|d| d.code == code)
+}
+
+fn has_code(text: &str, code: &str) -> bool {
+    codes(text).contains(&code.to_string())
+}
+
+/// Fabro's `all_conditional_edges` (and its subset `orphan_custom_outcome`):
+/// a node whose every edge has a condition has no fallback.
+#[test]
+fn all_conditional_edges_need_an_unconditional_fallback() {
+    let d = diagnostic_with(
+        &dot(r#"
+        a [prompt="x"]
+        b [prompt="y"]
+        start -> a
+        a -> b [condition="outcome=succeeded"]
+        a -> exit [condition="outcome=failed"]
+        b -> exit
+    "#),
+        "attractor.all_conditional_edges",
+    )
+    .expect("refused");
+    assert!(d.is_error());
+    assert!(d.message.contains("`a`"), "{d:?}");
+    assert!(d.hint.is_some(), "{d:?}");
+    assert!(
+        codes(&dot(r#"
+        a [prompt="x"]
+        b [prompt="y"]
+        start -> a
+        a -> b [condition="outcome=succeeded"]
+        a -> exit
+        b -> exit
+    "#))
+        .is_empty(),
+        "an unconditional edge is the fallback"
+    );
+}
+
+/// Fabro's `inert_attribute` and `script_prompt_conflict`.
+#[test]
+fn inert_attributes_warn_and_a_script_beside_a_prompt_is_refused() {
+    let inert: Vec<frontend::Diagnostic> = diagnostics(&dot(r#"
+        h [shape=hexagon, output_schema="routing"]
+        w [shape=insulator, duration="1s", script="ls"]
+        start -> h
+        h -> w [label="Go"]
+        w -> exit
+    "#))
+    .into_iter()
+    .filter(|d| d.code == "attractor.inert_attribute")
+    .collect();
+    assert_eq!(inert.len(), 2, "{inert:?}");
+    assert!(inert.iter().all(|d| !d.is_error() && d.hint.is_some()));
+    assert!(
+        inert
+            .iter()
+            .any(|d| d.message.contains("`output_schema` on node `h`")),
+        "{inert:?}"
+    );
+    assert!(
+        inert
+            .iter()
+            .any(|d| d.message.contains("`script` on node `w`")),
+        "{inert:?}"
+    );
+    // A prompted fan-in is a prompt node here, so it reads `output_schema`.
+    assert!(
+        !has_code(
+            &dot(r#"
+        fork [shape=component]
+        a [prompt="x"]
+        j [shape=tripleoctagon, prompt="summarize", output_schema="routing"]
+        start -> fork -> a -> j -> exit
+    "#),
+            "attractor.inert_attribute"
+        ),
+        "a prompted fan-in reads output_schema"
+    );
+    let conflict = diagnostic_with(
+        &dot(r#"
+        c [prompt="x", script="ls"]
+        start -> c -> exit
+    "#),
+        "attractor.script_prompt_conflict",
+    )
+    .expect("refused");
+    assert!(conflict.is_error());
+    assert!(conflict.hint.is_some());
+}
+
+/// Fabro's `for_each_contract`, first clause: `for_each` fans out only on a
+/// parallel node.
+#[test]
+fn for_each_on_a_node_that_is_not_parallel_is_refused() {
+    let d = diagnostic_with(
+        &dot(r#"
+        a [prompt="x", for_each="context.items"]
+        start -> a -> exit
+    "#),
+        "attractor.for_each.not_parallel",
+    )
+    .expect("refused");
+    assert!(d.is_error());
+    assert!(d.hint.is_some());
+}
+
+/// Fabro's `retry_target_exists`, on the node and on the graph.
+#[test]
+fn retry_targets_that_name_no_node_warn() {
+    let missing: Vec<frontend::Diagnostic> = diagnostics(&dot(r#"
+        graph [fallback_retry_target="nowhere"]
+        a [prompt="x", goal_gate=true, retry_target="ghost"]
+        start -> a -> exit
+    "#))
+    .into_iter()
+    .filter(|d| d.code == "attractor.retry_target_not_found")
+    .collect();
+    assert_eq!(missing.len(), 2, "{missing:?}");
+    assert!(missing.iter().all(|d| !d.is_error() && d.hint.is_some()));
+    assert!(missing.iter().any(|d| d.message.contains("\"ghost\"")));
+    assert!(missing.iter().any(|d| d.message.contains("the graph")));
+    assert!(!has_code(
+        &dot(r#"
+        a [prompt="x", goal_gate=true, retry_target="a"]
+        start -> a -> exit
+    "#),
+        "attractor.retry_target_not_found"
+    ));
+}
+
+/// Fabro's `script_absolute_cd`.
+#[test]
+fn a_script_that_changes_to_an_absolute_directory_warns() {
+    let d = diagnostic_with(
+        &dot(r#"
+        c [shape=parallelogram, script="cd /tmp && make"]
+        start -> c -> exit
+    "#),
+        "attractor.script_absolute_cd",
+    )
+    .expect("warned");
+    assert!(!d.is_error());
+    assert!(d.hint.is_some());
+    assert!(!has_code(
+        &dot(r#"
+        c [shape=parallelogram, script="cd src && make"]
+        start -> c -> exit
+    "#),
+        "attractor.script_absolute_cd"
+    ));
+}
+
+/// Fabro's `direction_valid`.
+#[test]
+fn an_unknown_rankdir_warns() {
+    let d = diagnostic_with(
+        &dot(r#"
+        rankdir=XY
+        a [prompt="x"]
+        start -> a -> exit
+    "#),
+        "attractor.bad_rankdir",
+    )
+    .expect("warned");
+    assert!(!d.is_error());
+    assert!(d.hint.as_deref().is_some_and(|h| h.contains("LR")));
+    assert!(
+        codes(&dot(r#"
+        graph [rankdir=LR]
+        a [prompt="x"]
+        start -> a -> exit
+    "#))
+        .is_empty()
+    );
+}
+
+/// Fabro's `reserved_keyword_node_id`, case-insensitively.
+#[test]
+fn a_node_id_that_is_a_dot_keyword_warns() {
+    let reserved: Vec<frontend::Diagnostic> = diagnostics(&dot(r#"
+        Strict [prompt="x"]
+        if [prompt="y"]
+        start -> Strict -> if -> exit
+    "#))
+    .into_iter()
+    .filter(|d| d.code == "attractor.reserved_keyword_node_id")
+    .collect();
+    assert_eq!(reserved.len(), 2, "{reserved:?}");
+    assert!(reserved.iter().all(|d| !d.is_error() && d.hint.is_some()));
+}
+
+/// Fabro's `backend_valid`, the ACP clauses.
+#[test]
+fn acp_agents_name_an_agent_and_take_no_api_only_attributes() {
+    let d = diagnostic_with(
+        &dot(r#"
+        a [prompt="x", backend="acp"]
+        start -> a -> exit
+    "#),
+        "attractor.acp_requires_command",
+    )
+    .expect("refused");
+    assert!(d.is_error());
+    assert!(d.hint.as_deref().is_some_and(|h| h.contains("acp.command")));
+    let d = diagnostic_with(
+        &dot(r#"
+        a [prompt="x", backend="acp", acp.command="agent", model="m", speed="fast"]
+        start -> a -> exit
+    "#),
+        "attractor.acp_api_only_attributes",
+    )
+    .expect("refused");
+    assert!(d.is_error());
+    assert!(d.message.contains("`model`, `speed`"), "{d:?}");
+    assert!(d.hint.is_some());
+    // The graph may name the agent, and a stylesheet's model is not the
+    // node's own attribute.
+    let quiet = codes(&dot(r#"
+        graph [backend="acp", acp.command="agent", model_stylesheet="* { model: m }"]
+        a [prompt="x"]
+        start -> a -> exit
+    "#));
+    assert!(
+        !quiet.iter().any(|c| c.starts_with("attractor.acp_")),
+        "{quiet:?}"
+    );
+}
+
+/// Fabro's `join_policy_removed`: the attribute is not in the dialect, and
+/// the refusal says what replaced it.
+#[test]
+fn join_policy_is_refused_with_a_removal_hint() {
+    let d = diagnostic_with(
+        &dot(r#"
+        a [prompt="x", join_policy="all"]
+        start -> a -> exit
+    "#),
+        "attractor.unknown_attribute",
+    )
+    .expect("refused");
+    assert!(d.is_error());
+    assert!(
+        d.hint.as_deref().is_some_and(|h| h.contains("join_policy")),
+        "{d:?}"
+    );
+}
+
+/// The Fabro rules the lowering already covered, each by its Petri code.
+#[test]
+fn covered_fabro_rules_raise_their_petri_codes() {
+    // command_requires_script
+    assert!(has_code(
+        &dot("c [shape=parallelogram] start -> c -> exit"),
+        "attractor.command_requires_script"
+    ));
+    // freeform_edge_count
+    assert!(has_code(
+        &dot(r#"
+        h [shape=hexagon]
+        a [prompt="x"]
+        b [prompt="y"]
+        start -> h
+        h -> a [freeform=true]
+        h -> b [freeform=true]
+        a -> exit
+        b -> exit
+    "#),
+        "attractor.freeform_edge_count"
+    ));
+    // goal_gate_has_retry
+    assert!(has_code(
+        &dot(r#"a [prompt="x", goal_gate=true] start -> a -> exit"#),
+        "attractor.goal_gate_without_target"
+    ));
+    // prompt_on_llm_nodes (a warning; Petri warns even when a label stands in)
+    let d = diagnostic_with(
+        &dot(r#"a [label="Do it"] start -> a -> exit"#),
+        "attractor.prompt_missing",
+    )
+    .expect("warned");
+    assert!(!d.is_error());
+    // selection_valid
+    assert!(has_code(
+        &dot(r#"a [prompt="x", selection="sometimes"] start -> a -> exit"#),
+        "attractor.bad_selection"
+    ));
+    // stdin_source_valid
+    assert!(has_code(
+        &dot(r#"c [shape=parallelogram, script="cat", stdin_source=""] start -> c -> exit"#),
+        "attractor.bad_stdin_source"
+    ));
+    // stylesheet_syntax
+    assert!(has_code(
+        &dot(r#"graph [model_stylesheet="* model: a }"] a [prompt="x"] start -> a -> exit"#),
+        "attractor.stylesheet.syntax"
+    ));
+    // terminal_node
+    assert!(has_code(
+        r#"digraph G { start [shape=Mdiamond]; a [prompt="x"]; start -> a }"#,
+        "attractor.no_exit"
+    ));
+    // type_known
+    assert!(has_code(
+        &dot(r#"a [type="widget", prompt="x"] start -> a -> exit"#),
+        "attractor.unknown_type"
+    ));
+    // for_each_contract: the source, the template edge count
+    assert!(has_code(
+        &dot(r#"
+        fork [shape=component, for_each=""]
+        a [prompt="x"]
+        j [shape=tripleoctagon]
+        start -> fork -> a -> j -> exit
+    "#),
+        "attractor.for_each.source"
+    ));
+    assert!(has_code(
+        &dot(r#"
+        fork [shape=component, for_each="context.items"]
+        a [prompt="x"]
+        b [prompt="y"]
+        j [shape=tripleoctagon]
+        start -> fork
+        fork -> a
+        fork -> b
+        a -> j
+        b -> j
+        j -> exit
+    "#),
+        "attractor.for_each.template_edges"
+    ));
+    // backend_valid: an unknown backend, ACP on a prompt node, both ACP
+    // spellings at once
+    assert!(has_code(
+        &dot(r#"a [prompt="x", backend="cli"] start -> a -> exit"#),
+        "attractor.bad_backend"
+    ));
+    assert!(has_code(
+        &dot(r#"p [shape=tab, prompt="x", backend="acp"] start -> p -> exit"#),
+        "attractor.prompt_backend"
+    ));
+    assert!(has_code(
+        &dot(
+            r#"a [prompt="x", backend="acp", acp.command="agent", acp.config="{}"] start -> a -> exit"#
+        ),
+        "attractor.acp_both"
+    ));
+    // on_failure_valid: an edge does not take the attribute (Petri refuses
+    // it where Fabro warns)
+    assert!(has_code(
+        &dot(r#"a [prompt="x"] start -> a  a -> exit [on_failure="route"]"#),
+        "attractor.unknown_attribute"
+    ));
+}
+
+/// The `fidelity="full"` clause of Fabro's `parallel_branch_inert_attribute`:
+/// a branch runs at most at `summary:high`, on the fork edge and on the
+/// branch's first node.
+#[test]
+fn full_fidelity_on_a_parallel_branch_warns_that_it_is_degraded() {
+    let degraded: Vec<frontend::Diagnostic> = diagnostics(&dot(r#"
+        fork [shape=component]
+        a [prompt="x", fidelity="full"]
+        b [prompt="y"]
+        join [shape=tripleoctagon]
+        start -> fork
+        fork -> a
+        fork -> b [fidelity="full"]
+        a -> join
+        b -> join
+        join -> exit
+    "#))
+    .into_iter()
+    .filter(|d| {
+        d.code == "attractor.parallel_branch_inert_attribute" && d.message.contains("degraded")
+    })
+    .collect();
+    assert_eq!(degraded.len(), 2, "{degraded:?}");
+    assert!(degraded.iter().all(|d| !d.is_error() && d.hint.is_some()));
+    assert!(degraded.iter().any(|d| d.message.contains("`a`")));
+    assert!(degraded.iter().any(|d| d.message.contains("fork -> b")));
+}

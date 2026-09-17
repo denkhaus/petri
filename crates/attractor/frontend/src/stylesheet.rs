@@ -2,7 +2,7 @@
 //! onto nodes by `*`, shape, `.class` or `#id`, specificity 0 to 3. Explicit
 //! node attributes always win.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use frontend::{Diagnostics, Span};
 
@@ -172,13 +172,16 @@ fn declarations(rest: &mut &str) -> Result<Vec<(String, String)>, StylesheetErro
 
 /// Write the stylesheet's properties onto the nodes: higher specificity wins,
 /// later rules win ties, and an attribute the node sets itself is never
-/// touched. Unknown properties are diagnosed once each.
+/// touched. Unknown properties are diagnosed once each. Returns what was
+/// written, as `(node id, property)` pairs, so a later check can tell a
+/// node's own attribute from one the stylesheet supplied.
 pub fn apply(
     stylesheet: &Stylesheet,
     workflow: &mut Workflow,
     span: &Span,
     diags: &mut Diagnostics,
-) {
+) -> HashSet<(String, String)> {
+    let mut written = HashSet::new();
     let mut rules: Vec<&Rule> = stylesheet.rules.iter().collect();
     rules.sort_by_key(|r| r.selector.specificity());
     let mut unknown = Vec::new();
@@ -229,9 +232,11 @@ pub fn apply(
             if !node.attrs.contains(property) {
                 node.attrs
                     .insert(property, AttrValue::Str(value.to_string()), span.clone());
+                written.insert((node.id.clone(), property.to_string()));
             }
         }
     }
+    written
 }
 
 #[cfg(test)]
