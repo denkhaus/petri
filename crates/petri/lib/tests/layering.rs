@@ -15,11 +15,15 @@
 //!    (`.ai/plans/attractor-split.md`). The layer runs one way; `attractor`
 //!    never names `fabro`.
 //! 3. Only the distribution (`crates/petri/`) may depend on component crates.
+//! 4. **Fabro's dependency set stands alone.** Fabro depends on the six crates
+//!    in [`FABRO_DEPENDENCIES`], not on the distribution or on the GitHub
+//!    component. The build closure of those six reaches only core, `attractor`
+//!    and `fabro` (`.ai/plans/fabro-integration.md`, P1.6).
 //!
 //! The check reads `cargo metadata`, so it sees what cargo sees, not what the
 //! manifests appear to say.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 
@@ -28,6 +32,21 @@ use serde_json::Value;
 /// Component pairs `(upper, lower)` where `upper` may depend on `lower`: the
 /// layers rule 2 allows. Every other component pair is a violation.
 const LAYERED: &[(&str, &str)] = &[("fabro", "attractor")];
+
+/// The packages Fabro pins: `Runtime::standard()` comes from `petri-runtime`
+/// and the Attractor registration from `petri-attractor-steps`, so a host
+/// assembles a Fabro runtime from these alone (`crates/fabro/HANDOFF.md`).
+const FABRO_DEPENDENCIES: &[&str] = &[
+    "petri-runtime",
+    "petri-execution",
+    "petri-store",
+    "petri-attractor-steps",
+    "petri-frontend-attractor",
+    "petri-frontend-fabro",
+];
+
+/// The components Fabro's build closure may reach.
+const FABRO_COMPONENTS: &[&str] = &["attractor", "fabro"];
 
 /// Which world a workspace crate lives in, by its manifest path.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,15 +82,19 @@ fn world(workspace_root: &Path, crate_dir: &Path) -> World {
     }
 }
 
-#[test]
-fn core_never_depends_on_a_component() {
+fn metadata() -> Value {
     let output = Command::new(env!("CARGO"))
         .args(["metadata", "--format-version", "1"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("cargo metadata runs");
     assert!(output.status.success(), "cargo metadata failed");
-    let meta: Value = serde_json::from_slice(&output.stdout).expect("metadata is JSON");
+    serde_json::from_slice(&output.stdout).expect("metadata is JSON")
+}
+
+#[test]
+fn core_never_depends_on_a_component() {
+    let meta = metadata();
 
     let root = Path::new(meta["workspace_root"].as_str().unwrap());
     let members: Vec<&str> = meta["workspace_members"]
@@ -144,6 +167,104 @@ fn core_never_depends_on_a_component() {
     assert!(
         violations.is_empty(),
         "component rules violated:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// Rule 4: from the six packages Fabro pins, follow every normal and build
+/// edge of the resolve graph. Nothing reached is the distribution or a
+/// component outside `attractor` and `fabro` — in particular, no GitHub
+/// crate. Dev edges stay out: a test dependency is not what a host links.
+#[test]
+fn fabro_dependencies_reach_neither_github_nor_the_distribution() {
+    let meta = metadata();
+    let root = Path::new(meta["workspace_root"].as_str().unwrap());
+    let packages = meta["packages"].as_array().unwrap();
+
+    // Package id -> (name, world), for every package cargo resolved; a
+    // non-workspace package has no world.
+    let mut names: HashMap<&str, &str> = HashMap::new();
+    let mut worlds: HashMap<&str, World> = HashMap::new();
+    let members: Vec<&str> = meta["workspace_members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m.as_str().unwrap())
+        .collect();
+    for pkg in packages {
+        let id = pkg["id"].as_str().unwrap();
+        names.insert(id, pkg["name"].as_str().unwrap());
+        if members.contains(&id) {
+            let manifest = Path::new(pkg["manifest_path"].as_str().unwrap());
+            worlds.insert(id, world(root, manifest.parent().unwrap()));
+        }
+    }
+
+    let roots: Vec<&str> = FABRO_DEPENDENCIES
+        .iter()
+        .map(|wanted| {
+            *names
+                .iter()
+                .find(|(id, name)| **name == *wanted && members.contains(id))
+                .map_or_else(
+                    || panic!("{wanted} is not a workspace member"),
+                    |(id, _)| id,
+                )
+        })
+        .collect();
+
+    // Edges of the resolve graph, normal and build kinds only.
+    let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
+    for node in meta["resolve"]["nodes"].as_array().unwrap() {
+        let from = node["id"].as_str().unwrap();
+        for dep in node["deps"].as_array().unwrap() {
+            let linked = dep["dep_kinds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|k| matches!(k["kind"].as_str(), None | Some("normal" | "build")));
+            if linked {
+                edges
+                    .entry(from)
+                    .or_default()
+                    .push(dep["pkg"].as_str().unwrap());
+            }
+        }
+    }
+
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut stack = roots.clone();
+    while let Some(id) = stack.pop() {
+        if seen.insert(id) {
+            stack.extend(edges.get(id).into_iter().flatten().copied());
+        }
+    }
+
+    let reached: BTreeSet<&str> = seen
+        .iter()
+        .filter(|id| worlds.contains_key(*id))
+        .map(|id| names[id])
+        .collect();
+    assert!(
+        FABRO_DEPENDENCIES.iter().all(|d| reached.contains(d)),
+        "the closure misses one of its own roots: {reached:?}"
+    );
+
+    let violations: Vec<String> = seen
+        .iter()
+        .filter_map(|id| {
+            let ok = match worlds.get(id)? {
+                World::Core => true,
+                World::Component(c) => FABRO_COMPONENTS.contains(&c.as_str()),
+                World::Distribution => false,
+            };
+            (!ok).then(|| format!("{} ({:?})", names[id], worlds[id]))
+        })
+        .collect();
+    assert!(
+        violations.is_empty(),
+        "Fabro's dependency closure reaches outside core, attractor and fabro:\n  {}\nreached: \
+         {reached:?}",
         violations.join("\n  ")
     );
 }

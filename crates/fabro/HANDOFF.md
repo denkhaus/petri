@@ -22,6 +22,18 @@ links, or launches Fabro (`crates/petri/lib/tests/fabro_dependencies.rs`,
 `crates/petri/cli/tests/standalone.rs`); every adapter that calls a Fabro
 handler lives in Fabro.
 
+Fabro depends on six Petri packages: `petri-runtime`, `petri-execution`,
+`petri-store`, `petri-attractor-steps`, `petri-frontend-attractor` and
+`petri-frontend-fabro`. It does not depend on the `petri` distribution crate
+or on any GitHub Actions crate. `Runtime::standard()` is `petri-runtime`'s
+and the Attractor registration is `petri-attractor-steps::register`, so the
+six build a Fabro runtime alone; their build closure reaches only core,
+`attractor` and `fabro` (`crates/petri/lib/tests/layering.rs`,
+`fabro_dependencies_reach_neither_github_nor_the_distribution`). Fabro pins
+one Petri revision by tag. `petri::build_llm_client` is the exception: it
+lives in the distribution crate, so a host on the six packages builds its
+`lithos_llm::Client` itself.
+
 ## What a host implements
 
 The optional interfaces are Petri-owned and versioned. A host installs any
@@ -29,7 +41,7 @@ subset; the unconfigured path stays the standalone runner.
 
 | Need | Interface | Where |
 |---|---|---|
-| Build a runtime with the Fabro frontend and the Attractor step kinds a Fabro workflow runs on | `petri::attractor::register(Runtime::standard().frontend(Fabro::new()))` and the `PebbleClient` capability (`petri::build_llm_client` with the host's `CredentialProvider` and catalog layers) | `crates/petri/lib/src/lib.rs`, `crates/attractor/steps/src/lib.rs` |
+| Build a runtime with the Fabro frontend and the Attractor step kinds a Fabro workflow runs on | `attractor_steps::register(Runtime::standard().frontend(Fabro::new()))` (`petri::attractor::register` through the distribution) and the `PebbleClient` capability (`petri::build_llm_client` with the host's `CredentialProvider` and catalog layers) | `crates/core/runtime/src/runtime.rs`, `crates/attractor/steps/src/lib.rs`, `crates/petri/lib/src/lib.rs` |
 | Load and run one workflow | `Runtime::check` (lowering with diagnostics), `execution::host::HostRun`, `host::run_configured`; `RunOptions::run_key` names the run with the host's own id | `crates/core/execution/src/host.rs` |
 | The run's durable record | `store::RunStore` and `store::RunLogs` (`crates/core/store`), installed with `Runtime::store`: open a run by key in one access mode (`Create`, `Write` under an `OwnerId`, `Read`), then `append` and `read` records per log (`LogId::Coordinator`, `Resources`, `Execution(id)`) and `put_blob` and `get_blob` by digest. The stored unit is the record, exactly the `record` value of a public event. Petri ships `RunDirStore` (the run directory) and `MemoryRunStore`; a host implements the two traits over its database and runs `testkit::run_store::conformance` against it. See "Two shapes" below | `crates/core/store/src/lib.rs`, `crates/core/testkit/src/run_store.rs` |
 | Awaited extension points: admission, result preparation, transition, run end, scope release | `driver::lifecycle::ExecutionHooks`, installed with `Runtime::hooks`; `AdmitAttempt` (`Admit`, `Skip`, `Block`), `PrepareResult` (`Prepared` adjustments with the original evidence kept), `Transition` (`RouteOverride`, best-effort `problems`, a fatal `TransitionError`), `RunFinished`, `ScopeReleased`; notes returned at each point are durable records | `crates/core/driver/src/lifecycle.rs`; proven by `crates/petri/lib/tests/embedding.rs` and `embedding_readiness.rs` |
