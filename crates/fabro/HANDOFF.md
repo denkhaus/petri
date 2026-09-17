@@ -37,14 +37,15 @@ lives in the distribution crate, so a host on the six packages builds its
 The libraries the two repositories share are pinned to one revision each,
 the rows of `crates/fabro/acceptance/CONTRACT.md` "Pinned revisions", which
 `mise run check:pins` holds equal to the manifests and the evidence records.
-Fabro moves to the same three when it takes the Petri dependency: Pebble
+Fabro's `main` holds the same three (its pull requests #873 to #875): Pebble
 `a39f43e26effdf99635eaf343f095c17157c9c93`, lithos-llm
 `55add4596b861a0623d00c3a54aa5c147c8d504b`, sandbox-driver
 `64c14b89d078a4b34d1555092ad01d41541f7a7d`. Each is a descendant of the
 revision Fabro pinned when the integration plan was written (Pebble
-`6996942`, lithos-llm `a1e3fd3`, sandbox-driver `ddb32e1`), so the move is
-forward only; the readiness suite (`mise run check:fabro:readiness`) is the
-gate after either repository moves a pin.
+`6996942`, lithos-llm `a1e3fd3`, sandbox-driver `ddb32e1`), so the two
+repositories link one copy of each library; the readiness suite
+(`mise run check:fabro:readiness`) is the gate after either repository
+moves a pin.
 
 ## What a host implements
 
