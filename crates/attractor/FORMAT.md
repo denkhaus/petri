@@ -685,6 +685,15 @@ adapters. Applications that use `attractor_steps::register` directly must provid
 `attractor_steps::pebble::PebbleClient(client)` through `Runtime::capability`.
 The application owns the client's catalog, credentials, and retry middleware.
 
+An application may also give every native session tools of its own: register
+an `attractor_steps::host_tools::HostTools` capability holding builders of
+Pebble `RegisteredTool`s. Each session calls the builders once with a
+`HostToolContext` (the run key, invocation, execution, node, firing and
+attempt of the stage) and passes the tools to Pebble beside its own. A host
+tool then runs under the run's tool hooks, is recorded in the `pebble`
+envelope under the stage, and reaches a sub-agent when the tool is marked
+`allow_in_subagents`. The standalone runner registers none.
+
 Tools use the firing's `ExecEnv`. Commands run as `bash -c` inside the scope;
 files use the scope's filesystem. Bash, find, grep, and the usual file utilities
 must be available there. Content search uses ripgrep when available and grep
@@ -1169,7 +1178,25 @@ call to the prompt that compacted, so these two are a breakdown of
 | `acp_command` (legacy) | `unsupported.acp_command` |
 | an unbound `{{ inputs.* }}` (a warning, `attractor.unbound_input`, under `petri check` with no inputs) | `unsupported.template.unbound_input` |
 | ports, HTML strings, undirected graphs, `strict`, anonymous subgraphs | `unsupported.dot.*` |
-| any graph, node or edge attribute Fabro does not define (`tool_hooks.*` included), outside the `x.` namespace | `attractor.unknown_attribute` |
+| any graph, node or edge attribute Fabro does not define (`tool_hooks.*` and the removed `join_policy` included), outside the `x.` namespace | `attractor.unknown_attribute` |
+| a node whose every outgoing edge has a `condition`, so no edge is the fallback | `attractor.all_conditional_edges` |
+| a node that sets both `script` and `prompt` | `attractor.script_prompt_conflict` |
+| `for_each` on a node that is not a `component` | `attractor.for_each.not_parallel` |
+| an agent on `backend="acp"` with no `acp.command` or `acp.config` on the node or the graph | `attractor.acp_requires_command` |
+| an agent on `backend="acp"` that sets `model`, `provider`, `reasoning_effort`, `max_tokens` or `speed` itself (a stylesheet's value does not count) | `attractor.acp_api_only_attributes` |
+
+**Fabro's validator rules.** Fabro checks a workflow with the rules in
+`fabro-validate` before it creates a run. Every rule about the language is
+raised by this lowering, so a host that embeds Petri needs no validator of its
+own; [`LINTS.md`](LINTS.md) maps each of the 38 rules to its Petri code. The
+five errors above are the ports; the ported warnings are
+`attractor.inert_attribute` (an attribute only another kind of node reads,
+Fabro's table), `attractor.retry_target_not_found` (a `retry_target` or
+`fallback_retry_target`, on a node or the graph, that names no node),
+`attractor.script_absolute_cd` (a command script with `cd /...`),
+`attractor.bad_rankdir` (a `rankdir` outside `TB`, `LR`, `BT`, `RL`) and
+`attractor.reserved_keyword_node_id` (a node id that is a DOT keyword). Each
+carries the span of the attribute or node and a hint.
 
 **Accepted until 2026-10-04.** One spelling is a dated shim, with a warning
 that names the date and a `REMOVE AFTER 2026-10-04` comment at every site
@@ -1253,8 +1280,14 @@ Rejected by both: legacy-dialect attributes (`unsupported.legacy_dialect`), a ba
 (`unsupported.outcome_value`), the legacy `acp_command`, an import Fabro's
 transform refuses (`attractor.import`), `backend="acp"` on a prompt node, a human
 gate with no edges, a `for_each` template that is not an LLM node, structural
-mistakes (no start, no exit, unreachable nodes), and the `workflow.toml` keys
-Fabro's parser refuses (`unsupported.workflow_toml.key`).
+mistakes (no start, no exit, unreachable nodes), a node with only conditional
+edges (`attractor.all_conditional_edges`), a node with both `script` and
+`prompt` (`attractor.script_prompt_conflict`), `for_each` off a parallel node
+(`attractor.for_each.not_parallel`), an ACP agent with no agent named or with
+API-only attributes (`attractor.acp_requires_command`,
+`attractor.acp_api_only_attributes`), and the `workflow.toml` keys
+Fabro's parser refuses (`unsupported.workflow_toml.key`). [`LINTS.md`](LINTS.md)
+has the full map of Fabro's validator rules.
 
 Petri-stricter, tested as differences and listed in
 `crates/fabro/acceptance/CONTRACT.md`: the 500-firing cap and its

@@ -40,8 +40,8 @@ pub use event::{
     SecretBinding, SecretBindings,
 };
 pub use id::{
-    CallSite, ExecutionId, GraphDigest, InvocationId, ParentCallKey, SandboxAllocationKey,
-    SandboxLeaseId,
+    CallSite, ExecutionId, ExecutionIdentity, GraphDigest, InvocationId, ParentCallKey,
+    SandboxAllocationKey, SandboxLeaseId,
 };
 pub use interview::{
     Delivery, InterviewDispatcher, InterviewError, InterviewReceipt, InterviewRecord,

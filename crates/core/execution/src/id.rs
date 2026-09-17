@@ -9,6 +9,19 @@ use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 /// SHA-256 of the exact persisted graph bytes: a blob digest in the store.
 pub use store::Digest as GraphDigest;
+use store::RunKey;
+
+/// The execution a step runs in, as an execution-local capability. The
+/// coordinator registers one on every driver it builds, so a step that
+/// hands work to something outside the run (a host tool an agent calls)
+/// can name the run, invocation and execution the effect belongs to. A
+/// bare driver built outside the coordinator has none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionIdentity {
+    pub run:        RunKey,
+    pub invocation: InvocationId,
+    pub execution:  ExecutionId,
+}
 
 /// The durable idempotency key for a nested call.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

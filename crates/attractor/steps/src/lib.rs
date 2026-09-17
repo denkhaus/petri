@@ -23,6 +23,7 @@ pub mod directive;
 pub mod fallback;
 pub mod fidelity;
 pub mod hooks;
+pub mod host_tools;
 pub mod human;
 mod outcome;
 pub mod parallel;

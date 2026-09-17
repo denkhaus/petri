@@ -1316,13 +1316,19 @@ impl Coordinator {
             (driver.with_engine_start(start.clone()), writer)
         };
         let client = CoordinatorInvocationClient::new(execution, self.start_tx.clone());
+        let identity = crate::ExecutionIdentity {
+            run: self.runtime.run_key().clone(),
+            invocation,
+            execution,
+        };
         let fold = Arc::new(pipeline.fold_observer());
         let mut driver = driver
             .with_run_owner(invocation == InvocationId::ROOT)
             .observe(writer.clone())
             .observe(fold)
             .with_decision_resolver(pipeline.clone())
-            .with_capability(client);
+            .with_capability(client)
+            .with_capability(identity);
         let mut execution_slot = None;
         if let Some(slots) = self.attempt_slots(invocation) {
             let held = slot.map_or_else(ExecutionSlot::empty, ExecutionSlot::holding);

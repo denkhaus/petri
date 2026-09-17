@@ -221,7 +221,8 @@ that have Docker.
 `crates/fabro/HANDOFF.md` is what a host that embeds Petri to run Fabro
 workflows relies on: the optional interfaces (`ExecutionHooks`,
 `HookService`, `Interviewer`, `RunEventSink`, `SecretProvider`,
-`OutputStore`, the `PebbleClient` and `FabroHome` capabilities), the
+`OutputStore`, the `PebbleClient`, `HostTools` and `FabroHome`
+capabilities), the
 identities and event positions, the lifecycle acknowledgements, the
 compatibility versions and the strict rejection of incompatible logs, what
 stays Fabro's, and the integration checklist. The event contract's coverage
@@ -1271,6 +1272,14 @@ no platform vocabulary in them:
   per-firing points, the native agent's tool boundary, the ACP client's
   permission requests and the run-level events from one place
   (`crates/attractor/FORMAT.md`, "Hooks").
+- **Host tools.** `attractor_steps::host_tools::HostTools` is a capability
+  holding builders of Pebble `RegisteredTool`s. Every native agent session
+  calls them once with a `HostToolContext` (run key, invocation, execution,
+  node, firing, attempt) and registers the tools beside Pebble's own, so a
+  host tool runs under the same tool hooks, is recorded on the same event
+  stream under the stage's identity, and reaches a sub-agent through
+  Pebble's own rule when marked `allow_in_subagents`. The standalone runner
+  registers none.
 - **Questions.** `execution::Interviewer` and the `InterviewDispatcher`, as
   on the terminal path.
 

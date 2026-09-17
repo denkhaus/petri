@@ -55,6 +55,7 @@ subset; the unconfigured path stays the standalone runner.
 | Sandboxes | every provider (host, Docker, Daytona) through the sandbox-driver JSON-RPC plugin protocol; `Retention` (`Always` is the Fabro default), `petri sandbox prune` | `crates/core/executor-sandbox/`, `README.md` |
 | Skills home, memory | the `FabroHome` capability (else `FABRO_HOME`, else `$HOME/.fabro`); project memory is read from the Git root to the working directory per Fabro's profile rules | `crates/attractor/steps/src/skills.rs`, `memory.rs` |
 | Compaction policy, MCP tool registration, sub-agent limits | `CompactionPolicyHandle`; MCP servers from `[run.agent.mcps]` are Petri-owned processes and connections; Pebble's sub-agent tools are on every native agent | `crates/attractor/FORMAT.md` ("Native Pebble" and after) |
+| The host's in-run tools (Fabro's run tools) | the `HostTools` capability (`attractor_steps::host_tools`): builders of Pebble `RegisteredTool`s, called once per native session with a `HostToolContext` (run key, invocation, execution, node, firing, attempt). The tools register beside Pebble's own, so they run under the run's tool hooks, are recorded on the public stream under the stage, and reach a sub-agent through Pebble's inheritance when marked `allow_in_subagents`. `register_fabro_run_tools` is the builder; Fabro's adapter maps the context to `FabroRunToolServices`. The context needs the coordinator's `ExecutionIdentity`, which every run through `execution::host` has | `crates/attractor/steps/src/host_tools.rs` |
 
 ## Identities a host can rely on
 
