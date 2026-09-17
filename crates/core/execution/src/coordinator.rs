@@ -1349,12 +1349,6 @@ impl Coordinator {
         })
     }
 
-    fn invocation_secrets(&self, invocation: InvocationId) -> Arc<dyn executor::SecretProvider> {
-        if invocation == InvocationId::ROOT {
-            return self.runtime.secret_provider();
-        }
-        let declaration = &self.store.state().invocations[&invocation].declaration;
-        let call = declaration
     /// What the hooks are told about an execution: the run, the invocation,
     /// the execution, and the call that started a nested invocation.
     fn hook_context(&self, invocation: InvocationId, execution: ExecutionId) -> HookContext {
@@ -1365,6 +1359,12 @@ impl Coordinator {
         }
     }
 
+    fn invocation_secrets(&self, invocation: InvocationId) -> Arc<dyn executor::SecretProvider> {
+        if invocation == InvocationId::ROOT {
+            return self.runtime.secret_provider();
+        }
+        let declaration = &self.store.state().invocations[&invocation].declaration;
+        let call = declaration
             .call
             .as_ref()
             .expect("a non-root invocation has a parent call");
