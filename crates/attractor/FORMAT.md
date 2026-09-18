@@ -85,7 +85,7 @@ a warning; the importing workflow's stylesheet governs.
 | `box` agent | `attractor/agent` | prompt, goal, `fidelity` and `default_fidelity`, `thread_id`, `default_thread` and the node's classes, `project_memory`, `backend`, model settings (`model`, `provider`, `reasoning_effort`, `speed`, `max_tokens`), `output_schema`, `output_retries`, `acp`, `mcps` (the run's MCP servers), the workflow's stage list for the preamble |
 | `tab` prompt | `attractor/prompt` | prompt, goal, `fidelity` and the thread attributes (accepted; a prompt node never continues a conversation), `project_memory`, model settings (`model`, `provider`, `reasoning_effort`, `speed`, `max_tokens`), `output_schema`, `output_retries`; API-only: `backend="acp"` on the node is `attractor.prompt_backend`, and the graph's ACP settings never reach it |
 | `parallelogram` command, or any node with `script` | `attractor/command` | script, language, `stdin` (an expression over `kv`), `output_schema`, `env` (`[run.prepare]` step env and the environment's `$secret` values) |
-| `hexagon` human | `attractor/human` | the choices (from the edges), `question_type`, `freeform_target`, `sensitive`, `review_target`, `default_choice` (from `human.default_choice`), `timeout_ms` |
+| `hexagon` human | `attractor/human` | the choices (from the edges, each with the edge's `human.description` and `human.preview` when set), `question_type`, `freeform_target`, `sensitive`, `review_target`, `default_choice` (from `human.default_choice`), `timeout_ms` |
 | `component` parallel | `attractor/fork`: takes the fork snapshot of `kv` (and of the stage records for agent or prompt targets) once per visit, offloads the `for_each` source list and every other value above 4 KiB to the output store, and outputs `{ snapshot, nodes }`; each branch target becomes a synthetic `attractor/branch` delegate (`kind = "parallel.branch"`) that runs a copy of the target in a child invocation from that snapshot; `for_each` marks the delegate `Expansion::ForEach` (below) | fork: `label`, `node`, `kv`, `nodes`, `source`, `inline`; branch: `label`, `node`, `fork`, `index`, `item`, `for_each`, `max_parallel`, `child_digest`, `target_kind`, `kv`, `nodes`, `generation` |
 | `tripleoctagon` fan-in | `attractor/fan_in`, `join: all`; publishes `parallel.results` and `parallel.branch_count`; its output is the ordered branch results | |
 | `tripleoctagon` fan-in with a `prompt` | `attractor/prompt`, `join: all`: the ordered barrier, the same `parallel.results` publication, then one model call over the branch results (`sources`, `branch_results`) | |
@@ -459,6 +459,16 @@ the coordinator registers `attractor_steps::workflow::ChildInvoker`.
   the wait was cancelled) fails the gate closed with class `interrupted`. A
   delivered steer (`{"$steer": ...}`) is not an answer: the gate ignores it
   and keeps its question open.
+  - What a host shows beside the question. Each choice carries its edge's
+    `human.description` (what choosing it means) and `human.preview` (a
+    sample of what it would do) as the option's `description` and `preview`;
+    both are Petri extensions to the edge attributes, optional, and a blank
+    value is the same as none. The question's `context` is the previous
+    stage's response (`response.<last_stage>`, trimmed, when `last_stage`
+    names a stage whose response has text), as Fabro's gate shows it; an
+    offloaded response shows as its reference text. A native agent's
+    question carries Pebble's own option descriptions and previews the same
+    way and no context.
   - `timeout` is the answer deadline. An unanswered question expires in the
     step, which reports the expiry on its progress channel first
     (`parsed.expired` on the `step.progress.recorded` event, `timed_out` with the default

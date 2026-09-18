@@ -173,6 +173,8 @@ pub(super) const EDGE: &[&str] = &[
     "thread_id",
     "loop_restart",
     "freeform",
+    "human.description",
+    "human.preview",
 ];
 
 /// The legacy dialect's attributes, refused as `unsupported.legacy_dialect`.

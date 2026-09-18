@@ -298,7 +298,13 @@ const GATE: &str = r#"
 "#;
 
 async fn run_gate(answer: Answer, label: &str) -> (ExecutionReport, Vec<Question>) {
-    let graph = lower(&dot(GATE));
+    run_gate_on(GATE, answer, label).await
+}
+
+/// Run the gate graph `body` with `answer` delivered to its first question;
+/// the report and every question asked.
+async fn run_gate_on(body: &str, answer: Answer, label: &str) -> (ExecutionReport, Vec<Question>) {
+    let graph = lower(&dot(body));
     let dir = RunDir::new(label);
     let rt = runtime(&dir);
     let answerer = Arc::new(Answerer {
@@ -364,6 +370,71 @@ async fn a_human_gate_routes_free_text_to_the_freeform_edge() {
 async fn a_label_answer_matches_without_its_accelerator() {
     let (report, _) = run_gate(Answer::choice("yes"), "fabro-human-label").await;
     assert_eq!(status_of(&report, "yes").as_deref(), Some("success"));
+}
+
+/// What a host shows beside the question: each choice's `human.description`
+/// and `human.preview` from its edge, and the previous stage's response as
+/// the question's context, as Fabro's gate shows it. A choice whose edge
+/// says nothing carries neither; a gate with no response before it has no
+/// context.
+#[tokio::test]
+async fn a_human_gate_carries_choice_descriptions_previews_and_its_context() {
+    const DESCRIBED: &str = r#"
+        plan [shape=parallelogram, output_schema="routing", script="echo '{\"outcome\": \"succeeded\", \"context_updates\": {\"last_stage\": \"plan\", \"response.plan\": \"  Ship the fix in one commit.  \"}}'"]
+        gate [shape=hexagon, label="Deploy?"]
+        yes [shape=parallelogram, script="true"]
+        no [shape=parallelogram, script="true"]
+        start -> plan -> gate
+        gate -> yes [label="[Y] Yes", "human.description"="Merge and deploy to production", "human.preview"="deploy --prod"]
+        gate -> no [label="[N] No"]
+        yes -> exit
+        no -> exit
+    "#;
+    let (report, asked) =
+        run_gate_on(DESCRIBED, Answer::choice("Y"), "fabro-human-described").await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert_eq!(asked.len(), 1);
+    let question = &asked[0];
+    assert_eq!(
+        question.context.as_deref(),
+        Some("Ship the fix in one commit."),
+        "the context is the last stage's response, trimmed"
+    );
+    assert_eq!(question.options.len(), 2);
+    assert_eq!(question.options[0].key, "Y");
+    assert_eq!(
+        question.options[0].description.as_deref(),
+        Some("Merge and deploy to production")
+    );
+    assert_eq!(
+        question.options[0].preview.as_deref(),
+        Some("deploy --prod")
+    );
+    assert_eq!(question.options[1].key, "N");
+    assert_eq!(question.options[1].description, None);
+    assert_eq!(question.options[1].preview, None);
+    // The fields are in the recorded question too, absent where unset.
+    let recorded = report
+        .state
+        .log
+        .events()
+        .find_map(|event| match event {
+            Event::StepProgressRecorded { ev, .. } => Question::from_event(ev),
+            _ => None,
+        })
+        .expect("the question is in the log");
+    assert_eq!(&recorded, question);
+    assert_eq!(status_of(&report, "yes").as_deref(), Some("success"));
+
+    let (_, asked) = run_gate(Answer::choice("n"), "fabro-human-no-context").await;
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].context, None, "no stage before the gate responded");
+    assert!(asked[0].options.iter().all(|o| o.description.is_none()));
 }
 
 #[tokio::test]

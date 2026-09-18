@@ -880,6 +880,41 @@ fn human_gates_offer_their_edges_as_choices() {
     assert!(!eval_guard(&graph, t[0].1[1].1, &answer, &[]));
 }
 
+/// A choice edge's `human.description` and `human.preview` ride the choice,
+/// for the host to show beside it; an edge without them has neither key,
+/// and a blank value is the same as none.
+#[test]
+fn human_gate_choices_carry_the_edges_description_and_preview() {
+    let graph = lower_ok(&dot(r#"
+        gate [shape=hexagon, label="Deploy?"]
+        yes [prompt="x"]
+        no [prompt="x"]
+        later [prompt="x"]
+        start -> gate
+        gate -> yes [label="[Y] Yes", "human.description"="Merge and deploy to production", "human.preview"="deploy --prod"]
+        gate -> no [label="[N] No", "human.description"="  "]
+        gate -> later [label="[L] Later"]
+        yes -> exit
+        no -> exit
+        later -> exit
+    "#));
+    let config = &node(&graph, "gate").step.config;
+    assert_eq!(
+        config["choices"],
+        json!([
+            {
+                "key": "Y",
+                "label": "[Y] Yes",
+                "to": "yes",
+                "description": "Merge and deploy to production",
+                "preview": "deploy --prod",
+            },
+            { "key": "N", "label": "[N] No", "to": "no" },
+            { "key": "L", "label": "[L] Later", "to": "later" },
+        ])
+    );
+}
+
 #[test]
 fn stylesheets_write_model_properties_that_explicit_attributes_beat() {
     let graph = lower_ok(&dot(r#"

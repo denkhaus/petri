@@ -1525,11 +1525,21 @@ impl Ctx<'_> {
                 .text("label")
                 .filter(|l| !l.is_empty())
                 .unwrap_or_else(|| edge.to.clone());
-            choices.push(json!({
+            let mut choice = json!({
                 "key": labels::accelerator_key(&label),
                 "label": label,
                 "to": edge.to,
-            }));
+            });
+            // What a host shows beside the choice, when the edge says.
+            for (attr, field) in [
+                ("human.description", "description"),
+                ("human.preview", "preview"),
+            ] {
+                if let Some(text) = edge.attrs.text(attr).filter(|t| !t.trim().is_empty()) {
+                    choice[field] = Value::String(text);
+                }
+            }
+            choices.push(choice);
         }
         if choices.is_empty() && freeform_target.is_none() {
             self.diags.error(

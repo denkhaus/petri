@@ -94,8 +94,10 @@ fn translate(id: String, question: &PebbleQuestion) -> Question {
             .options
             .iter()
             .map(|option| QuestionOption {
-                key:   option.key.clone(),
-                label: option.label.clone(),
+                key:         option.key.clone(),
+                label:       option.label.clone(),
+                description: option.description.clone(),
+                preview:     option.preview.clone(),
             })
             .collect(),
         default: question.options.first().map(|option| option.key.clone()),
@@ -110,6 +112,7 @@ fn translate(id: String, question: &PebbleQuestion) -> Question {
         ),
         reference: None,
         timeout_ms: None,
+        context: None,
     }
 }
 
