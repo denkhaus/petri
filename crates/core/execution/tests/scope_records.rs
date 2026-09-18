@@ -4,12 +4,16 @@
 //! Proved from the public stream alone, live and replayed, on the host
 //! sandbox and on Docker.
 
+use std::{fs, ptr};
+
 use engine::Event;
 use execution::events::{RunEvent, replay_run_dir, verify_export_run_dir};
 use execution::prune::prune;
 use execution::{CoordinatorEvent, HOST_PROVIDER, InvocationId, host};
 use executor::{Retention, ScopeOutcome};
-use ir::{GraphBuilder, RunStatus, RuntimeSpec, Scope, ScopeId, ServiceSpec, WorkspaceId};
+use ir::{
+    GraphBuilder, RunStatus, RuntimeSpec, SandboxLeaseId, Scope, ScopeId, ServiceSpec, WorkspaceId,
+};
 use runtime::steps::PROCESS_KIND;
 use runtime::{RunOptions, Runtime};
 use testkit::{RunDir, add_script, is_docker_ready, script_with};
@@ -138,7 +142,7 @@ async fn check_acquired(
         unreachable!()
     };
     assert_eq!(*scope, ScopeId::new(0));
-    assert_eq!(lease.map(|lease| lease.raw()), Some(0));
+    assert_eq!(lease.map(SandboxLeaseId::raw), Some(0));
     assert_eq!(
         *workspace,
         WorkspaceId::scoped(
@@ -167,7 +171,7 @@ async fn check_acquired(
     if provider == HOST_PROVIDER {
         // The provider reports the canonical path; a deleted workspace can
         // no longer be canonicalized itself, so the run dir is.
-        let expected = std::fs::canonicalize(dir.path())
+        let expected = fs::canonicalize(dir.path())
             .expect("the run dir")
             .join("scopes")
             .join(workspace.as_str())
@@ -184,7 +188,7 @@ async fn check_acquired(
     let first_start = position(&events, |event| {
         matches!(event.engine(), Some(Event::StepStarted { .. }))
     });
-    let acquired_at = position(&events, |event| std::ptr::eq(event, acquired_event));
+    let acquired_at = position(&events, |event| ptr::eq(event, acquired_event));
     assert!(
         acquired_at < first_start,
         "acquired before any attempt runs"
@@ -223,7 +227,7 @@ async fn check_acquired(
             Some(CoordinatorEvent::RunFinished { .. })
         )
     });
-    let released_at = position(&events, |event| std::ptr::eq(event, released_event));
+    let released_at = position(&events, |event| ptr::eq(event, released_event));
     assert!(
         released_at < run_finished,
         "released before the run finishes"
@@ -357,7 +361,7 @@ async fn a_scope_that_cannot_be_acquired_records_the_failure() {
         unreachable!()
     };
     assert_eq!(*scope, ScopeId::new(0));
-    assert_eq!(lease.map(|lease| lease.raw()), Some(0));
+    assert_eq!(lease.map(SandboxLeaseId::raw), Some(0));
     assert_eq!(
         *workspace,
         WorkspaceId::scoped(
