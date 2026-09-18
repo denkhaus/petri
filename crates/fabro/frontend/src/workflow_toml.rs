@@ -239,6 +239,9 @@ impl Reader<'_> {
                 }
             }
         }
+        if let Some(workflow) = value.get("workflow").and_then(toml::Value::as_table) {
+            self.workflow_table(workflow);
+        }
         let environments = value
             .get("environments")
             .and_then(toml::Value::as_table)
@@ -246,6 +249,26 @@ impl Reader<'_> {
             .unwrap_or_default();
         if let Some(run) = value.get("run").and_then(toml::Value::as_table) {
             self.run_table(run, &environments);
+        }
+    }
+
+    /// `[workflow]`: the keys Fabro's parser accepts are known and read by
+    /// nothing here (`engine` picks the engine Fabro runs the workflow on;
+    /// Petri is that engine, so the value is not inspected). A key outside
+    /// the set is refused as Fabro refuses it.
+    fn workflow_table(&mut self, workflow: &toml::Table) {
+        for key in workflow.keys() {
+            if !WORKFLOW_SECTION_KEYS.contains(&key.as_str()) {
+                let path = self.path;
+                self.unsupported(
+                    "workflow_toml.key",
+                    format!(
+                        "`workflow.{key}` in `{path}` is not a key Fabro's `[workflow]` table \
+                         accepts"
+                    ),
+                    "remove it; Fabro's settings schema has no such key",
+                );
+            }
         }
     }
 
@@ -916,6 +939,11 @@ const WORKFLOW_TOML_TOP_LEVEL: &[&str] = &[
     "server",
     "llm",
 ];
+
+/// The `[workflow]` keys Fabro's settings parser accepts: the bundle's
+/// name, description, graph path and metadata, and `engine`
+/// (`"petri"` or `"legacy"`), which Fabro reads to choose the engine.
+const WORKFLOW_SECTION_KEYS: &[&str] = &["name", "description", "graph", "metadata", "engine"];
 
 /// Legacy `[llm]` keys Fabro refuses with a rename hint.
 const WORKFLOW_TOML_LEGACY_LLM_KEYS: &[&str] = &[

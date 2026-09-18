@@ -233,7 +233,7 @@ diagnostic goes away.
 | Section and options | Effect in Fabro | Petri disposition today |
 |---|---|---|
 | `_version` (`1`) | schema version | supported: any other value is `unsupported.workflow_toml.version`; the legacy `version` key is `unsupported.workflow_toml.key` |
-| `[workflow]` `name`, `description`, `graph`, `metadata` | `graph` names the entry point | supported: `graph` selects the file; the rest is metadata |
+| `[workflow]` `name`, `description`, `graph`, `metadata`, `engine` | `graph` names the entry point; `engine` (`"petri"` or `"legacy"`) picks the engine Fabro runs the workflow on | supported: `graph` selects the file; `engine` is not inspected, Petri is the engine; the rest is metadata. Any other `[workflow]` key is `unsupported.workflow_toml.key` |
 | `[run]` `goal` (string or `{file}`), `working_dir`, `metadata` | goal text, local cwd | `goal`: supported, the run goal when the graph sets none (the graph attribute wins, as in Fabro); `working_dir`, `metadata`: warn (platform-only) |
 | `[run.inputs]` | `{{ inputs.* }}` defaults | supported |
 | `[run.model]` `provider`, `name`, `controls.reasoning_effort`, `controls.speed` | default model and request controls | supported: the defaults an LLM node gets below the graph's `default_model` / `default_provider`; `controls.speed` is the default `speed` |

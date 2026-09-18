@@ -220,6 +220,52 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
     assert!(codes("_version = 1\n[workflow]\ngraph = \"workflow.fabro\"\n").is_empty());
 }
 
+/// `[workflow]` carries what Fabro's parser accepts: `name`, `description`,
+/// `graph`, `metadata` and `engine`, which Fabro reads to choose the engine.
+/// Petri is the engine, so the lowering reads none of them and none
+/// diagnoses; a key outside the set is refused as Fabro refuses it.
+#[test]
+fn workflow_engine_is_a_known_key_and_unknown_workflow_keys_are_refused() {
+    let lowered = |toml: &str| {
+        load(
+            "wf/workflow.fabro",
+            &dot(r#"
+                a [shape=parallelogram, script="true"]
+                start -> a -> exit
+            "#),
+            &files(&[("wf/workflow.toml", toml)]),
+            &CompileInputs::new(),
+        )
+    };
+    for engine in ["petri", "legacy"] {
+        let lowered = lowered(&format!(
+            "_version = 1\n[workflow]\nname = \"n\"\ndescription = \"d\"\n\
+             graph = \"workflow.fabro\"\nengine = \"{engine}\"\n[workflow.metadata]\n\
+             team = \"t\"\n"
+        ));
+        assert!(
+            lowered.diagnostics.is_empty(),
+            "`engine = \"{engine}\"` is accepted silently: {:?}",
+            lowered.diagnostics
+        );
+        let graph = lowered.graph.expect("lowers");
+        assert_eq!(
+            node(&graph, "a").step.kind,
+            COMMAND_KIND,
+            "the engine key changes nothing in the lowering"
+        );
+    }
+    let lowered = lowered("[workflow]\nengine = \"petri\"\nnot_a_key = 1\n");
+    let refused: Vec<_> = lowered.diagnostics.errors().collect();
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(refused[0].code, "unsupported.workflow_toml.key");
+    assert!(
+        refused[0].message.contains("`workflow.not_a_key`"),
+        "{refused:?}"
+    );
+    assert!(lowered.graph.is_none(), "a refused key withholds the graph");
+}
+
 /// `[run.environment]` maps the provider onto the launch settings the CLI
 /// reads, the image onto the scope's container target, and literal env onto
 /// the scope env; `[run.prepare]` steps become the first command nodes.
