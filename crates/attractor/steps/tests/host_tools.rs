@@ -18,6 +18,7 @@ use std::time::Duration;
 use attractor_steps::hooks::REPORT_EVENT;
 use attractor_steps::host_tools::{HostToolContext, HostTools};
 use attractor_steps::pebble::PebbleClient;
+use attractor_steps::pebble::tools::EVENT as TOOLS_EVENT;
 use attractor_steps::register;
 use execution::events::{CollectingSink, EventProjector, RunEvent};
 use execution::host::{self, HostRun};
@@ -253,6 +254,78 @@ fn completions(events: &[RunEvent], tool: &str) -> Vec<Completion> {
         .collect()
 }
 
+/// One `attractor.tools` payload on the public stream: the stage it was
+/// recorded under, the session it lists, and its tools.
+struct ToolList {
+    node:    String,
+    session: String,
+    tools:   Vec<Value>,
+}
+
+impl ToolList {
+    fn names(&self) -> Vec<String> {
+        self.tools
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    fn category(&self, name: &str) -> Option<String> {
+        self.tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .map(|tool| tool["category"].as_str().unwrap_or_default().to_owned())
+    }
+}
+
+/// Every `attractor.tools` payload on the public stream, in record order.
+fn tool_lists(events: &[RunEvent]) -> Vec<ToolList> {
+    events
+        .iter()
+        .filter_map(|event| {
+            let value = event.custom()?;
+            if value["kind"] != TOOLS_EVENT {
+                return None;
+            }
+            Some(ToolList {
+                node:    event
+                    .subject
+                    .as_ref()
+                    .map(|s| s.node.name.to_string())
+                    .unwrap_or_default(),
+                session: value["session"].as_str().unwrap_or_default().to_owned(),
+                tools:   value["tools"].as_array().cloned().unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+/// The session ids of every `SessionStarted` a Pebble stream recorded, with
+/// the parent session each names.
+fn sessions_started(events: &[RunEvent]) -> Vec<(String, Option<String>)> {
+    events
+        .iter()
+        .filter_map(|event| {
+            let activity = event.custom().and_then(backend_event)?;
+            if activity.backend != "pebble"
+                || activity.envelope["event"].get("SessionStarted").is_none()
+            {
+                return None;
+            }
+            Some((
+                activity.session.unwrap_or_default(),
+                activity.parent_session,
+            ))
+        })
+        .collect()
+}
+
+/// `names` sorted, for a set comparison of two tool lists.
+fn sorted(mut names: Vec<String>) -> Vec<String> {
+    names.sort();
+    names
+}
+
 /// The `attractor.hook` reports on the public stream for `event`.
 fn hook_reports(events: &[RunEvent], event: HookEvent) -> Vec<Value> {
     events
@@ -339,6 +412,45 @@ async fn a_host_tool_edits_the_workspace_under_the_stages_identity() {
     assert_eq!(completed[0].invocation, Some(InvocationId::ROOT));
     assert_eq!(completed[0].execution, Some(ExecutionId::new(0)));
     assert_eq!(completed[0].payload["is_error"], false);
+
+    // The session's tools are on the stream once, under the stage, naming
+    // the session: every tool the model was offered, the host's included,
+    // each with Pebble's source and Petri's category.
+    let lists = tool_lists(&events);
+    assert_eq!(lists.len(), 1, "one session, one tool list");
+    let list = &lists[0];
+    assert_eq!(list.node, "a");
+    let started = sessions_started(&events);
+    assert_eq!(started.len(), 1, "one session started: {started:?}");
+    assert_eq!(list.session, started[0].0, "the list names the session");
+    assert_eq!(
+        sorted(list.names()),
+        sorted(advertised),
+        "the list is what the model was offered"
+    );
+    assert_eq!(list.category("record_note").as_deref(), Some("host"));
+    assert_eq!(list.category("host_status").as_deref(), Some("host"));
+    assert_eq!(list.category("shell").as_deref(), Some("builtin"));
+    assert_eq!(list.category("spawn_agent").as_deref(), Some("subagent"));
+    assert_eq!(
+        list.tools
+            .iter()
+            .filter(|tool| tool["category"] == "question")
+            .count(),
+        1,
+        "the question tool is classified: {:?}",
+        list.names()
+    );
+    let note = list
+        .tools
+        .iter()
+        .find(|tool| tool["name"] == "record_note")
+        .expect("the host tool is listed");
+    assert_eq!(
+        note["description"],
+        "Append a line to notes.txt in the workspace."
+    );
+    assert_eq!(note["source"], json!({ "kind": "application" }));
 }
 
 /// A `pre_tool_use` hook blocks the host's tool as it blocks Pebble's: the
@@ -473,6 +585,46 @@ async fn a_sub_agent_calls_an_inherited_host_tool() {
         "the child's event names its parent session"
     );
     assert_eq!(completed[0].payload["is_error"], false);
+
+    // Two sessions, two tool lists, both under the parent stage: the root's
+    // as the model was offered it, the child's as the child was offered it
+    // (the marked host tool in, the root-only one and the question tool
+    // out), each naming its own session.
+    let started = sessions_started(&events);
+    let (root_session, _) = started
+        .iter()
+        .find(|(_, parent)| parent.is_none())
+        .expect("the root session started");
+    let (child_session, child_parent) = started
+        .iter()
+        .find(|(_, parent)| parent.is_some())
+        .expect("the child session started");
+    assert_eq!(child_parent.as_deref(), Some(root_session.as_str()));
+    let lists = tool_lists(&events);
+    assert_eq!(lists.len(), 2, "one list per session: {started:?}");
+    assert!(lists.iter().all(|list| list.node == "a"));
+    let root_list = lists
+        .iter()
+        .find(|list| &list.session == root_session)
+        .expect("the root's list");
+    let child_list = lists
+        .iter()
+        .find(|list| &list.session == child_session)
+        .expect("the child's list");
+    assert_eq!(sorted(root_list.names()), sorted(root));
+    assert_eq!(
+        sorted(child_list.names()),
+        sorted(child),
+        "the child's list is what the child was offered"
+    );
+    assert_eq!(child_list.category("record_note").as_deref(), Some("host"));
+    assert!(
+        child_list
+            .tools
+            .iter()
+            .all(|tool| tool["category"] != "question"),
+        "a child has nobody to ask"
+    );
 }
 
 /// A driver built outside the coordinator registers no `ExecutionIdentity`,

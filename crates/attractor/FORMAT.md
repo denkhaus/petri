@@ -785,6 +785,25 @@ log pipeline. A successful node's session is retained in memory for the run
 by thread ("Fidelity and threads"); nothing is checkpointed, so a resumed run
 starts every thread again.
 
+Pebble puts no event on its stream that lists a session's tools, so the
+backend records the list itself, once per session, as `StepEvent::Custom`
+with `kind = "attractor.tools"`: `{ kind, node, firing, attempt, session,
+tools }`, where `tools` is one entry per tool the model was offered, in
+Pebble's order (by name): `{ name, description, source, category }`. `name`
+and `description` are what the model sees; `source` is Pebble's
+`ToolSource` as it reports it (`{"kind": "native"}`, `{"kind":
+"application"}`, `{"kind": "mcp", "server_name", "original_name"}`,
+`{"kind": "skill"}`); `category` is Petri's grouping: `builtin` (Pebble's
+own tools and a skill's), `mcp`, `subagent` (`spawn_agent`, `send_input`,
+`wait`, `close_agent`), `host` (a `HostTools` tool), `question` (the
+question tool). The node's own session is listed once the agent is built,
+from Pebble's snapshot, before the first prompt; each child session is
+listed right after its `SessionStarted` envelope, with the tools Pebble's
+inheritance gives a child, as Petri reads that rule: every built-in, skill
+and MCP tool, a host tool the host marked `allow_in_subagents`, never the
+question tool. A node that continues a retained thread opens a session of
+its own and lists it again under the new node.
+
 The session's question tool (`request_user_input` for GPT-5.6 and GPT-6,
 `AskUserQuestion` for Claude) reaches the same interviewer a human gate does.
 Petri implements Pebble's `HumanInputProvider`: each question in a batch
