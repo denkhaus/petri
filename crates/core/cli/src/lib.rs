@@ -394,16 +394,23 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
         } => {
             let run_dir = run_dir
                 .unwrap_or_else(|| env::temp_dir().join(format!("petri-run-{}", process::id())));
-            // The workflow is lowered once, before the runtime mode is chosen:
+            // The workflow is lowered before the runtime mode is settled:
             // its own configuration (Fabro's `[run.execution]` and
             // `[run.environment]`) supplies the defaults an explicit option
-            // does not override. Both registries validate the same kinds, so
-            // the graph is the same under either.
-            let lowered =
-                match lowered_graph(&make(RuntimeMode::Real), &target, &model, false, false) {
-                    Ok(lowered) => lowered,
-                    Err(code) => return code,
-                };
+            // does not override. Both registries validate the same kinds;
+            // only the real runtime's admission passes change the graph (a
+            // model pinned against the catalog), and a dry run keeps its
+            // selectors, so `--dry-run` lowers on the simulated runtime.
+            let first_mode = if dry_run {
+                RuntimeMode::DryRun
+            } else {
+                RuntimeMode::Real
+            };
+            let mut lowered = match lowered_graph(&make(first_mode), &target, &model, false, false)
+            {
+                Ok(lowered) => lowered,
+                Err(code) => return code,
+            };
             let launch = launch_settings(&make(RuntimeMode::Real), &target, &lowered);
             let runtime_mode = if dry_run || launch.dry_run {
                 RuntimeMode::DryRun
@@ -411,6 +418,25 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
                 RuntimeMode::Real
             };
             let rt = make(runtime_mode);
+            if runtime_mode != first_mode {
+                // The launch asked for a dry run after a real lowering:
+                // lower again on the simulated runtime, so the graph carries
+                // no admission-time resolution. The diagnostics were printed
+                // once already; a graph the simulated runtime withholds keeps
+                // the real one, which validated the same kinds.
+                let inputs = target
+                    .compile_inputs()
+                    .map_or_else(|_| CompileInputs::new(), |inputs| model.bind(inputs));
+                if let Ok(again) = rt.check(
+                    &target.file,
+                    target.format.as_deref(),
+                    target.repo.as_deref(),
+                    &inputs,
+                ) && again.graph.is_some()
+                {
+                    lowered = again;
+                }
+            }
             // One control service for the terminal's control file and an
             // embedded host alike; its pause hook wraps the hooks the
             // distribution installed, so both run at admission.

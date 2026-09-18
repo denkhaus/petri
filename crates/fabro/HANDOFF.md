@@ -22,6 +22,31 @@ links, or launches Fabro (`crates/petri/lib/tests/fabro_dependencies.rs`,
 `crates/petri/cli/tests/standalone.rs`); every adapter that calls a Fabro
 handler lives in Fabro.
 
+Fabro depends on six Petri packages: `petri-runtime`, `petri-execution`,
+`petri-store`, `petri-attractor-steps`, `petri-frontend-attractor` and
+`petri-frontend-fabro`. It does not depend on the `petri` distribution crate
+or on any GitHub Actions crate. `Runtime::standard()` is `petri-runtime`'s
+and the Attractor registration is `petri-attractor-steps::register`, so the
+six build a Fabro runtime alone; their build closure reaches only core,
+`attractor` and `fabro` (`crates/petri/lib/tests/layering.rs`,
+`fabro_dependencies_reach_neither_github_nor_the_distribution`). Fabro pins
+one Petri revision by tag. `petri::build_llm_client` is the exception: it
+lives in the distribution crate, so a host on the six packages builds its
+`lithos_llm::Client` itself.
+
+The libraries the two repositories share are pinned to one revision each,
+the rows of `crates/fabro/acceptance/CONTRACT.md` "Pinned revisions", which
+`mise run check:pins` holds equal to the manifests and the evidence records.
+Fabro's `main` holds the same three (its pull requests #873 to #875): Pebble
+`a39f43e26effdf99635eaf343f095c17157c9c93`, lithos-llm
+`55add4596b861a0623d00c3a54aa5c147c8d504b`, sandbox-driver
+`64c14b89d078a4b34d1555092ad01d41541f7a7d`. Each is a descendant of the
+revision Fabro pinned when the integration plan was written (Pebble
+`6996942`, lithos-llm `a1e3fd3`, sandbox-driver `ddb32e1`), so the two
+repositories link one copy of each library; the readiness suite
+(`mise run check:fabro:readiness`) is the gate after either repository
+moves a pin.
+
 ## What a host implements
 
 The optional interfaces are Petri-owned and versioned. A host installs any
@@ -29,8 +54,9 @@ subset; the unconfigured path stays the standalone runner.
 
 | Need | Interface | Where |
 |---|---|---|
-| Build a runtime with the Fabro frontend and the Attractor step kinds a Fabro workflow runs on | `petri::attractor::register(Runtime::standard().frontend(Fabro::new()))` and the `PebbleClient` capability (`petri::build_llm_client` with the host's `CredentialProvider` and catalog layers) | `crates/petri/lib/src/lib.rs`, `crates/attractor/steps/src/lib.rs` |
-| Load and run one workflow | `Runtime::check` (lowering with diagnostics), `execution::host::HostRun`, `host::run_configured`; `RunOptions::run_key` names the run with the host's own id | `crates/core/execution/src/host.rs` |
+| Build a runtime with the Fabro frontend and the Attractor step kinds a Fabro workflow runs on | `attractor_steps::register(Runtime::standard().frontend(Fabro::new()))` (`petri::attractor::register` through the distribution) and the `PebbleClient` capability (`petri::build_llm_client` with the host's `CredentialProvider` and catalog layers) | `crates/core/runtime/src/runtime.rs`, `crates/attractor/steps/src/lib.rs`, `crates/petri/lib/src/lib.rs` |
+| Load and run one workflow | `Runtime::check` (lowering with diagnostics) over a file on disk, or `Runtime::check_source` over a workflow the host holds in memory: the repository-relative path, the text, and a `frontend::FileSource` for the settings files and `@file` references beside it (`frontend::MapFiles` is a map of paths to text; the host binds `petri.repository` in the inputs itself); then `execution::host::HostRun`, `host::run_configured`; `RunOptions::run_key` names the run with the host's own id | `crates/core/runtime/src/runtime.rs`, `crates/core/execution/src/host.rs` |
+| Pin every model at run creation | Petri's, at `Runtime::check`, when the `PebbleClient` capability is installed: every agent and prompt node's `model`, `provider` and fallback chain resolve to concrete routes written on the node's config as the frozen `plan` (`{original, remaining, notices}`), and the graph the host persists is the resolved one, so dispatch and resume run the admitted routes. A selector the catalog cannot resolve refuses the graph with `attractor.model.unknown`; a malformed or provider-keyed `[run.model.fallbacks]` table with `attractor.model.fallbacks`. A pinned route the client can no longer address fails its stage with `llm:pinned_route_unavailable`. See `crates/attractor/FORMAT.md`, "Model resolution at admission" | `crates/attractor/steps/src/admission.rs`, `crates/core/runtime/src/runtime.rs` (`AdmissionPass`) |
 | The run's durable record | `store::RunStore` and `store::RunLogs` (`crates/core/store`), installed with `Runtime::store`: open a run by key in one access mode (`Create`, `Write` under an `OwnerId`, `Read`), then `append` and `read` records per log (`LogId::Coordinator`, `Resources`, `Execution(id)`) and `put_blob` and `get_blob` by digest. The stored unit is the record, exactly the `record` value of a public event. Petri ships `RunDirStore` (the run directory) and `MemoryRunStore`; a host implements the two traits over its database and runs `testkit::run_store::conformance` against it. See "Two shapes" below | `crates/core/store/src/lib.rs`, `crates/core/testkit/src/run_store.rs` |
 | Awaited extension points: admission, result preparation, transition, run end, scope release | `driver::lifecycle::ExecutionHooks`, installed with `Runtime::hooks`; `AdmitAttempt` (`Admit`, `Skip`, `Block`), `PrepareResult` (`Prepared` adjustments with the original evidence kept), `Transition` (`RouteOverride`, best-effort `problems`, a fatal `TransitionError`), `RunFinished`, `ScopeReleased`; notes returned at each point are durable records | `crates/core/driver/src/lifecycle.rs`; proven by `crates/petri/lib/tests/embedding.rs` and `embedding_readiness.rs` |
 | The local hook system, or a replacement | `execution::hooks::HookService` behind `HookAdapter` and the `HookServiceHandle` capability; the standalone service is `attractor_steps::hooks::LocalHooks`. Every point, the ones steps ask themselves included (`ScopeReady`, `RunStarted`, the start stage's admission, `ForkStarted`, `ForkCompleted`, the tool boundary of both agent backends), reaches the one service through that handle, so a replacement receives each exactly once (`embedding::a_hook_service_runs_each_hook_once_at_its_point`). A host that installs its own `ExecutionHooks` and still wants `[[run.hooks]]` calls `register` first and wraps `Runtime::installed_hooks()`, forwarding every point, `run_finished` and `scope_released` included (the `EmbeddingHost` in `embedding_readiness.rs` is the pattern) | `crates/core/execution/HOOKS.md` |
@@ -43,6 +69,7 @@ subset; the unconfigured path stays the standalone runner.
 | Sandboxes | every provider (host, Docker, Daytona) through the sandbox-driver JSON-RPC plugin protocol; `Retention` (`Always` is the Fabro default), `petri sandbox prune` | `crates/core/executor-sandbox/`, `README.md` |
 | Skills home, memory | the `FabroHome` capability (else `FABRO_HOME`, else `$HOME/.fabro`); project memory is read from the Git root to the working directory per Fabro's profile rules | `crates/attractor/steps/src/skills.rs`, `memory.rs` |
 | Compaction policy, MCP tool registration, sub-agent limits | `CompactionPolicyHandle`; MCP servers from `[run.agent.mcps]` are Petri-owned processes and connections; Pebble's sub-agent tools are on every native agent | `crates/attractor/FORMAT.md` ("Native Pebble" and after) |
+| The host's in-run tools (Fabro's run tools) | the `HostTools` capability (`attractor_steps::host_tools`): builders of Pebble `RegisteredTool`s, called once per native session with a `HostToolContext` (run key, invocation, execution, node, firing, attempt). The tools register beside Pebble's own, so they run under the run's tool hooks, are recorded on the public stream under the stage, and reach a sub-agent through Pebble's inheritance when marked `allow_in_subagents`. `register_fabro_run_tools` is the builder; Fabro's adapter maps the context to `FabroRunToolServices`. The context needs the coordinator's `ExecutionIdentity`, which every run through `execution::host` has | `crates/attractor/steps/src/host_tools.rs` |
 
 ## Identities a host can rely on
 
@@ -179,6 +206,14 @@ acknowledgement gates the next step of the run:
   released; `scope_released` runs before each scope's own environment is
   released. Fabro's `run_complete`/`run_failed` (by final status, neither on a
   cancelled run) and `sandbox_cleanup` map onto them.
+- `scope_acquired` runs once per acquisition of a scope's environment, after
+  the executor acquired it and before the first attempt in it, with the
+  workspace id and the `ExecEnv` the steps receive: where a host restores a
+  workspace onto its snapshot in a Docker or Daytona sandbox before work
+  resumes in it, and where it keeps the environment it later runs `git` in
+  for its checkpoints. An error fails the scope's firings routably. With
+  `SandboxOptions::lost_sandbox = LostSandbox::Replace`, a lease whose
+  sandbox is gone gets a fresh, empty one for the host to restore.
 - `RunEventSink::deliver` is awaited per event behind a bounded queue
   (`ProjectorOptions::capacity`, 1024 by default); a slow sink delays
   delivery and never slows the run, an event that finds the queue full is

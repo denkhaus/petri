@@ -27,6 +27,13 @@
 //! retry (a new attempt) builds a new plan at position 0; it is not a
 //! failover.
 //!
+//! When the runtime had a catalog at `Runtime::check`, the plan was built
+//! there ([`crate::admission`]) and rides the node's config as a
+//! [`FrozenPlan`]: the stage runs it as it was admitted, after checking
+//! that its original route is still one the client can address
+//! ([`PINNED_ROUTE_UNAVAILABLE_CLASS`]). Without one the stage resolves its
+//! selectors itself, as described above.
+//!
 //! Which errors move the plan is `lithos-llm`'s `failover_eligible`, the rule
 //! Pebble applies: a failure the client classifies as retryable, provider
 //! authentication, access, not-found, quota, rate-limit, server, network,
@@ -353,9 +360,103 @@ impl Notice {
             ),
         }
     }
+}
 
-    fn to_json(&self) -> Value {
-        json!({ "code": self.code(), "level": self.level(), "message": self.message() })
+/// A notice as the plan event and a frozen plan carry it: Fabro's code and
+/// level, and the message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanNotice {
+    pub code:    String,
+    pub level:   String,
+    pub message: String,
+}
+
+impl From<&Notice> for PlanNotice {
+    fn from(notice: &Notice) -> Self {
+        Self {
+            code:    notice.code().to_owned(),
+            level:   notice.level().to_owned(),
+            message: notice.message(),
+        }
+    }
+}
+
+/// The failure class a stage reports when its admitted route is no longer
+/// one the client can address: the provider left the catalog or the
+/// available set, or the model left the provider, after the run was
+/// admitted.
+pub const PINNED_ROUTE_UNAVAILABLE_CLASS: &str = "llm:pinned_route_unavailable";
+
+/// A stage's plan as admission wrote it on the node's config (`plan`): the
+/// original route and the remaining routes, each concrete, and the notices
+/// the resolution produced. What the stage runs on when the graph was
+/// admitted with a catalog; the same shape the stage builds for itself when
+/// it was not.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrozenPlan {
+    pub original:  Route,
+    #[serde(default)]
+    pub remaining: Vec<Route>,
+    #[serde(default)]
+    pub notices:   Vec<PlanNotice>,
+}
+
+impl FrozenPlan {
+    /// Resolve `chains` against the client and build the plan `requested`
+    /// runs on, with every notice the chains and the plan produced.
+    pub fn resolve(
+        client: &Client,
+        chains: &BTreeMap<String, Vec<String>>,
+        requested: &Requested<'_>,
+    ) -> Result<Self, PlanError> {
+        let resolved = resolve(client, chains)?;
+        Self::from_resolved(client, &resolved, requested)
+    }
+
+    /// [`FrozenPlan::resolve`] over chains already resolved.
+    pub fn from_resolved(
+        client: &Client,
+        resolved: &Resolved,
+        requested: &Requested<'_>,
+    ) -> Result<Self, PlanError> {
+        let planned = plan(client, resolved, requested)?;
+        let notices = resolved
+            .notices()
+            .iter()
+            .chain(planned.notices.iter())
+            .map(PlanNotice::from)
+            .collect();
+        Ok(Self {
+            original: planned.plan.original,
+            remaining: planned.plan.remaining,
+            notices,
+        })
+    }
+
+    /// The plan at position 0, for a stage to run.
+    #[must_use]
+    pub fn plan(&self) -> Plan {
+        Plan {
+            original:  self.original.clone(),
+            remaining: self.remaining.clone(),
+            position:  0,
+        }
+    }
+
+    /// Whether the client can still address the original route: the check
+    /// a stage makes before it runs an admitted plan. `Err` says why not.
+    pub fn check_pinned(&self, client: &Client) -> Result<(), String> {
+        let selector = self.original.selector();
+        let probe = Request::builder()
+            .model(&selector)
+            .user("probe")
+            .build()
+            .map_err(|error| {
+                format!("the admitted route `{selector}` is not addressable: {error}")
+            })?;
+        client.resolve_route(&probe).map(|_| ()).map_err(|error| {
+            format!("the admitted route `{selector}` is no longer available: {error}")
+        })
     }
 }
 
@@ -1013,11 +1114,11 @@ impl FallbackService {
     }
 
     /// Whether `notice` is new for this run.
-    pub fn first(&self, notice: &Notice) -> bool {
+    pub fn first(&self, notice: &PlanNotice) -> bool {
         self.noticed
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(notice.message())
+            .insert(notice.message.clone())
     }
 }
 
@@ -1040,7 +1141,7 @@ impl Stage {
     }
 
     /// The stage's plan and the notices that shaped it, as [`PLAN_EVENT`].
-    pub(crate) async fn plan(&self, plan: &Plan, notices: &[Notice]) {
+    pub(crate) async fn plan(&self, plan: &Plan, notices: &[PlanNotice]) {
         let _ = self
             .logs
             .send(StepEvent::Custom(json!({
@@ -1050,95 +1151,118 @@ impl Stage {
                 "attempt": self.attempt,
                 "requested": plan.original.target(),
                 "routes": plan.routes_json(),
-                "notices": notices.iter().map(Notice::to_json).collect::<Vec<_>>(),
+                "notices": notices,
             })))
             .await;
     }
 }
 
-/// Build a native agent node's plan from its config, reporting each new
-/// notice on stderr once per run.
-pub(crate) async fn plan_for_agent(
-    config: &AgentConfig,
-    ctx: &mut StepCtx,
-    client: &Client,
-) -> Result<Planned, AgentError> {
-    let model = config
-        .model
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| {
-            AgentError::failed("bad_config", "backend=api requires model or default_model")
-        })?;
-    let reasoning_effort = config
-        .reasoning_effort
-        .as_ref()
+/// The request controls as a node's config spells them: Fabro's
+/// `reasoning_effort` name and `speed` word, each typed. `Err` is the
+/// `bad_config` message.
+pub(crate) fn controls_of(
+    node: &str,
+    reasoning_effort: Option<&str>,
+    speed: Option<&str>,
+) -> Result<(Option<ReasoningEffort>, Option<Speed>), String> {
+    let reasoning_effort = reasoning_effort
         .map(|value| serde_json::from_value::<ReasoningEffort>(json!(value)))
         .transpose()
-        .map_err(|e| AgentError::failed("bad_config", e.to_string()))?;
-    let speed = match config.speed.as_deref() {
+        .map_err(|e| e.to_string())?;
+    let speed = match speed {
         None => None,
         Some(text) => Some(speed_of(text).ok_or_else(|| {
-            AgentError::failed(
-                "bad_config",
-                format!(
-                    "Invalid speed \"{text}\" for node \"{}\"; expected one of: standard, fast",
-                    config.node
-                ),
-            )
+            format!("Invalid speed \"{text}\" for node \"{node}\"; expected one of: standard, fast")
         })?),
     };
-    let requested = Requested {
-        provider: config.provider.as_deref(),
-        model,
-        reasoning_effort,
-        speed,
-    };
-    plan_for(ctx, client, &config.fallbacks, &requested)
-        .await
-        .map_err(|error| match error {
+    Ok((reasoning_effort, speed))
+}
+
+/// What a stage hands [`plan_for_stage`]: its model selection as the config
+/// carries it, and the plan admission froze, when it did.
+pub(crate) struct StageRequest<'a> {
+    pub node:             &'a str,
+    pub provider:         Option<&'a str>,
+    pub model:            Option<&'a str>,
+    pub reasoning_effort: Option<&'a str>,
+    pub speed:            Option<&'a str>,
+    pub fallbacks:        &'a BTreeMap<String, Vec<String>>,
+    pub plan:             Option<&'a FrozenPlan>,
+}
+
+impl StageRequest<'_> {
+    pub(crate) fn for_agent(config: &AgentConfig) -> StageRequest<'_> {
+        StageRequest {
+            node:             &config.node,
+            provider:         config.provider.as_deref(),
+            model:            config.model.as_deref(),
+            reasoning_effort: config.reasoning_effort.as_deref(),
+            speed:            config.speed.as_deref(),
+            fallbacks:        &config.fallbacks,
+            plan:             config.plan.as_ref(),
+        }
+    }
+}
+
+/// The plan a stage runs on, reporting each new notice on stderr once per
+/// run. An admitted plan is used as it stands once its original route is
+/// checked against the client ([`PINNED_ROUTE_UNAVAILABLE_CLASS`] when the
+/// check fails). Without one the chains are resolved through the run's
+/// [`FallbackService`] and the plan is built here, as admission would have
+/// built it.
+pub(crate) async fn plan_for_stage(
+    ctx: &mut StepCtx,
+    client: &Client,
+    request: &StageRequest<'_>,
+) -> Result<FrozenPlan, AgentError> {
+    let service = ctx.capability::<FallbackService>();
+    let frozen = if let Some(frozen) = request.plan {
+        frozen
+            .check_pinned(client)
+            .map_err(|message| AgentError::failed(PINNED_ROUTE_UNAVAILABLE_CLASS, message))?;
+        frozen.clone()
+    } else {
+        let model = request
+            .model
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                AgentError::failed("bad_config", "backend=api requires model or default_model")
+            })?;
+        let (reasoning_effort, speed) =
+            controls_of(request.node, request.reasoning_effort, request.speed)
+                .map_err(|message| AgentError::failed("bad_config", message))?;
+        let requested = Requested {
+            provider: request.provider,
+            model,
+            reasoning_effort,
+            speed,
+        };
+        let resolved = match &service {
+            Some(service) => service.resolve(client, request.fallbacks),
+            None => Arc::new(resolve(client, request.fallbacks)),
+        };
+        let resolved = match resolved.as_ref() {
+            Ok(resolved) => resolved,
+            Err(error) => return Err(AgentError::failed("bad_config", error.to_string())),
+        };
+        FrozenPlan::from_resolved(client, resolved, &requested).map_err(|error| match error {
             PlanError::Config(error) => AgentError::failed("bad_config", error.to_string()),
             PlanError::Primary { .. } => {
                 AgentError::failed("llm:model_selection", error.to_string())
             }
-        })
-}
-
-/// Build a plan through the run's [`FallbackService`], reporting each new
-/// notice on stderr once per run. The notices in the result are the ones
-/// this stage produced, new or not, for its plan event.
-pub(crate) async fn plan_for(
-    ctx: &mut StepCtx,
-    client: &Client,
-    chains: &BTreeMap<String, Vec<String>>,
-    requested: &Requested<'_>,
-) -> Result<Planned, PlanError> {
-    let service = ctx.capability::<FallbackService>();
-    let resolved = match &service {
-        Some(service) => service.resolve(client, chains),
-        None => Arc::new(resolve(client, chains)),
+        })?
     };
-    let resolved = match resolved.as_ref() {
-        Ok(resolved) => resolved,
-        Err(error) => return Err(PlanError::Config(error.clone())),
-    };
-    let planned = plan(client, resolved, requested)?;
-    let mut notices = resolved.notices().to_vec();
-    notices.extend(planned.notices.iter().cloned());
-    for notice in &notices {
+    for notice in &frozen.notices {
         let first = service.as_ref().is_none_or(|service| service.first(notice));
         if first {
             ctx.log(
                 LogStream::Stderr,
-                format!("{}: {}", notice.level(), notice.message()),
+                format!("{}: {}", notice.level, notice.message),
             )
             .await;
         }
     }
-    Ok(Planned {
-        plan: planned.plan,
-        notices,
-    })
+    Ok(frozen)
 }
 
 #[cfg(test)]

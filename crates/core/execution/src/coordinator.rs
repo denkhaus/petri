@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::{fmt, fs, io};
 
-use driver::{ExecutionSlot, SandboxAssignment, ScopeLease, ScopeLeaseAllocator, ScopeLeases};
+use driver::{
+    ExecutionSlot, HookContext, ParentLink, SandboxAssignment, ScopeLease, ScopeLeaseAllocator,
+    ScopeLeases,
+};
 use engine::{EngineExit, EngineStart, EntryPoint, Event, MiddlewareKey};
 use executor_sandbox::{CONTAINER_KIND, RecordedLease, RoutingExecutor};
 use ir::{
@@ -1256,6 +1259,7 @@ impl Coordinator {
             })?,
         );
         let decoded = read_execution_log(&**self.store.logs(), execution).await?;
+        let context = self.hook_context(invocation, execution);
         let (driver, writer): (driver::Driver, Arc<ExecutionLogWriter>) = if decoded.log.is_empty()
         {
             let writer = Arc::new(ExecutionLogWriter::new(self.writer.clone(), execution, 0));
@@ -1266,8 +1270,7 @@ impl Coordinator {
                 (*graph).clone(),
                 start.clone(),
                 &directory,
-                execution.environment_prefix(),
-                invocation.workspace_prefix(),
+                context,
                 sandbox,
                 secrets,
             );
@@ -1306,21 +1309,26 @@ impl Coordinator {
                 (*graph).clone(),
                 decoded.log,
                 &directory,
-                execution.environment_prefix(),
-                invocation.workspace_prefix(),
+                context,
                 sandbox,
                 secrets,
             )?;
             (driver.with_engine_start(start.clone()), writer)
         };
         let client = CoordinatorInvocationClient::new(execution, self.start_tx.clone());
+        let identity = crate::ExecutionIdentity {
+            run: self.runtime.run_key().clone(),
+            invocation,
+            execution,
+        };
         let fold = Arc::new(pipeline.fold_observer());
         let mut driver = driver
             .with_run_owner(invocation == InvocationId::ROOT)
             .observe(writer.clone())
             .observe(fold)
             .with_decision_resolver(pipeline.clone())
-            .with_capability(client);
+            .with_capability(client)
+            .with_capability(identity);
         let mut execution_slot = None;
         if let Some(slots) = self.attempt_slots(invocation) {
             let held = slot.map_or_else(ExecutionSlot::empty, ExecutionSlot::holding);
@@ -1339,6 +1347,16 @@ impl Coordinator {
             cancel_before_run,
             slot: execution_slot,
         })
+    }
+
+    /// What the hooks are told about an execution: the run, the invocation,
+    /// the execution, and the call that started a nested invocation.
+    fn hook_context(&self, invocation: InvocationId, execution: ExecutionId) -> HookContext {
+        let context = HookContext::new(self.runtime.run_key().clone(), invocation, execution);
+        match &self.store.state().invocations[&invocation].declaration.call {
+            Some(call) => context.with_parent(ParentLink::from(call)),
+            None => context,
+        }
     }
 
     fn invocation_secrets(&self, invocation: InvocationId) -> Arc<dyn executor::SecretProvider> {

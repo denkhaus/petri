@@ -72,8 +72,8 @@ use crate::compaction::{self, CompactionPolicyHandle};
 use crate::fallback::{self, Disposition, Plan};
 use crate::hooks::tools::ToolHooks;
 use crate::hooks::{self};
-use crate::skills;
 use crate::subagents::{self, Ledger};
+use crate::{host_tools, skills};
 
 /// Host capability supplied by applications embedding the native backend.
 /// Construct the client with the application's catalog, credentials, and
@@ -227,6 +227,11 @@ impl NativeSession {
         };
         let hook_service = ctx.capability::<HookServiceHandle>();
         let compaction_policy = ctx.capability::<CompactionPolicyHandle>();
+        // The host's own tools for this stage, built with the stage's
+        // identity; Pebble registers them beside its tools, under the same
+        // hooks and on the same event stream.
+        let host_tools = host_tools::for_node(ctx)
+            .map_err(|failure| AgentError::failed(failure.class.as_str(), failure.message))?;
         let cancel = CancellationToken::new();
         let kill = CancellationToken::new();
         let guard = cancel.clone().drop_guard();
@@ -321,7 +326,8 @@ impl NativeSession {
                 .redactor(redactor)
                 .human_input(provider)
                 .mcp_servers(servers.servers)
-                .port_routes(Arc::new(ScopePortRoutes::new(env)));
+                .port_routes(Arc::new(ScopePortRoutes::new(env)))
+                .tools(host_tools);
             builder = compaction::install(builder, compaction_policy);
             if let Some(middleware) = tool_hooks {
                 builder = builder.tool_middleware(middleware);

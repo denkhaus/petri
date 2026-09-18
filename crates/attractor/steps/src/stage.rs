@@ -13,7 +13,9 @@
 //! `start` also carries the run's `[run.model.fallbacks]` table and checks
 //! it against the model catalog before anything else: a table the run
 //! cannot use fails the run at run start, as Fabro's server refuses it,
-//! not at the first LLM stage that would have read it.
+//! not at the first LLM stage that would have read it. A graph admitted
+//! with a catalog carries no table here: admission checked it and pinned
+//! every route (`crate::admission`), so `start` has nothing to check.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -121,7 +123,8 @@ pub struct StageConfig {
     /// `[run.model.fallbacks]` as written, on `start`: checked against the
     /// catalog before anything runs, so a table the run cannot use fails
     /// the run where Fabro's server refuses it, at run start, and not at
-    /// the first LLM stage that would have read it.
+    /// the first LLM stage that would have read it. Absent once admission
+    /// checked the table and pinned the run's routes.
     pub fallbacks: Value,
     #[serde(flatten)]
     pub rest:      serde_json::Map<String, Value>,

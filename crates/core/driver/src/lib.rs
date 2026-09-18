@@ -21,7 +21,7 @@ pub use decision::{
     AdmissionResolution, AdmitRequest, DecisionError, DecisionResolver, DefaultDecisionResolver,
     RoutingRequest, RoutingResolution, default_group_decision,
 };
-pub use lifecycle::ExecutionHooks;
+pub use lifecycle::{ExecutionHooks, HookContext, ParentLink};
 pub use observe::{EventObserver, ObserveError, recorded_now};
 pub use run::{
     CANCEL_FORCED, CANCELLED_BEFORE_RESUME, CONTROL_CHANNEL_CAPACITY, DEFAULT_CLEANUP_GRACE,

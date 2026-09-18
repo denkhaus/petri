@@ -12,16 +12,16 @@ use std::time::Duration;
 use std::{env, fs, io, mem, process};
 
 use driver::{
-    Driver, EventObserver, ExecutionHooks, ExecutionReport, ResumeError, ResumeInfo, RunConfig,
-    RunGuard, SandboxAssignment,
+    Driver, EventObserver, ExecutionHooks, ExecutionReport, HookContext, ResumeError, ResumeInfo,
+    RunConfig, RunGuard, SandboxAssignment,
 };
 use engine::{EngineStart, EventLog, ReplayMismatch};
 use executor::{
     DEFAULT_GRACE, Executor, MapSecrets, Masker, ProgressSink, Retention, SecretProvider,
 };
 use executor_sandbox::{LeaseLedger, RoutingExecutor, SandboxOptions};
-use frontend::{CompileInputs, DirFiles, Frontend, Lowered, REPOSITORY_VAR, Span};
-use ir::Graph;
+use frontend::{CompileInputs, DirFiles, FileSource, Frontend, Lowered, REPOSITORY_VAR, Span};
+use ir::{ExecutionId, Graph, InvocationId};
 use serde_json::Value;
 use smol_str::SmolStr;
 use store::{Access, OwnerId, RunDirStore, RunKey, RunLogs, RunStore, StoreError};
@@ -105,6 +105,46 @@ type RunProvisioner = Arc<
         + Sync,
 >;
 
+/// A problem an admission pass found: the diagnostic code it is reported
+/// under, the node it belongs to (by name) or `None` for a problem of the
+/// whole graph, and the message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdmissionProblem {
+    pub code:    SmolStr,
+    pub node:    Option<SmolStr>,
+    pub message: String,
+}
+
+impl AdmissionProblem {
+    pub fn new(code: &str, node: Option<&str>, message: impl Into<String>) -> Self {
+        Self {
+            code:    SmolStr::new(code),
+            node:    node.map(SmolStr::new),
+            message: message.into(),
+        }
+    }
+}
+
+/// A pass [`Runtime::check`] runs over a lowered graph after the step
+/// registry accepted it: the seam a component uses to resolve what the
+/// frontend could not (a model selector against the host's catalog) and to
+/// write the result into the graph, so the graph a run persists is what its
+/// steps read.
+///
+/// A pass sees the runtime's static capabilities (`Runtime::capability`),
+/// never a run's services or its directory. It returns every problem it
+/// found; `check` turns each into an error diagnostic on the node's span and
+/// hands out no graph. A pass must not panic on any graph the registry
+/// accepted.
+///
+/// A pass may change a pre-lowered child graph as freely as the root: the
+/// parent names its child by content digest, and `check` re-digests every
+/// child a pass changed and rewrites the references to it, so the child is
+/// still found by its digest at run time.
+pub trait AdmissionPass: Send + Sync {
+    fn admit(&self, graph: &mut Graph, caps: &::steps::Capabilities) -> Vec<AdmissionProblem>;
+}
+
 /// The assembled system: frontends, step kinds, executors, secrets, options.
 pub struct Runtime {
     frontends:    Vec<Box<dyn Frontend>>,
@@ -119,6 +159,7 @@ pub struct Runtime {
     hooks:        Option<Arc<dyn ExecutionHooks>>,
     caps:         ::steps::CapabilitiesBuilder,
     provisioners: Vec<RunProvisioner>,
+    admissions:   Vec<Arc<dyn AdmissionPass>>,
     options:      RunOptions,
 }
 
@@ -153,6 +194,7 @@ impl Runtime {
             hooks:        None,
             caps:         ::steps::Capabilities::builder(),
             provisioners: Vec::new(),
+            admissions:   Vec::new(),
             options:      RunOptions::new(
                 env::temp_dir().join(format!("petri-run-{}", process::id())),
             ),
@@ -173,6 +215,7 @@ impl Runtime {
             hooks:        None,
             caps:         ::steps::Capabilities::builder(),
             provisioners: Vec::new(),
+            admissions:   Vec::new(),
             options:      RunOptions::new(
                 env::temp_dir().join(format!("petri-run-{}", process::id())),
             ),
@@ -291,6 +334,16 @@ impl Runtime {
         self
     }
 
+    /// Register an admission pass: [`Runtime::check`] runs it over every
+    /// graph the step registry accepted, the root and the pre-lowered
+    /// children, in registration order, with the runtime's static
+    /// capabilities.
+    #[must_use]
+    pub fn admission(mut self, pass: impl AdmissionPass + 'static) -> Self {
+        self.admissions.push(Arc::new(pass));
+        self
+    }
+
     #[must_use]
     pub fn options(mut self, options: RunOptions) -> Self {
         self.options = options;
@@ -349,6 +402,13 @@ impl Runtime {
     /// Read and lower one file. `Err` is an IO-or-usage problem; a rejected
     /// workflow comes back as `Ok` with diagnostics and no graph.
     ///
+    /// The repository is the directory `repo` names, else the one the
+    /// frontend finds for the file; the frontend reads `@file` references and
+    /// the settings files beside the workflow from it, and the compile
+    /// variable `petri.repository` is bound to its absolute path unless
+    /// `inputs` already binds it. [`Runtime::lower_source`] is the same
+    /// lowering over text the caller holds in memory.
+    ///
     /// The span is the only place that knows which frontend claimed the file;
     /// the frontends themselves stay free of tracing, with diagnostics as their
     /// one output channel.
@@ -370,8 +430,6 @@ impl Runtime {
         inputs: &CompileInputs,
     ) -> Result<Lowered, LoadError> {
         let frontend = self.frontend_for(file, format)?;
-        let span = tracing::Span::current();
-        span.record("frontend", frontend.name());
         let repo = repo.map_or_else(|| frontend.repo_root(file), Path::to_path_buf);
         let text = fs::read_to_string(file).map_err(|e| LoadError::Read {
             path:   file.to_path_buf(),
@@ -400,18 +458,68 @@ impl Runtime {
             );
         }
         let files = DirFiles { root: repo };
-        let lowered = frontend.load(&name, &text, &files, &inputs);
+        Ok(Self::lower_with(frontend, &name, &text, &files, &inputs))
+    }
+
+    /// Lower one workflow the caller holds in memory: [`Runtime::lower`]
+    /// without the disk. `file` is the repository-relative path of the
+    /// workflow, with `/` separators: the frontend is chosen by its
+    /// extension (or by `format`), and every span the lowering reports
+    /// names it. `files` is the repository the frontend reads `@file`
+    /// references and the settings files beside the workflow from
+    /// (`frontend::MapFiles` holds one as a map of paths to text). `inputs`
+    /// is used as given: a host whose runs check a repository out binds
+    /// `petri.repository` itself, the way [`Runtime::lower`] does from the
+    /// repository directory.
+    ///
+    /// # Errors
+    ///
+    /// When `format` names no registered frontend, or no frontend claims
+    /// `file`. A rejected workflow is `Ok` with diagnostics and no graph.
+    #[tracing::instrument(
+        name = "runtime.lower",
+        level = "debug",
+        skip_all,
+        fields(workflow_file = %file, frontend = Empty, node_count = Empty)
+    )]
+    pub fn lower_source(
+        &self,
+        file: &str,
+        text: &str,
+        files: &dyn FileSource,
+        format: Option<&str>,
+        inputs: &CompileInputs,
+    ) -> Result<Lowered, LoadError> {
+        let frontend = self.frontend_for(Path::new(file), format)?;
+        Ok(Self::lower_with(frontend, file, text, files, inputs))
+    }
+
+    /// The lowering both entry points share, recorded on the current
+    /// `runtime.lower` span.
+    fn lower_with(
+        frontend: &dyn Frontend,
+        file: &str,
+        text: &str,
+        files: &dyn FileSource,
+        inputs: &CompileInputs,
+    ) -> Lowered {
+        let span = tracing::Span::current();
+        span.record("frontend", frontend.name());
+        let lowered = frontend.load(file, text, files, inputs);
         if let Some(graph) = &lowered.graph {
             span.record("node_count", graph.nodes.len());
         }
-        Ok(lowered)
+        lowered
     }
 
     /// [`Runtime::lower`], then validate the graph — and every pre-lowered
     /// child graph — against the step registry, so an unregistered kind or a
     /// bad literal config is a diagnostic here rather than a step failure at
     /// firing time. Only the registry pass runs: the frontend already ran the
-    /// structural passes when it lowered.
+    /// structural passes when it lowered. Then every registered
+    /// [`AdmissionPass`] runs over the accepted graphs; a problem a pass
+    /// reports is an error diagnostic on its node's span, and the graph is
+    /// withheld as it is for a registry error.
     pub fn check(
         &self,
         file: &Path,
@@ -420,7 +528,36 @@ impl Runtime {
         inputs: &CompileInputs,
     ) -> Result<Lowered, LoadError> {
         let mut lowered = self.lower(file, format, repo, inputs)?;
-        let span = Span::file(file.to_string_lossy().as_ref());
+        self.validate_and_admit(&mut lowered, &file.to_string_lossy());
+        Ok(lowered)
+    }
+
+    /// [`Runtime::check`] over a workflow the caller holds in memory:
+    /// [`Runtime::lower_source`], then the same registry validation and
+    /// admission passes. The parameters are those of `lower_source`; a
+    /// registry or admission diagnostic names `file`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Runtime::lower_source`].
+    pub fn check_source(
+        &self,
+        file: &str,
+        text: &str,
+        files: &dyn FileSource,
+        format: Option<&str>,
+        inputs: &CompileInputs,
+    ) -> Result<Lowered, LoadError> {
+        let mut lowered = self.lower_source(file, text, files, format, inputs)?;
+        self.validate_and_admit(&mut lowered, file);
+        Ok(lowered)
+    }
+
+    /// What [`Runtime::check`] adds to lowering: the registry pass over the
+    /// root and the children, then the admission passes. A problem withholds
+    /// the graphs and is reported as an error diagnostic in `file`.
+    fn validate_and_admit(&self, lowered: &mut Lowered, file: &str) {
+        let span = Span::file(file);
         let mut errors = Vec::new();
         if let Some(graph) = &lowered.graph {
             errors.extend(
@@ -446,8 +583,52 @@ impl Runtime {
                     .diagnostics
                     .error(error.code(), span.clone(), error.to_string());
             }
+            return;
         }
-        Ok(lowered)
+        let problems = self.admit(lowered);
+        if !problems.is_empty() {
+            lowered.graph = None;
+            lowered.children.clear();
+            for (problem, span) in problems {
+                lowered
+                    .diagnostics
+                    .error(&problem.code, span_of(file, span), problem.message);
+            }
+        }
+    }
+
+    /// Run every admission pass over the root graph and the children, in
+    /// registration order, then follow every changed child's new digest
+    /// through the references to it. Each problem comes back with its
+    /// node's source position, read from the frontend's `meta.span`, when
+    /// it names a node the graph has.
+    fn admit(&self, lowered: &mut Lowered) -> Vec<(AdmissionProblem, Option<(u32, u32)>)> {
+        if self.admissions.is_empty() {
+            return Vec::new();
+        }
+        let caps = self.caps.clone().build();
+        let before: Vec<String> = lowered
+            .children
+            .iter()
+            .map(frontend::graph_digest)
+            .collect();
+        let mut problems = Vec::new();
+        let graphs = lowered.graph.iter_mut().chain(lowered.children.iter_mut());
+        for graph in graphs {
+            for pass in &self.admissions {
+                for problem in pass.admit(graph, &caps) {
+                    let position = problem
+                        .node
+                        .as_deref()
+                        .and_then(|name| node_position(graph, name));
+                    problems.push((problem, position));
+                }
+            }
+        }
+        if problems.is_empty() {
+            redigest_children(lowered, before);
+        }
+        problems
     }
 
     // ── Running ────────────────────────────────────────────────────────────
@@ -683,12 +864,15 @@ pub struct RunRuntime {
 
 impl RunRuntime {
     /// A standalone driver's completion owns this run's service teardown.
+    /// It is the run's one execution: the root invocation's first.
     fn equip_standalone(self, driver: Driver) -> Driver {
+        let context = HookContext::new(self.key.clone(), InvocationId::ROOT, ExecutionId::new(0));
         let driver = attach(
             driver.with_capabilities(self.caps.clone()),
             &self.observers,
             self.progress.as_ref(),
             self.hooks.as_ref(),
+            context,
         );
         driver.with_run_guard(Box::new(self))
     }
@@ -774,13 +958,14 @@ impl RunRuntime {
     }
 
     /// Build one execution driver without provisioning run services again.
+    /// `context` names the execution: its ids supply the scope identities,
+    /// and the installed hooks receive it with every callback.
     pub fn driver(
         &self,
         graph: Graph,
         start: EngineStart,
         execution_dir: impl Into<PathBuf>,
-        environment_prefix: impl Into<smol_str::SmolStr>,
-        workspace_prefix: impl Into<smol_str::SmolStr>,
+        context: HookContext,
         sandbox: SandboxAssignment,
         secrets: Arc<dyn SecretProvider>,
     ) -> Driver {
@@ -789,12 +974,7 @@ impl RunRuntime {
             self.executor.clone(),
             self.steps.clone(),
             secrets,
-            self.execution_config(
-                execution_dir.into(),
-                environment_prefix.into(),
-                workspace_prefix.into(),
-                sandbox,
-            ),
+            self.execution_config(execution_dir.into(), &context, sandbox),
         )
         .with_engine_start(start)
         .with_capabilities(self.caps.clone());
@@ -803,6 +983,7 @@ impl RunRuntime {
             &self.observers,
             self.progress.as_ref(),
             self.hooks.as_ref(),
+            context,
         )
     }
 
@@ -812,8 +993,7 @@ impl RunRuntime {
         graph: Graph,
         log: EventLog,
         execution_dir: impl Into<PathBuf>,
-        environment_prefix: impl Into<smol_str::SmolStr>,
-        workspace_prefix: impl Into<smol_str::SmolStr>,
+        context: HookContext,
         sandbox: SandboxAssignment,
         secrets: Arc<dyn SecretProvider>,
     ) -> Result<(Driver, ResumeInfo), ResumeError> {
@@ -823,12 +1003,7 @@ impl RunRuntime {
             self.executor.clone(),
             self.steps.clone(),
             secrets,
-            self.execution_config(
-                execution_dir.into(),
-                environment_prefix.into(),
-                workspace_prefix.into(),
-                sandbox,
-            ),
+            self.execution_config(execution_dir.into(), &context, sandbox),
         )?;
         let driver = driver.with_capabilities(self.caps.clone());
         Ok((
@@ -837,6 +1012,7 @@ impl RunRuntime {
                 &self.observers,
                 self.progress.as_ref(),
                 self.hooks.as_ref(),
+                context,
             ),
             info,
         ))
@@ -863,8 +1039,7 @@ impl RunRuntime {
     fn execution_config(
         &self,
         execution_dir: PathBuf,
-        environment_prefix: smol_str::SmolStr,
-        workspace_prefix: smol_str::SmolStr,
+        context: &HookContext,
         sandbox: SandboxAssignment,
     ) -> RunConfig {
         // An execution ends before its invocation can restart. Workspace
@@ -872,7 +1047,10 @@ impl RunRuntime {
         // individual driver release.
         base_run_config(&self.options, execution_dir)
             .with_retention(Retention::Always)
-            .with_scope_identities(environment_prefix, workspace_prefix)
+            .with_scope_identities(
+                context.execution.environment_prefix(),
+                context.invocation.workspace_prefix(),
+            )
             .with_sandbox_assignment(sandbox)
     }
 }
@@ -881,6 +1059,76 @@ impl RunRuntime {
 impl RunGuard for RunRuntime {
     async fn teardown(self: Box<Self>) {
         self.finish().await;
+    }
+}
+
+/// The `{line, column}` the frontend recorded under a node's `meta.span`,
+/// when the node exists and the position is known.
+fn node_position(graph: &Graph, name: &str) -> Option<(u32, u32)> {
+    let node = graph.body.nodes.iter().find(|node| node.name == name)?;
+    let span = node.meta.get("span")?;
+    let read = |key: &str| span.get(key)?.as_u64().and_then(|n| u32::try_from(n).ok());
+    let line = read("line")?;
+    (line > 0).then(|| (line, read("column").unwrap_or(0)))
+}
+
+/// Rewrite every reference to a child whose content changed. A parent names
+/// a child by the digest the frontend computed; a step config string equal
+/// to a changed child's old digest becomes the new one, in the root and in
+/// every child. A child that references a changed child changes too, so the
+/// rewrite repeats until every digest is stable; references form a tree, so
+/// that takes at most one round per level.
+fn redigest_children(lowered: &mut Lowered, mut before: Vec<String>) {
+    for _ in 0..=lowered.children.len() {
+        let after: Vec<String> = lowered
+            .children
+            .iter()
+            .map(frontend::graph_digest)
+            .collect();
+        let changed: Vec<(&String, &String)> = before
+            .iter()
+            .zip(&after)
+            .filter(|(old, new)| old != new)
+            .collect();
+        if changed.is_empty() {
+            return;
+        }
+        let graphs = lowered.graph.iter_mut().chain(lowered.children.iter_mut());
+        for graph in graphs {
+            for node in &mut graph.body.nodes {
+                for (old, new) in &changed {
+                    replace_string(&mut node.step.config, old, new);
+                }
+            }
+        }
+        before = after;
+    }
+}
+
+/// Replace every string in `value` equal to `from` with `to`.
+fn replace_string(value: &mut Value, from: &str, to: &str) {
+    match value {
+        Value::String(text) if text == from => to.clone_into(text),
+        Value::Array(items) => {
+            for item in items {
+                replace_string(item, from, to);
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values_mut() {
+                replace_string(item, from, to);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A span in `file`: at `position` when a node supplied one, else the file
+/// alone.
+fn span_of(file: &str, position: Option<(u32, u32)>) -> Span {
+    match position {
+        Some((line, column)) => Span::new(file, line, column),
+        None => Span::file(file),
     }
 }
 
@@ -896,12 +1144,14 @@ fn base_run_config(options: &RunOptions, run_dir: PathBuf) -> RunConfig {
 }
 
 /// Attach the runtime-registered observers, progress sink and hooks to a
-/// driver.
+/// driver. The hooks are one object per runtime; `context` is what tells
+/// them which execution each callback belongs to.
 fn attach(
     mut driver: Driver,
     observers: &[Arc<dyn EventObserver>],
     progress: Option<&Arc<dyn ProgressSink>>,
     hooks: Option<&Arc<dyn ExecutionHooks>>,
+    context: HookContext,
 ) -> Driver {
     for observer in observers {
         driver = driver.observe(observer.clone());
@@ -910,7 +1160,7 @@ fn attach(
         driver = driver.with_progress(progress.clone());
     }
     if let Some(hooks) = hooks {
-        driver = driver.with_hooks(hooks.clone());
+        driver = driver.with_hooks(hooks.clone(), context);
     }
     driver
 }

@@ -21,10 +21,19 @@ use frontend_fabro::Fabro;
 
 pub mod runs;
 
-/// The one non-`unsupported.*` code that is a specific rejection: the
-/// diagnostic names the attribute and, when there is one, the attribute
-/// the author meant.
-const UNKNOWN_ATTRIBUTE: &str = "attractor.unknown_attribute";
+/// The non-`unsupported.*` codes that are specific rejections. The first
+/// names the attribute and, when there is one, the attribute the author
+/// meant. The rest are the errors of Fabro's own validator, ported into the
+/// lowering (`crates/attractor/LINTS.md`): Fabro refuses the same file for
+/// the same reason, so the rejection is the expected one.
+const SPECIFIC_REJECTIONS: &[&str] = &[
+    "attractor.unknown_attribute",
+    "attractor.all_conditional_edges",
+    "attractor.script_prompt_conflict",
+    "attractor.for_each.not_parallel",
+    "attractor.acp_requires_command",
+    "attractor.acp_api_only_attributes",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Class {
@@ -32,8 +41,8 @@ pub enum Class {
     Clean,
     /// Lowered; warnings only.
     Warnings,
-    /// Rejected, and every error is a specific code: `unsupported.*` or
-    /// `attractor.unknown_attribute`.
+    /// Rejected, and every error is a specific code: `unsupported.*` or one
+    /// of [`SPECIFIC_REJECTIONS`].
     Unsupported,
     /// Rejected with at least one error that is not a specific code.
     OtherError,
@@ -190,11 +199,9 @@ pub fn lower_one(root: &Path, file: &str) -> (Outcome, Option<Artifact>) {
                 } else {
                     Class::Warnings
                 }
-            } else if diagnostics
-                .iter()
-                .filter(|d| d.is_error())
-                .all(|d| d.unsupported_feature().is_some() || d.code == UNKNOWN_ATTRIBUTE)
-            {
+            } else if diagnostics.iter().filter(|d| d.is_error()).all(|d| {
+                d.unsupported_feature().is_some() || SPECIFIC_REJECTIONS.contains(&d.code.as_str())
+            }) {
                 Class::Unsupported
             } else {
                 Class::OtherError
@@ -249,7 +256,8 @@ pub fn report(outcomes: &[Outcome], pin: &str) -> String {
         ("lowered clean", Class::Clean),
         ("lowered with warnings", Class::Warnings),
         (
-            "rejected with a specific code (`unsupported.*`, `attractor.unknown_attribute`)",
+            "rejected with a specific code (`unsupported.*`, `attractor.unknown_attribute`, a \
+             Fabro validator rule)",
             Class::Unsupported,
         ),
         ("**failed for any other reason**", Class::OtherError),

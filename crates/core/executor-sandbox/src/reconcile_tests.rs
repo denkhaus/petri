@@ -21,8 +21,8 @@ use tokio::time::{sleep, timeout};
 
 use crate::lease::{LeaseRequest, RecordedLease};
 use crate::{
-    FixedProvider, LeaseLedger, LeaseRecord, LeaseState, LedgerError, MemoryLedger, PendingIntent,
-    RunIdentity, SandboxLeaseManager,
+    FixedProvider, LeaseLedger, LeaseRecord, LeaseState, LedgerError, LostSandbox, MemoryLedger,
+    PendingIntent, RunIdentity, SandboxLeaseManager,
 };
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -538,4 +538,55 @@ async fn a_lost_create_is_adopted_and_fenced_at_reconciliation() {
         .expect("acquires the adopted sandbox");
     assert_eq!(again, lost[0]);
     assert_eq!(provider.creates.load(Ordering::SeqCst), 1);
+}
+
+/// A recorded sandbox that is gone from the provider fails the acquire by
+/// default; under `LostSandbox::Replace` a fresh one is created under the
+/// lease and recorded live in its place.
+#[tokio::test]
+async fn a_lost_sandbox_is_refused_by_default_and_replaced_on_request() {
+    let dir = RunDir::new("reconcile-lost-sandbox");
+    let provider = ScriptedProvider::new();
+    let ledger: Arc<MemoryLedger> = Arc::new(MemoryLedger::default());
+    let manager = build_manager(&dir, &provider, ledger.clone());
+    let first = acquire(&manager).await.expect("the first acquire creates");
+    manager.release_holder(LEASE).await;
+    drop(manager);
+
+    // The sandbox disappears behind Petri's back: a prune, a daemon reset.
+    provider
+        .delete(&first, None)
+        .await
+        .expect("the provider forgets the sandbox");
+    assert!(provider.ids().is_empty());
+
+    let refusing = build_manager(&dir, &provider, ledger.clone());
+    let error = acquire(&refusing)
+        .await
+        .expect_err("a lost workspace is not replaced silently");
+    assert!(error.contains("will not replace it silently"), "{error}");
+    assert_eq!(provider.creates.load(Ordering::SeqCst), 1);
+    drop(refusing);
+
+    let replacing = Arc::new(
+        SandboxLeaseManager::new(
+            Arc::new(FixedProvider::new(provider.clone())),
+            ledger.clone(),
+            Arc::new(RunIdentity::new(dir.path().to_path_buf(), dir.run_id())),
+        )
+        .with_lost_sandbox(LostSandbox::Replace),
+    );
+    let second = acquire(&replacing)
+        .await
+        .expect("a fresh sandbox is created");
+    assert_ne!(second, first);
+    assert_eq!(provider.creates.load(Ordering::SeqCst), 2);
+    assert_eq!(provider.ids(), vec![second.clone()]);
+    let record = ledger
+        .lookup(LEASE)
+        .await
+        .expect("the ledger reads")
+        .expect("the lease is recorded");
+    assert_eq!(record.state, LeaseState::Live);
+    assert_eq!(record.resource_id.as_deref(), Some(second.as_str()));
 }

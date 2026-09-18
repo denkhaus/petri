@@ -43,7 +43,9 @@ use sandbox_driver_daytona_config::{
 use sandbox_driver_docker_config::{DockerProviderConfig, Health, RegistryAuth, Sidecar};
 use smol_str::SmolStr;
 
-pub use crate::backend::{DaytonaResources, DaytonaSandboxKind, SandboxBackend, SandboxOptions};
+pub use crate::backend::{
+    DaytonaResources, DaytonaSandboxKind, LostSandbox, SandboxBackend, SandboxOptions,
+};
 use crate::env::{OneShotRunner, SandboxEnv};
 pub use crate::host::HostExecutor;
 pub use crate::lease::{
@@ -102,7 +104,10 @@ impl SandboxExecutor {
         options: SandboxOptions,
     ) -> Self {
         Self {
-            manager: Arc::new(SandboxLeaseManager::new(source, ledger, identity.clone())),
+            manager: Arc::new(
+                SandboxLeaseManager::new(source, ledger, identity.clone())
+                    .with_lost_sandbox(options.lost_sandbox),
+            ),
             identity,
             retention,
             host_address,

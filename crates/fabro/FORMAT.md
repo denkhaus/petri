@@ -32,6 +32,7 @@ names a setting and cannot be read is an error, never a silent skip.
 
 | Fabro | At load |
 |---|---|
+| `[workflow]` `name`, `description`, `graph`, `metadata`, `engine` | accepted and read by nothing: `engine = "petri"` or `"legacy"` is the key Fabro reads to choose the engine, and Petri is the engine, so the value is not inspected. Any other `[workflow]` key is `unsupported.workflow_toml.key`, as Fabro's parser refuses it |
 | `[run.inputs]` in `workflow.toml` beside the file | input defaults, under the host's `--input` / `--inputs-file` |
 | `[run] goal` (text or `{ file }`) | the run goal when the graph sets no `goal` (the graph attribute wins, as in Fabro) |
 | `[run.model]` `provider`, `name`, `controls.reasoning_effort`, `controls.speed` | the model, provider, reasoning effort and speed an agent or prompt node gets when neither it nor the graph (`default_model`, `default_provider`) names one. Below every file layer sits the launch: `petri run --model`, `--provider` (bound as the `petri.launch_model` and `petri.launch_provider` compile variables) fill the name and provider nothing else set, and a provider alone runs its default model from the runner's catalog, as `fabro run --provider` does. The pinned Fabro puts its launch layer above `workflow.toml`; Petri keeps the file layers in charge and uses the launch only as the last default |

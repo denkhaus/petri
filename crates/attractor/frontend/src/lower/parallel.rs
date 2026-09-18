@@ -52,7 +52,7 @@ use ir::{
 use serde_json::{Map, Value, json};
 use smol_str::SmolStr;
 
-use super::{Ctx, Kind, MAX_FOR_EACH_ITEMS, Resolved, placeholder};
+use super::{Ctx, Kind, MAX_FOR_EACH_ITEMS, Resolved, attrs, placeholder, threads};
 use crate::kinds::{
     AGENT_KIND, BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_NODES_KEY, FAN_IN_KIND, FORK_KIND,
     FORK_NODES_FIELD, FORK_OCCURRENCE_FIELD, FORK_SNAPSHOT_FIELD, PROMPT_KIND,
@@ -172,6 +172,15 @@ impl Ctx<'_> {
     ) -> Option<(String, BTreeSet<String>)> {
         let edges = workflow.outgoing(&node.id);
         for edge in &edges {
+            // The routing pass skips a parallel node's edges, so they are
+            // checked here.
+            self.unknown_attrs(
+                &edge.attrs,
+                attrs::EDGE,
+                &[],
+                &format!("edge `{} -> {}`", edge.from, edge.to),
+            );
+            threads::check_fork_edge(edge, &mut self.diags);
             if edge
                 .attrs
                 .text("condition")

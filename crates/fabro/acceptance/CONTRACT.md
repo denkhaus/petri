@@ -233,11 +233,11 @@ diagnostic goes away.
 | Section and options | Effect in Fabro | Petri disposition today |
 |---|---|---|
 | `_version` (`1`) | schema version | supported: any other value is `unsupported.workflow_toml.version`; the legacy `version` key is `unsupported.workflow_toml.key` |
-| `[workflow]` `name`, `description`, `graph`, `metadata` | `graph` names the entry point | supported: `graph` selects the file; the rest is metadata |
+| `[workflow]` `name`, `description`, `graph`, `metadata`, `engine` | `graph` names the entry point; `engine` (`"petri"` or `"legacy"`) picks the engine Fabro runs the workflow on | supported: `graph` selects the file; `engine` is not inspected, Petri is the engine; the rest is metadata. Any other `[workflow]` key is `unsupported.workflow_toml.key` |
 | `[run]` `goal` (string or `{file}`), `working_dir`, `metadata` | goal text, local cwd | `goal`: supported, the run goal when the graph sets none (the graph attribute wins, as in Fabro); `working_dir`, `metadata`: warn (platform-only) |
 | `[run.inputs]` | `{{ inputs.* }}` defaults | supported |
 | `[run.model]` `provider`, `name`, `controls.reasoning_effort`, `controls.speed` | default model and request controls | supported: the defaults an LLM node gets below the graph's `default_model` / `default_provider`; `controls.speed` is the default `speed` |
-| `[run.model.fallbacks]` `"<model>" = [ "provider:model", ... ]` | model fallback chain | supported: chains keyed by the canonical requested model, resolved against the runner's catalog and available providers with Fabro's notices, reasoning effort mapped per target (`NoNearbyReasoningLevel`, `ChainEmpty`); a provider-local model error (`lithos-llm`'s `failover_eligible`, the rule Pebble applies) moves a native agent or prompt stage to the next target, the conversation kept; on an agent node Pebble runs the chain from the plan's routes and Petri mirrors its events; see "Model fallback" in `crates/attractor/FORMAT.md`. Used by code-review and security-review |
+| `[run.model.fallbacks]` `"<model>" = [ "provider:model", ... ]` | model fallback chain | supported: chains keyed by the canonical requested model, resolved against the runner's catalog and available providers with Fabro's notices, reasoning effort mapped per target (`NoNearbyReasoningLevel`, `ChainEmpty`); resolved at `Runtime::check` when the runner has a model client and frozen on the node's config as its plan, as Fabro pins models at run creation (a table the catalog cannot resolve rejects the workflow at load); a provider-local model error (`lithos-llm`'s `failover_eligible`, the rule Pebble applies) moves a native agent or prompt stage to the next target, the conversation kept; on an agent node Pebble runs the chain from the plan's routes and Petri mirrors its events; see "Model resolution at admission" and "Model fallback" in `crates/attractor/FORMAT.md`. Used by code-review and security-review |
 | `[run.prepare]` `steps[].script`/`command`/`env`, `timeout` (default 5m) | runs before the first node | supported: lowered as command nodes `run_prepare_N` between `start` and its successors, in the selected environment, with the step `env`, the section `timeout` and `on_failure="exit"`; exactly one of `script`/`command` per step (else `unsupported.workflow_toml.run.prepare`) |
 | `[run.execution]` `mode` (`normal`, `dry_run`), `approval` (`prompt`, `auto`) | dry run and auto approve | supported as launch defaults (`Graph.params["fabro.launch"]`, read by the CLI); `--dry-run`, `--auto-approve`, `--interactive`, `--interview-script` win |
 | `[run.environment]` `id`, `image`, `resources`, `network`, `lifecycle`, `labels`, `env` and `[environments.<id>]` `provider` (`local`, `docker`, `daytona`), `image.docker`, `image.dockerfile` (inline or `{path}`), `resources`, `network`, `lifecycle`, `labels`, `env` | sandbox selection | supported: `provider` selects the backend when `--backend` is absent (`local` host, `docker` Docker plugin, `daytona` Daytona plugin); `image.docker` is the scope's container image; `env` is the scope environment, with `{{ secrets.NAME }}` a `$secret` reference resolved at spawn from `PETRI_SECRET_NAME` (a missing secret fails the command `secret_unavailable`); `resources` size a Daytona runner. An unknown `id` or provider is an error. `cwd`, `network`, `lifecycle`, `labels`, `image.dockerfile` warn `ignored.workflow_toml.environments.<id>.<key>` (platform-only; the runner builds no image) |
@@ -350,9 +350,15 @@ stage the tree's usage, Petri reports the children's beside the parent's.
 Retired 2026-09-13: **model fallback configuration errors**. A
 `[run.model.fallbacks]` table the catalog cannot resolve failed the first
 LLM stage with class `bad_config`; it now fails the run at its `start`
-stage, before anything runs, as Fabro's server refuses it at run start
-(`fabro_fallback_blackbox::a_bad_fallback_table_fails_the_run_at_start`).
-The `fallback-resolution` record keeps its two remaining differences.
+stage, before anything runs, as Fabro's server refuses it at run start.
+Since 2026-09-17 the shipped runner refuses it earlier still: with a model
+client, `Runtime::check` resolves every model and chain at admission, so
+the workflow is rejected when it is loaded (`attractor.model.fallbacks`,
+`attractor.model.unknown`) and no run directory is written
+(`fabro_fallback_blackbox::a_bad_fallback_table_is_refused_at_load`,
+`an_unknown_provider_is_refused_at_load`); the `start` stage check remains
+for a graph admitted without a client. The `fallback-resolution` record
+keeps its two remaining differences.
 
 Retired with review finding G05: **promotion after retries**. The last
 retryable failure was converted by the engine's exhaustion policy before any

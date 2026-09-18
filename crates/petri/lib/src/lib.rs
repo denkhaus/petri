@@ -46,8 +46,8 @@ use lithos_llm::credentials::{ConventionalCredentials, CredentialProvider};
 use lithos_llm::middleware::{RetryMiddleware, RetryPolicy};
 use pebble_coding_agent::events::RetryEventObserver;
 pub use runtime::{
-    DaytonaResources, DaytonaSandboxKind, RunOptions, Runtime, SandboxBackend, SandboxOptions,
-    driver, engine, ir,
+    DaytonaResources, DaytonaSandboxKind, LostSandbox, RunOptions, Runtime, SandboxBackend,
+    SandboxOptions, driver, engine, ir,
 };
 
 /// The executor interface, with the sandbox-driver adapter as a submodule.

@@ -11,6 +11,7 @@ mod attrs;
 mod compaction;
 pub mod fallbacks;
 mod imports;
+mod lints;
 mod parallel;
 pub(crate) mod policy;
 mod promotion;
@@ -200,6 +201,9 @@ struct Ctx<'a> {
     /// The absolute repository root the host bound (`petri.repository`),
     /// the source of the run's checkout.
     repository:       Option<String>,
+    /// The `(node, property)` pairs the model stylesheet wrote, which are
+    /// not the node's own attributes.
+    styled:           HashSet<(String, String)>,
 }
 
 /// Lower a semantic workflow. `file` is the name spans carry; `files` reads
@@ -267,6 +271,7 @@ fn lower_nested(
         prepare_envs: BTreeMap::new(),
         workflow_name: workflow.name.clone(),
         repository,
+        styled: HashSet::new(),
     };
     ctx.stack.push(file.to_string());
 
@@ -467,7 +472,11 @@ impl Ctx<'_> {
             {
                 continue;
             }
-            let hint = if key.starts_with("tool_hooks.") {
+            let hint = if key == "join_policy" {
+                // Fabro's `join_policy_removed` rule: the attribute is gone
+                // from the dialect.
+                "remove `join_policy`: a parallel node always waits for every branch".to_string()
+            } else if key.starts_with("tool_hooks.") {
                 "tool hooks are configured through `[[run.hooks]]` in workflow.toml \
                  (`pre_tool_use`, `post_tool_use`), never on a node"
                     .to_string()
@@ -666,7 +675,10 @@ impl Ctx<'_> {
                 self.render_text(&sheet, &sheet_span, "the `model_stylesheet`", false)
             {
                 match stylesheet::parse(&rendered) {
-                    Ok(sheet) => stylesheet::apply(&sheet, workflow, &sheet_span, &mut self.diags),
+                    Ok(sheet) => {
+                        self.styled =
+                            stylesheet::apply(&sheet, workflow, &sheet_span, &mut self.diags);
+                    }
                     Err(error) => self.diags.error(
                         "attractor.stylesheet.syntax",
                         sheet_span,
@@ -679,6 +691,8 @@ impl Ctx<'_> {
             self.check_policy(key, &attrs, &span);
         }
         threads::check_graph(workflow, &mut self.diags);
+        lints::rankdir(&attrs, &span, &mut self.diags);
+        lints::retry_targets(&attrs, &span, workflow, "the graph", &mut self.diags);
     }
 
     /// Diagnose one failure-policy attribute: an unknown spelling is an
@@ -900,6 +914,16 @@ impl Ctx<'_> {
         for key in ["on_failure", "on_retries_exhausted"] {
             self.check_policy(key, &node.attrs, &node.span);
         }
+        lints::reserved_keyword_node_id(node, &mut self.diags);
+        lints::inert_attributes(node, kind, &mut self.diags);
+        lints::for_each_requires_parallel(node, kind, &mut self.diags);
+        lints::retry_targets(
+            &node.attrs,
+            &node.span,
+            workflow,
+            &format!("node `{}`", node.id),
+            &mut self.diags,
+        );
         let policy = FailurePolicy::of(node, workflow, &mut self.diags);
         let explicit = self.explicit_timeout(node);
 
@@ -1143,11 +1167,16 @@ impl Ctx<'_> {
             config.insert("prompt".into(), Value::String(prompt));
         }
         let is_prompt = kind != Kind::Agent;
-        if let Some(backend) = node
+        let backend = node
             .attrs
             .text("backend")
-            .or_else(|| workflow.attrs.text("backend"))
-        {
+            .or_else(|| workflow.attrs.text("backend"));
+        // Fabro's `backend_valid`: an ACP agent reads no API-only attribute.
+        let acp_backend = !is_prompt && backend.as_deref() == Some("acp");
+        if acp_backend {
+            lints::acp_api_only_attributes(node, &self.styled, &mut self.diags);
+        }
+        if let Some(backend) = backend {
             if !matches!(backend.as_str(), "acp" | "api") {
                 self.diags.error(
                     "attractor.bad_backend",
@@ -1247,7 +1276,7 @@ impl Ctx<'_> {
                 );
             }
         } else {
-            self.acp(node, workflow, &mut config);
+            self.acp(node, workflow, &mut config, acp_backend);
         }
         let nodes = self.b.exprs().var("nodes");
         config.insert("nodes".into(), placeholder(nodes));
@@ -1285,7 +1314,15 @@ impl Ctx<'_> {
         }
     }
 
-    fn acp(&mut self, node: &NodeDecl, workflow: &Workflow, config: &mut Map<String, Value>) {
+    /// The node's ACP agent, from the node or the graph. `acp_backend` says
+    /// the node runs on `backend="acp"`, where naming no agent is an error.
+    fn acp(
+        &mut self,
+        node: &NodeDecl,
+        workflow: &Workflow,
+        config: &mut Map<String, Value>,
+        acp_backend: bool,
+    ) {
         let command = node
             .attrs
             .text("acp.command")
@@ -1316,6 +1353,7 @@ impl Ctx<'_> {
                     format!("`acp.config` is not JSON: {error}"),
                 ),
             },
+            (None, None) if acp_backend => lints::acp_requires_command(node, &mut self.diags),
             (None, None) => {}
         }
     }
@@ -1342,6 +1380,7 @@ impl Ctx<'_> {
         config.insert("language".into(), Value::String(language.clone()));
         match node.attrs.text("script") {
             Some(script) if !script.trim().is_empty() => {
+                lints::script_absolute_cd(node, &script, &mut self.diags);
                 match template::render_script(&script, &language, &self.template) {
                     Ok(script) => {
                         config.insert("script".into(), Value::String(script));
@@ -1830,6 +1869,7 @@ impl Ctx<'_> {
         if edges.is_empty() {
             return;
         }
+        lints::all_conditional_edges(node, &edges, &mut self.diags);
         let random = match node.attrs.text("selection").as_deref() {
             None => self.random,
             Some("random") => true,

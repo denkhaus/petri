@@ -7,6 +7,11 @@
 //! 1. [`ExecutionHooks::before_attempt`], before every attempt is dispatched
 //!    (retries included). A paused firing keeps its identity, starts no
 //!    attempt, and a cancel settles it as `Cancelled`.
+//!    [`ExecutionHooks::scope_acquired`] runs once per acquisition of a scope's
+//!    environment, after the executor acquired it and before the first attempt
+//!    in it is dispatched, with the environment itself: where a host prepares
+//!    the workspace (restores it onto a snapshot after a crash, say) before any
+//!    work runs in it.
 //! 2. The attempt runs; the step's own result policy applies inside the step (a
 //!    Fabro stage finalizes an exhausted retry there, explicit routes first),
 //!    and the driver applies the node's exhaustion policy
@@ -48,14 +53,27 @@
 //! re-dispatches an attempt whose finish never landed; a callback may
 //! therefore run twice for one operation across a crash, and a host that
 //! performs external effects deduplicates on the operation identity.
+//!
+//! # Context
+//!
+//! Every callback receives a [`HookContext`] beside its request: the run
+//! key, the invocation, the execution, and the parent call when the
+//! execution is a child. One hooks object serves every execution of a run,
+//! so the context is what tells a child's callback apart from its sibling's
+//! when both carry the same local firing and attempt ids. The operation
+//! identity a host deduplicates an external effect on is `(run key,
+//! execution, `DecisionId`, effect kind)`.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 
 use engine::{Admission, DecisionId, GroupDecision, RouteDecision};
-use ir::{Attempt, EdgeId, Outcome, Status, StepEvent, Value};
+use executor::{ExecEnv, WorkspaceId};
+use ir::{Attempt, EdgeId, ExecutionId, FiringId, InvocationId, Outcome, Status, StepEvent, Value};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
+use store::RunKey;
 
 use crate::view::FiringView;
 
@@ -156,6 +174,56 @@ pub struct TransitionNote {
     pub overrides: Vec<RouteOverride>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked:   Option<String>,
+}
+
+/// The firing that called a nested invocation: where a child execution's
+/// context points back to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentLink {
+    /// The calling execution.
+    pub execution: ExecutionId,
+    pub firing:    FiringId,
+    pub attempt:   Attempt,
+    /// The call slot the calling step named.
+    pub slot:      SmolStr,
+}
+
+/// Which execution a callback belongs to. The driver hands the same
+/// [`ExecutionHooks`] object every execution of a run, and hands this beside
+/// every request so the host can tell them apart: two child invocations of
+/// one workflow reuse the same local firing and attempt ids, and only the
+/// execution differs.
+///
+/// A host that performs an external effect from a callback keys it on
+/// `(run_key, execution, DecisionId, effect kind)` and deduplicates on that
+/// key: a resume reissues a pending decision under the same `DecisionId` in
+/// the same execution, so the key is stable across a crash.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookContext {
+    /// The run's identity in its store.
+    pub run_key:    RunKey,
+    pub invocation: InvocationId,
+    pub execution:  ExecutionId,
+    /// The call that started this invocation; `None` for the root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent:     Option<ParentLink>,
+}
+
+impl HookContext {
+    pub fn new(run_key: RunKey, invocation: InvocationId, execution: ExecutionId) -> Self {
+        Self {
+            run_key,
+            invocation,
+            execution,
+            parent: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_parent(mut self, parent: ParentLink) -> Self {
+        self.parent = Some(parent);
+        self
+    }
 }
 
 /// The awaited admission of one attempt.
@@ -323,6 +391,48 @@ pub struct ScopeReleased {
     pub outcome: executor::ScopeOutcome,
 }
 
+/// A scope's environment was acquired and no attempt has run in it yet.
+///
+/// The environment is the one the scope's steps will receive: a host runs a
+/// process in it and reads or writes its workspace's files through it, on
+/// this machine and in a remote sandbox alike. The handle is this
+/// execution's own; an inherited sandbox is acquired by each execution that
+/// runs in it, and each is told.
+#[derive(Clone)]
+pub struct ScopeAcquired {
+    pub scope:     ir::ScopeId,
+    /// The workspace the environment holds, as the executor named it: the
+    /// lease's workspace when a coordinator allocated one.
+    pub workspace: WorkspaceId,
+    pub env:       Arc<dyn ExecEnv>,
+}
+
+impl fmt::Debug for ScopeAcquired {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScopeAcquired")
+            .field("scope", &self.scope)
+            .field("workspace", &self.workspace)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The host could not prepare a scope's environment. The acquisition fails
+/// with this message: every firing in the scope fails, routably, as it
+/// would had the executor refused the scope.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct ScopeAcquiredError {
+    pub message: String,
+}
+
+impl ScopeAcquiredError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
 /// A final outcome has been recorded and routing is about to be asked for.
 pub struct Recorded {
     pub view:    Arc<FiringView>,
@@ -381,14 +491,19 @@ impl TransitionError {
 /// on the driver loop. They see an immutable [`FiringView`] and change the
 /// run only through their return values. A callback that never returns holds
 /// its firing open; a root kill aborts pending callbacks and records the
-/// original results.
+/// original results. Every callback receives the [`HookContext`] of the
+/// execution it belongs to; a wrapper forwards it unchanged.
 #[async_trait::async_trait]
 pub trait ExecutionHooks: Send + Sync {
     /// Before an attempt is dispatched, once per attempt. The view carries
     /// the resolved config. Returning `Skip` or `Block` ends the visit without
     /// an attempt; `Admit` hands on to the decision resolver.
-    async fn before_attempt(&self, request: AdmitAttempt) -> AttemptDecision {
-        let _ = request;
+    async fn before_attempt(
+        &self,
+        context: &HookContext,
+        request: AdmitAttempt,
+    ) -> AttemptDecision {
+        let _ = (context, request);
         AttemptDecision::admit()
     }
 
@@ -396,15 +511,19 @@ pub trait ExecutionHooks: Send + Sync {
     /// node's exhaustion policy applied, and before its record is appended.
     /// Once per attempt; the one with `will_retry == false` is the final
     /// completion, and what it returns is what routing sees.
-    async fn prepare_result(&self, request: PrepareResult) -> Result<Prepared, PrepareError> {
-        let _ = request;
+    async fn prepare_result(
+        &self,
+        context: &HookContext,
+        request: PrepareResult,
+    ) -> Result<Prepared, PrepareError> {
+        let _ = (context, request);
         Ok(Prepared::unchanged())
     }
 
     /// After a final outcome is recorded, before routing is resolved. Notes
     /// returned here are appended before the `RoutingResolved` record.
-    async fn after_record(&self, recorded: Recorded) -> Vec<Note> {
-        let _ = recorded;
+    async fn after_record(&self, context: &HookContext, recorded: Recorded) -> Vec<Note> {
+        let _ = (context, recorded);
         Vec::new()
     }
 
@@ -412,9 +531,10 @@ pub trait ExecutionHooks: Send + Sync {
     /// once per completed firing, no-route completions included.
     async fn transition(
         &self,
+        context: &HookContext,
         transition: Transition,
     ) -> Result<TransitionReport, TransitionError> {
-        let _ = transition;
+        let _ = (context, transition);
         Ok(TransitionReport::default())
     }
 
@@ -423,16 +543,30 @@ pub trait ExecutionHooks: Send + Sync {
     /// The notes come back to the driver, which hands them to its host in
     /// the [`ExecutionReport`](crate::ExecutionReport) (`run_notes`); a
     /// coordinator records them at run level, since no firing owns them.
-    async fn run_finished(&self, finished: RunFinished) -> Vec<Note> {
-        let _ = finished;
+    async fn run_finished(&self, context: &HookContext, finished: RunFinished) -> Vec<Note> {
+        let _ = (context, finished);
         Vec::new()
     }
 
     /// A scope's environment is about to be released. Awaited: the release
     /// waits for it. Notes travel as for [`Self::run_finished`].
-    async fn scope_released(&self, released: ScopeReleased) -> Vec<Note> {
-        let _ = released;
+    async fn scope_released(&self, context: &HookContext, released: ScopeReleased) -> Vec<Note> {
+        let _ = (context, released);
         Vec::new()
+    }
+
+    /// A scope's environment was acquired and no attempt has run in it yet.
+    /// Awaited: the first attempt in the scope waits for it. Runs on every
+    /// acquisition, a resumed execution's and an inherited sandbox's
+    /// included. An error fails the acquisition: every firing in the scope
+    /// fails, routably, with the message.
+    async fn scope_acquired(
+        &self,
+        context: &HookContext,
+        acquired: ScopeAcquired,
+    ) -> Result<(), ScopeAcquiredError> {
+        let _ = (context, acquired);
+        Ok(())
     }
 }
 

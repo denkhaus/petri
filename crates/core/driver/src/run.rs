@@ -36,9 +36,10 @@ use tracing::Instrument as _;
 use crate::jitter::jittered;
 use crate::lifecycle::{
     AdmitAttempt, AttemptDecision, BUDGET_PAUSED_KIND, BUDGET_RESUMED_KIND, BudgetNote,
-    ExecutionHooks, Note, PrepareError, PrepareResult, Prepared, RESULT_PREPARATION_CLASS,
-    RESULT_PREPARED_KIND, Recorded, ResultOrigin, ResultPreparedNote, RunFinished, ScopeReleased,
-    TRANSITION_KIND, Transition, TransitionNote, apply_transition,
+    ExecutionHooks, HookContext, Note, PrepareError, PrepareResult, Prepared,
+    RESULT_PREPARATION_CLASS, RESULT_PREPARED_KIND, Recorded, ResultOrigin, ResultPreparedNote,
+    RunFinished, ScopeAcquired, ScopeReleased, TRANSITION_KIND, Transition, TransitionNote,
+    apply_transition,
 };
 use crate::observe::{EventObserver, ObserveError, recorded_now};
 use crate::sink::LogSink;
@@ -642,8 +643,9 @@ pub struct Driver {
     /// One id per attempt-timer arming, so a stale expiry is recognizable.
     next_timer_id:    u64,
     decision_tasks:   HashMap<DecisionId, AbortHandle>,
-    /// The host's awaited extension points, when installed.
-    hooks:            Option<Arc<dyn ExecutionHooks>>,
+    /// The host's awaited extension points, when installed, with the
+    /// execution they are told about.
+    hooks:            Option<InstalledHooks>,
     /// Branch roles over the live graph, for the views hooks see. Recomputed
     /// when a splice grows the graph.
     branches:         BranchMap,
@@ -660,6 +662,14 @@ pub struct Driver {
     /// drained by the run loop and after all acquires have been joined.
     abandoned_tx:     mpsc::UnboundedSender<EnvHandle>,
     abandoned_rx:     mpsc::UnboundedReceiver<EnvHandle>,
+}
+
+/// The host's hooks and the execution they are told about. Cloned into each
+/// callback's task.
+#[derive(Clone)]
+struct InstalledHooks {
+    host:    Arc<dyn ExecutionHooks>,
+    context: Arc<HookContext>,
 }
 
 impl Drop for Driver {
@@ -926,12 +936,17 @@ impl Driver {
         self
     }
 
-    /// Install the host's awaited extension points (`lifecycle`). Without
-    /// them the driver takes the unchanged fast path: no callback, no extra
+    /// Install the host's awaited extension points (`lifecycle`), and the
+    /// context every callback receives: which run, invocation and execution
+    /// this driver runs, and the parent call when it is a child. Without
+    /// hooks the driver takes the unchanged fast path: no callback, no extra
     /// task, no extra record.
     #[must_use]
-    pub fn with_hooks(mut self, hooks: Arc<dyn ExecutionHooks>) -> Self {
-        self.hooks = Some(hooks);
+    pub fn with_hooks(mut self, hooks: Arc<dyn ExecutionHooks>, context: HookContext) -> Self {
+        self.hooks = Some(InstalledHooks {
+            host:    hooks,
+            context: Arc::new(context),
+        });
         self
     }
 
@@ -1308,7 +1323,7 @@ impl Driver {
         };
         let tx = self.tx.clone();
         let task = self.background.spawn(async move {
-            let decision = hooks.before_attempt(request).await;
+            let decision = hooks.host.before_attempt(&hooks.context, request).await;
             let _ = tx
                 .send(Signal::HookAdmitted {
                     decision_id,
@@ -1370,7 +1385,7 @@ impl Driver {
         };
         let tx = self.tx.clone();
         let task = self.background.spawn(async move {
-            let result = hooks.prepare_result(request).await;
+            let result = hooks.host.prepare_result(&hooks.context, request).await;
             let _ = tx
                 .send(Signal::ResultPrepared {
                     firing,
@@ -1487,7 +1502,8 @@ impl Driver {
         let tx = self.tx.clone();
         let task = self.background.spawn(async move {
             let mut notes = hooks
-                .after_record(Recorded {
+                .host
+                .after_record(&hooks.context, Recorded {
                     view:    view.clone(),
                     outcome: outcome.clone(),
                 })
@@ -1503,7 +1519,8 @@ impl Driver {
             let mut groups = resolution.groups;
             let attempt = view.attempt;
             let report = hooks
-                .transition(Transition {
+                .host
+                .transition(&hooks.context, Transition {
                     decision: decision_id,
                     view,
                     outcome,
@@ -2048,6 +2065,7 @@ impl Driver {
                     && declared.runtime.target != inherited.target
             });
         let executor = self.executor.clone();
+        let hooks = self.hooks.clone();
         let abandoned = self.abandoned_tx.clone();
         let tx = self.tx.clone();
         let id = self.next_acquire_id;
@@ -2080,10 +2098,31 @@ impl Driver {
                         spec.workspace_id = assignment.workspace;
                     }
                 }
-                executor
-                    .acquire(&spec, &ctx)
-                    .await
-                    .map(|handle| AcquiredScope::new(handle, abandoned))
+                let handle = executor.acquire(&spec, &ctx).await?;
+                // The guard first: a host that refuses the environment
+                // hands it back through the abandoned queue for release.
+                let acquired = AcquiredScope::new(handle, abandoned);
+                if let Some(hooks) = hooks {
+                    let env = acquired
+                        .handle
+                        .as_ref()
+                        .expect("an acquired scope holds its environment until transferred")
+                        .exec();
+                    hooks
+                        .host
+                        .scope_acquired(&hooks.context, ScopeAcquired {
+                            scope,
+                            workspace: spec.workspace_id.clone(),
+                            env,
+                        })
+                        .await
+                        .map_err(|error| EnvError::Backend {
+                            backend:   SmolStr::new("host"),
+                            operation: SmolStr::new("scope_acquired"),
+                            message:   error.message,
+                        })?;
+                }
+                Ok(acquired)
             }
             .await
             // The deliberate render point: the failure becomes
@@ -2164,7 +2203,10 @@ impl Driver {
                         }
                     }
                 }
-                notes = hooks.scope_released(ScopeReleased { scope, outcome }).await;
+                notes = hooks
+                    .host
+                    .scope_released(&hooks.context, ScopeReleased { scope, outcome })
+                    .await;
             }
             (executor.release(handle, outcome).await, notes)
         }));
@@ -2191,7 +2233,10 @@ impl Driver {
             .rev()
             .find_map(|record| record.outcome.status.failure_info())
             .map(|info| info.message.clone());
-        hooks.run_finished(RunFinished { status, failure }).await
+        hooks
+            .host
+            .run_finished(&hooks.context, RunFinished { status, failure })
+            .await
     }
 
     /// Stop unfinished acquires, then collect any successful result that raced
