@@ -145,17 +145,20 @@ impl FailurePolicy {
 
 /// One outgoing edge, lowered as far as routing needs.
 pub(super) struct OutEdge {
-    pub to:        NodeId,
-    pub target:    String,
-    pub condition: Option<ExprId>,
-    pub label:     Option<String>,
+    pub to:             NodeId,
+    pub target:         String,
+    pub condition:      Option<ExprId>,
+    /// The `condition` as written, for the node's `meta.edges` entry: what
+    /// a host shows for the edge a routing decision selected.
+    pub condition_text: Option<String>,
+    pub label:          Option<String>,
     /// The static key a preferred label is compared against.
-    pub label_key: Option<String>,
+    pub label_key:      Option<String>,
     /// As written: Fabro allows a negative weight to deprioritize an edge.
     /// [`group`] maps a node's weights onto the engine's unsigned ones.
-    pub weight:    i64,
-    pub restart:   bool,
-    pub map:       Option<ExprId>,
+    pub weight:         i64,
+    pub restart:        bool,
+    pub map:            Option<ExprId>,
 }
 
 /// The engine weight of each edge. Order and ties are Fabro's: when a node

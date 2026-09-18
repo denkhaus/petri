@@ -95,7 +95,15 @@ a warning; the importing workflow's stylesheet governs.
 | `circle`, `doublecircle`, other shapes | `attractor/agent`, with an `attractor.unknown_shape` warning | |
 
 Every node's `meta` carries `label`, `shape`, `kind`, `classes`, `span`, and
-`model` / `provider` / `reasoning_effort` when set. Every step config carries
+`model` / `provider` / `reasoning_effort` when set; a command node's `meta`
+also carries `script`, the text the step runs (the same value as its
+config's), and every node with outgoing edges carries `edges`, one entry per
+routing arm keyed by the arm's edge id (the id a `route.applied` record
+names): `{ to, label, condition }`, the target node name, the edge's `label`
+(null without one) and its `condition` as written, trimmed (absent on an
+unconditional edge). A host that shows a stage's script or the condition a
+routing decision matched reads both off `subject.node.meta`
+(`crates/core/execution/EVENTS.md`, "Source metadata"). Every step config carries
 `kv` (the run context at spawn) and `on_failure`; a node whose `on_failure` is
 `succeed` or `partially_succeed` also carries `routes`, its explicit routes
 (condition texts, label keys, unconditional targets) for the promotion check

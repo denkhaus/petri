@@ -8,9 +8,11 @@ use std::time::{Duration, Instant};
 
 use attractor_steps::command::OUTPUT_CAP;
 use attractor_steps::{LocalBlobStore, blobs, register};
+use execution::events::replay_run_dir;
+use execution::host;
 use frontend_attractor::load;
 use runtime::driver::{EventObserver, ExecutionReport, RunHandle};
-use runtime::engine::{EngineState, Event, EventRecord, ReplayMismatch};
+use runtime::engine::{EngineState, Event, EventRecord, ReplayMismatch, RouteApplied};
 use runtime::executor::Retention;
 use runtime::frontend::{CompileInputs, NoFiles};
 use runtime::ir::{CancelScopeId, Graph, RunStatus, TimeoutPolicy};
@@ -149,6 +151,81 @@ async fn large_command_output_is_offloaded_and_reads_back_logically() {
 /// The in-memory cap sits above the offload threshold, so a value the store
 /// takes was never truncated first.
 const _: () = assert!(OUTPUT_CAP > 200_000);
+
+/// A host renders a command stage and its routing decision from the public
+/// stream alone: the script is on the stage's `subject.node.meta.script`,
+/// and the condition the decision matched is the `meta.edges` entry of the
+/// edge `route.applied` names, as written in the workflow.
+#[tokio::test]
+async fn the_public_stream_carries_the_script_and_the_matched_condition() {
+    let graph = lower(&dot(r#"
+        build [shape=parallelogram, script="echo built; exit 0"]
+        ok [shape=parallelogram, script="true"]
+        bad [shape=parallelogram, script="true"]
+        start -> build
+        build -> ok [condition="outcome=succeeded"]
+        build -> bad [label="[F] Failed"]
+        ok -> exit
+        bad -> exit
+    "#));
+    let dir = RunDir::new("fabro-command-meta");
+    let rt = runtime(&dir);
+    let report = host::run(&rt, graph).await.expect("the run completes");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let events = replay_run_dir(dir.path()).await.expect("the run replays");
+    let started = events
+        .iter()
+        .find(|event| {
+            matches!(event.engine(), Some(Event::StepStarted { .. }))
+                && event
+                    .subject
+                    .as_ref()
+                    .is_some_and(|s| s.node.name == "build")
+        })
+        .expect("the command started");
+    let meta = &started.subject.as_ref().expect("a subject").node.meta;
+    assert_eq!(meta["kind"], json!("command"));
+    assert_eq!(meta["script"], json!("echo built; exit 0"));
+    let applied = events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.engine(),
+                Some(Event::RouteApplied {
+                    applied: RouteApplied::Edge { .. },
+                })
+            ) && event
+                .subject
+                .as_ref()
+                .is_some_and(|s| s.node.name == "build")
+        })
+        .expect("the command's route was applied");
+    let Some(Event::RouteApplied {
+        applied: RouteApplied::Edge { edge, .. },
+    }) = applied.engine()
+    else {
+        unreachable!("matched above");
+    };
+    let meta = &applied.subject.as_ref().expect("a subject").node.meta;
+    let entry = &meta["edges"][edge.raw().to_string()];
+    assert_eq!(entry["to"], json!("ok"));
+    assert_eq!(entry["condition"], json!("outcome=succeeded"));
+    // The other arm is there too, without a condition, so a host can show
+    // what was not taken.
+    let other = meta["edges"]
+        .as_object()
+        .expect("the edge table")
+        .values()
+        .find(|entry| entry["to"] == "bad")
+        .expect("the unconditional arm");
+    assert_eq!(other["label"], json!("[F] Failed"));
+    assert!(other.get("condition").is_none());
+}
 
 #[tokio::test]
 async fn a_failing_command_fails_with_its_exit_status_and_routes() {

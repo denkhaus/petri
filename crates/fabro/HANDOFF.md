@@ -85,8 +85,11 @@ subset; the unconfigured path stays the standalone runner.
 - **Stages.** `subject.node` is the node (`id`, instance `name`, step `kind`,
   the frontend's `meta` verbatim: `label`, `shape`, `kind` such as `command`,
   `agent`, `human`, `parallel`, `parallel.branch`, `parallel.fan_in`,
-  `stack.manager_loop`, `classes`, `span`, `synthetic`). A host maps synthetic
-  lowering nodes to the logical stage with `meta`, never with node names.
+  `stack.manager_loop`, `classes`, `span`, `synthetic`; a command node's
+  `script`; `edges`, the routing arms by edge id with each target, label and
+  `condition` as written, which `route.applied` keys into). A host maps
+  synthetic lowering nodes to the logical stage with `meta`, never with node
+  names, and shows a stage's script and a decision's condition from `meta`.
 - **Firings, visits, attempts.** `firing` is the durable identity of one visit
   of a node in one execution; `visit` is its 1-based ordinal among the node's
   firings, `attempt` the 1-based retry within the firing, `generation` the

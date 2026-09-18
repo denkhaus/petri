@@ -1381,17 +1381,21 @@ impl Ctx<'_> {
         match node.attrs.text("script") {
             Some(script) if !script.trim().is_empty() => {
                 lints::script_absolute_cd(node, &script, &mut self.diags);
-                match template::render_script(&script, &language, &self.template) {
-                    Ok(script) => {
-                        config.insert("script".into(), Value::String(script));
-                    }
+                let script = match template::render_script(&script, &language, &self.template) {
+                    Ok(script) => Some(script),
                     Err(error) => {
                         let span = node.attrs.span_of("script", &node.span);
                         let unrendered = self.lenient_unbound && error.is_unbound();
                         self.template_error(&error, &span, &format!("node `{}` `script`", node.id));
-                        if unrendered {
-                            config.insert("script".into(), Value::String(script));
-                        }
+                        unrendered.then_some(script)
+                    }
+                };
+                if let Some(script) = script {
+                    // The text the step runs, on the config for the step and
+                    // on `meta` for a host that shows the stage.
+                    config.insert("script".into(), Value::String(script.clone()));
+                    if let Value::Object(meta) = &mut self.b.node_mut(self.ids[&node.id]).meta {
+                        meta.insert("script".into(), Value::String(script));
                     }
                 }
             }
@@ -1920,6 +1924,11 @@ impl Ctx<'_> {
                 &format!("edge `{} -> {}`", edge.from, edge.to),
             );
             let cond = self.edge_condition(edge, policy);
+            let condition_text = edge
+                .attrs
+                .text("condition")
+                .map(|text| text.trim().to_owned())
+                .filter(|text| !text.is_empty());
             let weight = edge.attrs.int("weight", &mut self.diags).unwrap_or(0);
             let label = edge.attrs.text("label").filter(|l| !l.is_empty());
             let restart = edge
@@ -1938,6 +1947,7 @@ impl Ctx<'_> {
                 to,
                 target: edge.to.clone(),
                 condition: cond,
+                condition_text,
                 label_key: label.as_deref().map(labels::routing_key),
                 label,
                 weight,
@@ -1965,14 +1975,17 @@ impl Ctx<'_> {
             res.kind == Kind::Human,
             random,
         );
-        // The edge table hooks read: arm id to target node id and label, so
-        // an `edge_selected` hook names Fabro nodes, never engine ids.
+        // The edge table hooks and hosts read: arm id to target node id,
+        // label and the condition as written, so an `edge_selected` hook
+        // names Fabro nodes, never engine ids, and a host shows the
+        // condition the `route.applied` edge matched.
         let mut edges = Map::new();
         for (arm, out) in group.arms.iter().zip(&lowered) {
-            edges.insert(
-                arm.id.raw().to_string(),
-                json!({ "to": out.target, "label": out.label }),
-            );
+            let mut entry = json!({ "to": out.target, "label": out.label });
+            if let Some(condition) = &out.condition_text {
+                entry["condition"] = Value::String(condition.clone());
+            }
+            edges.insert(arm.id.raw().to_string(), entry);
         }
         let meta = &mut self.b.node_mut(res.id).meta;
         if let Value::Object(map) = meta {

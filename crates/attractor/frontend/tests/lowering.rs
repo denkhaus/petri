@@ -915,6 +915,37 @@ fn human_gate_choices_carry_the_edges_description_and_preview() {
     );
 }
 
+/// What a host that renders a stage reads off `meta` alone: a command
+/// node's `script` as the step runs it, and for every routing arm the
+/// target, the label and the `condition` as written, keyed by the arm's
+/// edge id, which `route.applied` names.
+#[test]
+fn meta_carries_the_script_and_each_edges_condition_text() {
+    let graph = lower_ok(&dot(r#"
+        build [shape=parallelogram, script="make build\nmake test"]
+        ok [prompt="x"]
+        bad [prompt="x"]
+        start -> build
+        build -> ok [condition="  outcome=succeeded "]
+        build -> bad [label="[F] Failed"]
+        ok -> exit
+        bad -> exit
+    "#));
+    let build = node(&graph, "build");
+    assert_eq!(build.meta["script"], json!("make build\nmake test"));
+    assert_eq!(build.meta["script"], build.step.config["script"]);
+    assert!(node(&graph, "ok").meta.get("script").is_none());
+    let edges = build.meta["edges"].as_object().expect("the edge table");
+    assert_eq!(edges.len(), 2);
+    let arms = &build.routing.groups[0].arms;
+    let entry = |i: usize| &edges[&arms[i].id.raw().to_string()];
+    assert_eq!(
+        entry(0),
+        &json!({ "to": "ok", "label": null, "condition": "outcome=succeeded" })
+    );
+    assert_eq!(entry(1), &json!({ "to": "bad", "label": "[F] Failed" }));
+}
+
 #[test]
 fn stylesheets_write_model_properties_that_explicit_attributes_beat() {
     let graph = lower_ok(&dot(r#"
