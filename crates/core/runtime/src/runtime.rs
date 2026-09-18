@@ -20,7 +20,7 @@ use executor::{
     DEFAULT_GRACE, Executor, MapSecrets, Masker, ProgressSink, Retention, SecretProvider,
 };
 use executor_sandbox::{LeaseLedger, RoutingExecutor, SandboxOptions};
-use frontend::{CompileInputs, DirFiles, Frontend, Lowered, REPOSITORY_VAR, Span};
+use frontend::{CompileInputs, DirFiles, FileSource, Frontend, Lowered, REPOSITORY_VAR, Span};
 use ir::{ExecutionId, Graph, InvocationId};
 use serde_json::Value;
 use smol_str::SmolStr;
@@ -402,6 +402,13 @@ impl Runtime {
     /// Read and lower one file. `Err` is an IO-or-usage problem; a rejected
     /// workflow comes back as `Ok` with diagnostics and no graph.
     ///
+    /// The repository is the directory `repo` names, else the one the
+    /// frontend finds for the file; the frontend reads `@file` references and
+    /// the settings files beside the workflow from it, and the compile
+    /// variable `petri.repository` is bound to its absolute path unless
+    /// `inputs` already binds it. [`Runtime::lower_source`] is the same
+    /// lowering over text the caller holds in memory.
+    ///
     /// The span is the only place that knows which frontend claimed the file;
     /// the frontends themselves stay free of tracing, with diagnostics as their
     /// one output channel.
@@ -423,8 +430,6 @@ impl Runtime {
         inputs: &CompileInputs,
     ) -> Result<Lowered, LoadError> {
         let frontend = self.frontend_for(file, format)?;
-        let span = tracing::Span::current();
-        span.record("frontend", frontend.name());
         let repo = repo.map_or_else(|| frontend.repo_root(file), Path::to_path_buf);
         let text = fs::read_to_string(file).map_err(|e| LoadError::Read {
             path:   file.to_path_buf(),
@@ -453,11 +458,58 @@ impl Runtime {
             );
         }
         let files = DirFiles { root: repo };
-        let lowered = frontend.load(&name, &text, &files, &inputs);
+        Ok(Self::lower_with(frontend, &name, &text, &files, &inputs))
+    }
+
+    /// Lower one workflow the caller holds in memory: [`Runtime::lower`]
+    /// without the disk. `file` is the repository-relative path of the
+    /// workflow, with `/` separators: the frontend is chosen by its
+    /// extension (or by `format`), and every span the lowering reports
+    /// names it. `files` is the repository the frontend reads `@file`
+    /// references and the settings files beside the workflow from
+    /// (`frontend::MapFiles` holds one as a map of paths to text). `inputs`
+    /// is used as given: a host whose runs check a repository out binds
+    /// `petri.repository` itself, the way [`Runtime::lower`] does from the
+    /// repository directory.
+    ///
+    /// # Errors
+    ///
+    /// When `format` names no registered frontend, or no frontend claims
+    /// `file`. A rejected workflow is `Ok` with diagnostics and no graph.
+    #[tracing::instrument(
+        name = "runtime.lower",
+        level = "debug",
+        skip_all,
+        fields(workflow_file = %file, frontend = Empty, node_count = Empty)
+    )]
+    pub fn lower_source(
+        &self,
+        file: &str,
+        text: &str,
+        files: &dyn FileSource,
+        format: Option<&str>,
+        inputs: &CompileInputs,
+    ) -> Result<Lowered, LoadError> {
+        let frontend = self.frontend_for(Path::new(file), format)?;
+        Ok(Self::lower_with(frontend, file, text, files, inputs))
+    }
+
+    /// The lowering both entry points share, recorded on the current
+    /// `runtime.lower` span.
+    fn lower_with(
+        frontend: &dyn Frontend,
+        file: &str,
+        text: &str,
+        files: &dyn FileSource,
+        inputs: &CompileInputs,
+    ) -> Lowered {
+        let span = tracing::Span::current();
+        span.record("frontend", frontend.name());
+        let lowered = frontend.load(file, text, files, inputs);
         if let Some(graph) = &lowered.graph {
             span.record("node_count", graph.nodes.len());
         }
-        Ok(lowered)
+        lowered
     }
 
     /// [`Runtime::lower`], then validate the graph — and every pre-lowered
@@ -476,8 +528,36 @@ impl Runtime {
         inputs: &CompileInputs,
     ) -> Result<Lowered, LoadError> {
         let mut lowered = self.lower(file, format, repo, inputs)?;
-        let file = file.to_string_lossy();
-        let span = Span::file(&file);
+        self.validate_and_admit(&mut lowered, &file.to_string_lossy());
+        Ok(lowered)
+    }
+
+    /// [`Runtime::check`] over a workflow the caller holds in memory:
+    /// [`Runtime::lower_source`], then the same registry validation and
+    /// admission passes. The parameters are those of `lower_source`; a
+    /// registry or admission diagnostic names `file`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Runtime::lower_source`].
+    pub fn check_source(
+        &self,
+        file: &str,
+        text: &str,
+        files: &dyn FileSource,
+        format: Option<&str>,
+        inputs: &CompileInputs,
+    ) -> Result<Lowered, LoadError> {
+        let mut lowered = self.lower_source(file, text, files, format, inputs)?;
+        self.validate_and_admit(&mut lowered, file);
+        Ok(lowered)
+    }
+
+    /// What [`Runtime::check`] adds to lowering: the registry pass over the
+    /// root and the children, then the admission passes. A problem withholds
+    /// the graphs and is reported as an error diagnostic in `file`.
+    fn validate_and_admit(&self, lowered: &mut Lowered, file: &str) {
+        let span = Span::file(file);
         let mut errors = Vec::new();
         if let Some(graph) = &lowered.graph {
             errors.extend(
@@ -503,19 +583,18 @@ impl Runtime {
                     .diagnostics
                     .error(error.code(), span.clone(), error.to_string());
             }
-            return Ok(lowered);
+            return;
         }
-        let problems = self.admit(&mut lowered);
+        let problems = self.admit(lowered);
         if !problems.is_empty() {
             lowered.graph = None;
             lowered.children.clear();
             for (problem, span) in problems {
                 lowered
                     .diagnostics
-                    .error(&problem.code, span_of(&file, span), problem.message);
+                    .error(&problem.code, span_of(file, span), problem.message);
             }
         }
-        Ok(lowered)
     }
 
     /// Run every admission pass over the root graph and the children, in

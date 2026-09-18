@@ -1238,8 +1238,11 @@ its own `SecretProvider` instead.
 ## The embedding path
 
 A host that embeds Petri (a platform running Fabro workflows, say) uses the
-same `Runtime` the CLI does and adds three things, all Petri-owned types with
-no platform vocabulary in them:
+same `Runtime` the CLI does. It checks a workflow with `Runtime::check` from
+a file on disk, or with `Runtime::check_source` from text it holds in memory
+beside a `frontend::FileSource` for the settings files and `@file`
+references (`frontend::MapFiles` is a map of paths to text), and adds three
+things, all Petri-owned types with no platform vocabulary in them:
 
 - **Events.** `execution::events` is the versioned public event contract
   (`crates/core/execution/EVENTS.md`). An `EventProjector` is an

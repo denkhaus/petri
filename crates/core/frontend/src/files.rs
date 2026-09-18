@@ -35,7 +35,10 @@ impl FileSource for DirFiles {
     }
 }
 
-/// An in-memory repository, for tests.
+/// An in-memory repository: file text keyed by repository-relative path with
+/// `/` separators (`flows/workflow.toml`, `.fabro/project.toml`). A host that
+/// holds a workflow bundle in memory hands one to `Runtime::check_source`; a
+/// leading `./` on a requested path is ignored.
 pub struct MapFiles(pub BTreeMap<String, String>);
 
 impl FileSource for MapFiles {
