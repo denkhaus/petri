@@ -397,7 +397,15 @@ cancellation, and this contract does not claim it does.
   projector attached at resume is built with `EventProjector::primed`, which
   folds the stored prefix into its state without delivering it.
   `replay_since` is the incremental form of `replay_run`: the events past a
-  set of held `EventId`s per log, for a consumer that already holds a prefix.
+  set of held `EventId`s per log, for a consumer that already holds a prefix;
+  its fold still runs over the whole run. A consumer that follows a live run
+  through its store keeps a `RunReplay` and advances it: each advance reads
+  only the records past the ones it consumed (`RunLogs::read_from`), folds
+  them through the state it kept (the coordinator state, each execution's
+  engine state, the projection), and hands back their events alone, per log
+  the same as `replay_run` derives them. The state is a cache of the records:
+  a fresh replay rebuilds it, and it holds every engine record of the run, so
+  the consumer drops it when the run ends or goes idle.
 - A step's progress event is queued or acknowledged. `StepCtx::logs.send`
   resolves once the event is queued: it is ordered behind the attempt's
   earlier sends and ahead of its outcome, because the driver's completion
