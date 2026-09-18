@@ -6,7 +6,9 @@ use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use attractor_steps::command::OUTPUT_CAP;
+use attractor_steps::command::{
+    DROPPED_BYTES_METRIC, INCOMPLETE_METRIC, OUTPUT_CAP, TRUNCATED_LINES_METRIC,
+};
 use attractor_steps::{LocalBlobStore, blobs, register};
 use execution::events::replay_run_dir;
 use execution::host;
@@ -14,6 +16,7 @@ use frontend_attractor::load;
 use runtime::driver::{EventObserver, ExecutionReport, RunHandle};
 use runtime::engine::{EngineState, Event, EventRecord, ReplayMismatch, RouteApplied};
 use runtime::executor::Retention;
+use runtime::executor::lines::LINE_CAP;
 use runtime::frontend::{CompileInputs, NoFiles};
 use runtime::ir::{CancelScopeId, Graph, RunStatus, TimeoutPolicy};
 use runtime::steps::{Answer, Question, Steer};
@@ -151,6 +154,101 @@ async fn large_command_output_is_offloaded_and_reads_back_logically() {
 /// The in-memory cap sits above the offload threshold, so a value the store
 /// takes was never truncated first.
 const _: () = assert!(OUTPUT_CAP > 200_000);
+
+/// The line cap sits above the offload threshold too, so one long line
+/// reaches the store whole rather than being cut below it.
+const _: () = assert!(LINE_CAP > blobs::OFFLOAD_THRESHOLD);
+
+/// No output byte is lost silently. A 120 000-byte line passes the line cap
+/// whole, takes the output past the offload threshold, and is stored whole
+/// as a blob with nothing recorded as dropped. A line past the cap is cut
+/// at the cap, ends with a marker naming the bytes dropped, and the
+/// outcome's metrics count the loss.
+#[tokio::test]
+async fn a_long_line_is_stored_whole_or_its_loss_is_recorded() {
+    let graph = lower(&dot(r#"
+        long [shape=parallelogram, script="head -c 120000 /dev/zero | tr '[:cntrl:]' x; echo"]
+        start -> long -> exit
+    "#));
+    let dir = RunDir::new("fabro-command-long-line");
+    let rt = runtime(&dir);
+    let report = rt.run(graph).await.expect("replay is byte-identical");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let recorded = output_of(&report, "long")["stdout"]
+        .as_str()
+        .expect("string output")
+        .to_string();
+    assert!(
+        recorded.starts_with("blob://sha256/"),
+        "the line crossed the offload threshold whole: {}",
+        &recorded[..recorded.len().min(80)]
+    );
+    let digest = recorded.trim_start_matches("blob://sha256/");
+    let stored = fs::read(dir.path().join("blobs").join(digest)).expect("the blob file");
+    assert_eq!(stored.len(), 120_001, "the whole line and its newline");
+    assert!(stored[..120_000].iter().all(|b| *b == b'x'));
+    let metrics = &report
+        .state
+        .history()
+        .iter()
+        .find(|row| row.name == "long")
+        .expect("the command ran")
+        .outcome
+        .metrics;
+    assert!(
+        !metrics.custom.contains_key(DROPPED_BYTES_METRIC)
+            && !metrics.custom.contains_key(TRUNCATED_LINES_METRIC),
+        "nothing was dropped: {:?}",
+        metrics.custom
+    );
+
+    let over = LINE_CAP + 10;
+    let graph = lower(&dot(&format!(
+        r#"
+        huge [shape=parallelogram, script="head -c {over} /dev/zero | tr '[:cntrl:]' y; echo"]
+        start -> huge -> exit
+    "#
+    )));
+    let dir = RunDir::new("fabro-command-over-cap");
+    let rt = runtime(&dir);
+    let report = rt.run(graph).await.expect("replay is byte-identical");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let recorded = output_of(&report, "huge")["stdout"]
+        .as_str()
+        .expect("string output")
+        .to_string();
+    let digest = recorded.trim_start_matches("blob://sha256/");
+    let stored =
+        String::from_utf8(fs::read(dir.path().join("blobs").join(digest)).expect("the blob file"))
+            .expect("utf-8");
+    assert!(stored[..LINE_CAP].bytes().all(|b| b == b'y'));
+    assert_eq!(
+        &stored[LINE_CAP..],
+        " …[line truncated: 10 bytes dropped]\n",
+        "the cut line says how much was dropped"
+    );
+    let metrics = &report
+        .state
+        .history()
+        .iter()
+        .find(|row| row.name == "huge")
+        .expect("the command ran")
+        .outcome
+        .metrics;
+    assert_eq!(metrics.custom.get(DROPPED_BYTES_METRIC), Some(&json!(10)));
+    assert_eq!(metrics.custom.get(TRUNCATED_LINES_METRIC), Some(&json!(1)));
+    assert!(!metrics.custom.contains_key(INCOMPLETE_METRIC));
+}
 
 /// A host renders a command stage and its routing decision from the public
 /// stream alone: the script is on the stage's `subject.node.meta.script`,

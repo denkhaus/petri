@@ -399,7 +399,17 @@ the coordinator registers `attractor_steps::workflow::ChildInvoker`.
   reads the last JSON object of the output as the routing directive
   (`outcome`, `preferred_next_label`, `suggested_next_ids`, `context_updates`,
   `failure_reason`). Output above 100 KiB leaves the record for the output
-  store (below); the in-memory cap is 8 MiB.
+  store (below); the in-memory cap is 8 MiB. No output byte is lost
+  silently: a line up to 1 MiB (the executor's line cap,
+  `executor::lines::LINE_CAP`) reaches the step whole, so a long line takes
+  the output to the store whole; a longer line is cut at the cap and ends
+  with ` …[line truncated: N bytes dropped]`; the in-memory cap discards
+  the front of the output behind `… [output truncated]`. Every byte either
+  cap discarded is counted on the attempt's metrics as
+  `output.dropped_bytes`, with `output.truncated_lines` for the lines the
+  line cap cut, both present only when not zero; a capture that ended on
+  silence after the script was gone records `output.incomplete: true`
+  beside its marker, since nobody counted that loss.
 - **`attractor/prompt`** is one model call through the application's `lithos-llm`
   client (the `PebbleClient` capability), with no tools and no coding-agent
   loop: the goal, the preamble of earlier stages at the node's resolved

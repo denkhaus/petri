@@ -145,8 +145,9 @@ impl fmt::Debug for ProcessSpec {
 pub struct LogLine {
     pub stream:     ir::LogStream,
     pub line:       String,
-    /// The line hit the size cap and was cut.
-    pub truncated:  bool,
+    /// How many bytes the line cap cut off the end of `line`, which then
+    /// ends with a marker naming the count. Zero for a line kept whole.
+    pub dropped:    usize,
     /// The process ended the line with a newline. False only for the last
     /// line of a stream the process left unterminated, so a consumer that
     /// rejoins the lines can restore the exact bytes.
