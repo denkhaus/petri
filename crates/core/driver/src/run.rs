@@ -38,7 +38,8 @@ use crate::lifecycle::{
     AdmitAttempt, AttemptDecision, BUDGET_PAUSED_KIND, BUDGET_RESUMED_KIND, BudgetNote,
     ExecutionHooks, HookContext, Note, PrepareError, PrepareResult, Prepared,
     RESULT_PREPARATION_CLASS, RESULT_PREPARED_KIND, Recorded, ResultOrigin, ResultPreparedNote,
-    RunFinished, ScopeReleased, TRANSITION_KIND, Transition, TransitionNote, apply_transition,
+    RunFinished, ScopeAcquired, ScopeReleased, TRANSITION_KIND, Transition, TransitionNote,
+    apply_transition,
 };
 use crate::observe::{EventObserver, ObserveError, recorded_now};
 use crate::sink::LogSink;
@@ -2064,6 +2065,7 @@ impl Driver {
                     && declared.runtime.target != inherited.target
             });
         let executor = self.executor.clone();
+        let hooks = self.hooks.clone();
         let abandoned = self.abandoned_tx.clone();
         let tx = self.tx.clone();
         let id = self.next_acquire_id;
@@ -2096,10 +2098,31 @@ impl Driver {
                         spec.workspace_id = assignment.workspace;
                     }
                 }
-                executor
-                    .acquire(&spec, &ctx)
-                    .await
-                    .map(|handle| AcquiredScope::new(handle, abandoned))
+                let handle = executor.acquire(&spec, &ctx).await?;
+                // The guard first: a host that refuses the environment
+                // hands it back through the abandoned queue for release.
+                let acquired = AcquiredScope::new(handle, abandoned);
+                if let Some(hooks) = hooks {
+                    let env = acquired
+                        .handle
+                        .as_ref()
+                        .expect("an acquired scope holds its environment until transferred")
+                        .exec();
+                    hooks
+                        .host
+                        .scope_acquired(&hooks.context, ScopeAcquired {
+                            scope,
+                            workspace: spec.workspace_id.clone(),
+                            env,
+                        })
+                        .await
+                        .map_err(|error| EnvError::Backend {
+                            backend:   SmolStr::new("host"),
+                            operation: SmolStr::new("scope_acquired"),
+                            message:   error.message,
+                        })?;
+                }
+                Ok(acquired)
             }
             .await
             // The deliberate render point: the failure becomes

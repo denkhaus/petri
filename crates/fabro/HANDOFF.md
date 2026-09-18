@@ -206,6 +206,14 @@ acknowledgement gates the next step of the run:
   released; `scope_released` runs before each scope's own environment is
   released. Fabro's `run_complete`/`run_failed` (by final status, neither on a
   cancelled run) and `sandbox_cleanup` map onto them.
+- `scope_acquired` runs once per acquisition of a scope's environment, after
+  the executor acquired it and before the first attempt in it, with the
+  workspace id and the `ExecEnv` the steps receive: where a host restores a
+  workspace onto its snapshot in a Docker or Daytona sandbox before work
+  resumes in it, and where it keeps the environment it later runs `git` in
+  for its checkpoints. An error fails the scope's firings routably. With
+  `SandboxOptions::lost_sandbox = LostSandbox::Replace`, a lease whose
+  sandbox is gone gets a fresh, empty one for the host to restore.
 - `RunEventSink::deliver` is awaited per event behind a bounded queue
   (`ProjectorOptions::capacity`, 1024 by default); a slow sink delays
   delivery and never slows the run, an event that finds the queue full is

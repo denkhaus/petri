@@ -130,11 +130,35 @@ coordinator format version 2: a log without it replays as before. A
 forward `run_finished` and `scope_released` as they forward the other points
 and return the inner notes, or the run-level hooks never run or never record.
 
+## The scope's environment
+
+`ExecutionHooks::scope_acquired` is awaited once per acquisition of a
+scope's environment, after the executor acquired it and before the first
+attempt in the scope is dispatched. It carries the `ScopeId`, the workspace
+id the executor named (the lease's, when a coordinator allocated one), and
+the `ExecEnv` the scope's steps will receive, so a host prepares the
+workspace through the same capability a step uses, on this machine and in a
+Docker or Daytona sandbox alike: a process run in it, a file read or written
+in its workspace. It runs on every acquisition, a resumed execution's and an
+inherited sandbox's included (the environment handle is each execution's
+own), and the adapter does not map it onto a Fabro hook. A `ScopeAcquiredError`
+fails the acquisition: every firing in the scope fails routably with the
+message, as it would had the executor refused the scope. Wrappers forward it
+like the other points.
+
+A host that keeps its own snapshots of a workspace pairs the point with
+`SandboxOptions::lost_sandbox = LostSandbox::Replace`: an acquire whose
+recorded sandbox is gone from the provider then creates a fresh one with an
+empty workspace instead of failing, and the host restores the workspace in
+`scope_acquired` before any attempt runs in it. The default, `Refuse`, keeps
+Petri's own rule: a lost workspace is never replaced silently.
+
 ## The hook context
 
 `RunRuntime` installs one `ExecutionHooks` object for every execution of a
 run. Every callback receives a `driver::lifecycle::HookContext` beside its
-request, `run_finished` and `scope_released` included. The context carries:
+request, `run_finished`, `scope_released` and `scope_acquired` included. The
+context carries:
 
 - `run_key`: the run's identity in its store (`store::RunKey`).
 - `invocation`: the invocation this execution belongs to.

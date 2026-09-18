@@ -48,7 +48,9 @@ pub mod steps {
 
 mod runtime;
 
-pub use executor_sandbox::{DaytonaResources, DaytonaSandboxKind, SandboxBackend, SandboxOptions};
+pub use executor_sandbox::{
+    DaytonaResources, DaytonaSandboxKind, LostSandbox, SandboxBackend, SandboxOptions,
+};
 pub use runtime::{
     AdmissionPass, AdmissionProblem, LoadError, RunAccess, RunOptions, RunRuntime, RunServiceGuard,
     Runtime,

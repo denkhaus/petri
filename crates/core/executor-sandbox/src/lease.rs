@@ -46,7 +46,7 @@ use tokio::task::JoinSet;
 
 use crate::plugin::ProviderSource;
 use crate::run::{LEASE_LABEL, RUN_LABEL, RunIdentity, WORKSPACE_LABEL};
-use crate::{BACKEND, acquire_failed};
+use crate::{BACKEND, LostSandbox, acquire_failed};
 
 /// Where a lease's sandbox stands, durably.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,11 +262,12 @@ pub(crate) struct LeaseRequest<'a> {
 
 /// One live handle and a holder count per lease, over one provider source.
 pub struct SandboxLeaseManager {
-    source:   Arc<dyn ProviderSource>,
-    ledger:   Arc<dyn LeaseLedger>,
-    identity: Arc<RunIdentity>,
-    leases:   Mutex<HashMap<SandboxLeaseId, Arc<AsyncMutex<LeaseSlot>>>>,
-    cleanup:  Mutex<JoinSet<()>>,
+    source:       Arc<dyn ProviderSource>,
+    ledger:       Arc<dyn LeaseLedger>,
+    identity:     Arc<RunIdentity>,
+    lost_sandbox: LostSandbox,
+    leases:       Mutex<HashMap<SandboxLeaseId, Arc<AsyncMutex<LeaseSlot>>>>,
+    cleanup:      Mutex<JoinSet<()>>,
 }
 
 impl SandboxLeaseManager {
@@ -279,9 +280,18 @@ impl SandboxLeaseManager {
             source,
             ledger,
             identity,
+            lost_sandbox: LostSandbox::Refuse,
             leases: Mutex::new(HashMap::new()),
             cleanup: Mutex::new(JoinSet::new()),
         }
+    }
+
+    /// What acquire does when a recorded sandbox is gone from the provider;
+    /// [`LostSandbox::Refuse`] until set.
+    #[must_use]
+    pub fn with_lost_sandbox(mut self, policy: LostSandbox) -> Self {
+        self.lost_sandbox = policy;
+        self
     }
 
     pub fn source(&self) -> &Arc<dyn ProviderSource> {
@@ -384,6 +394,19 @@ impl SandboxLeaseManager {
                     0 if record.state == LeaseState::Allocating => {
                         // The record was reserved but no resource exists:
                         // the create never happened or never completed.
+                        return self
+                            .create(&provider, &request, &labels, build_spec, slot, generation)
+                            .await;
+                    }
+                    0 if self.lost_sandbox == LostSandbox::Replace => {
+                        // The workspace went with the sandbox; the host
+                        // asked for a fresh one and restores it itself.
+                        tracing::warn!(
+                            lease = request.lease.raw(),
+                            state = ?record.state,
+                            "the lease's recorded sandbox is gone from the provider; creating a \
+                             fresh one with an empty workspace"
+                        );
                         return self
                             .create(&provider, &request, &labels, build_spec, slot, generation)
                             .await;

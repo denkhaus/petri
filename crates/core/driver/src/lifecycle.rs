@@ -7,6 +7,11 @@
 //! 1. [`ExecutionHooks::before_attempt`], before every attempt is dispatched
 //!    (retries included). A paused firing keeps its identity, starts no
 //!    attempt, and a cancel settles it as `Cancelled`.
+//!    [`ExecutionHooks::scope_acquired`] runs once per acquisition of a scope's
+//!    environment, after the executor acquired it and before the first attempt
+//!    in it is dispatched, with the environment itself: where a host prepares
+//!    the workspace (restores it onto a snapshot after a crash, say) before any
+//!    work runs in it.
 //! 2. The attempt runs; the step's own result policy applies inside the step (a
 //!    Fabro stage finalizes an exhausted retry there, explicit routes first),
 //!    and the driver applies the node's exhaustion policy
@@ -60,9 +65,11 @@
 //! execution, `DecisionId`, effect kind)`.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 
 use engine::{Admission, DecisionId, GroupDecision, RouteDecision};
+use executor::{ExecEnv, WorkspaceId};
 use ir::{Attempt, EdgeId, ExecutionId, FiringId, InvocationId, Outcome, Status, StepEvent, Value};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
@@ -384,6 +391,48 @@ pub struct ScopeReleased {
     pub outcome: executor::ScopeOutcome,
 }
 
+/// A scope's environment was acquired and no attempt has run in it yet.
+///
+/// The environment is the one the scope's steps will receive: a host runs a
+/// process in it and reads or writes its workspace's files through it, on
+/// this machine and in a remote sandbox alike. The handle is this
+/// execution's own; an inherited sandbox is acquired by each execution that
+/// runs in it, and each is told.
+#[derive(Clone)]
+pub struct ScopeAcquired {
+    pub scope:     ir::ScopeId,
+    /// The workspace the environment holds, as the executor named it: the
+    /// lease's workspace when a coordinator allocated one.
+    pub workspace: WorkspaceId,
+    pub env:       Arc<dyn ExecEnv>,
+}
+
+impl fmt::Debug for ScopeAcquired {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScopeAcquired")
+            .field("scope", &self.scope)
+            .field("workspace", &self.workspace)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The host could not prepare a scope's environment. The acquisition fails
+/// with this message: every firing in the scope fails, routably, as it
+/// would had the executor refused the scope.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct ScopeAcquiredError {
+    pub message: String,
+}
+
+impl ScopeAcquiredError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
 /// A final outcome has been recorded and routing is about to be asked for.
 pub struct Recorded {
     pub view:    Arc<FiringView>,
@@ -504,6 +553,20 @@ pub trait ExecutionHooks: Send + Sync {
     async fn scope_released(&self, context: &HookContext, released: ScopeReleased) -> Vec<Note> {
         let _ = (context, released);
         Vec::new()
+    }
+
+    /// A scope's environment was acquired and no attempt has run in it yet.
+    /// Awaited: the first attempt in the scope waits for it. Runs on every
+    /// acquisition, a resumed execution's and an inherited sandbox's
+    /// included. An error fails the acquisition: every firing in the scope
+    /// fails, routably, with the message.
+    async fn scope_acquired(
+        &self,
+        context: &HookContext,
+        acquired: ScopeAcquired,
+    ) -> Result<(), ScopeAcquiredError> {
+        let _ = (context, acquired);
+        Ok(())
     }
 }
 

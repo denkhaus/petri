@@ -48,11 +48,27 @@ impl FromStr for SandboxBackend {
     }
 }
 
+/// What an acquire does when a lease's recorded sandbox is gone from its
+/// provider: the container was removed, the remote sandbox deleted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LostSandbox {
+    /// Fail the acquire. The workspace was lost with the sandbox, and
+    /// Petri does not replace it silently.
+    #[default]
+    Refuse,
+    /// Create a fresh sandbox under the lease, with an empty workspace, for
+    /// a host that restores the workspace itself before any attempt runs
+    /// in it (`ExecutionHooks::scope_acquired`).
+    Replace,
+}
+
 /// Configuration for the built-in sandbox router. Credentials come from
 /// provider environment variables and never belong in this structure.
 #[derive(Clone, Debug, Default)]
 pub struct SandboxOptions {
     pub backend:           SandboxBackend,
+    /// What to do when a lease's recorded sandbox is gone from the provider.
+    pub lost_sandbox:      LostSandbox,
     /// Label-to-image overrides. Daytona images must include Docker,
     /// `start-docker`, and Python 3. Empty requirements use `ubuntu-24.04`.
     pub runner_images:     BTreeMap<String, String>,

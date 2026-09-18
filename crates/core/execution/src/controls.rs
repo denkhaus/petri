@@ -41,7 +41,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use driver::lifecycle::{
     AdmitAttempt, AttemptDecision, ExecutionHooks, HookContext, Note, PrepareError, PrepareResult,
-    Prepared, Recorded, RunFinished, ScopeReleased, Transition, TransitionError, TransitionReport,
+    Prepared, Recorded, RunFinished, ScopeAcquired, ScopeAcquiredError, ScopeReleased, Transition,
+    TransitionError, TransitionReport,
 };
 use engine::{EngineState, Event, EventRecord};
 use ir::FiringId;
@@ -136,6 +137,17 @@ impl ExecutionHooks for PauseHooks {
         match &self.inner {
             Some(inner) => inner.scope_released(context, released).await,
             None => Vec::new(),
+        }
+    }
+
+    async fn scope_acquired(
+        &self,
+        context: &HookContext,
+        acquired: ScopeAcquired,
+    ) -> Result<(), ScopeAcquiredError> {
+        match &self.inner {
+            Some(inner) => inner.scope_acquired(context, acquired).await,
+            None => Ok(()),
         }
     }
 }
