@@ -117,9 +117,14 @@ subset; the unconfigured path stays the standalone runner.
 - **Model routes.** `fabro.fallback.route` carries the position in the plan,
   the provider and model, whether the session was reused, and the session id.
 - **Sandboxes and workspaces.** `invocation.declared`'s `sandbox` is the binding;
-  `petri inspect` reports every scope's workspace and the retrieval command
-  for a container; the workspace survives success, failure and cancellation
-  under `--retain always` (the Fabro default).
+  `scope.acquired` names the sandbox a scope runs in (the provider, the
+  provider's id, the image and snapshot when known, the working directory,
+  the workspace and lease, the acquisition time) and `scope.failed` why it
+  could not be acquired; `scope.released` records the retention outcome per
+  lease (`retained`, `outcome`, `problems`) once the owning invocation
+  finished. `petri inspect` reports every scope's workspace and the
+  retrieval command for a container; the workspace survives success,
+  failure and cancellation under `--retain always` (the Fabro default).
 
 ## Event positions
 
@@ -236,10 +241,10 @@ acknowledgement gates the next step of the run:
 
 | Version | Where | Rule |
 |---|---|---|
-| `EVENT_CONTRACT_VERSION` (3) | `execution::events` | additive within a version; a host checks it before projecting. Version 3 names every event after its record, carries the stored line under `record` and the derived values under `derived`; the version 2 presentation names are gone |
+| `EVENT_CONTRACT_VERSION` (4) | `execution::events` | additive within a version; a host checks it before projecting. Version 3 names every event after its record, carries the stored line under `record` and the derived values under `derived`; the version 2 presentation names are gone. Version 4 adds the scope records (`scope.acquired`, `scope.failed`, `scope.released`) |
 | `INSPECT_FORMAT_VERSION` (3) | `execution::inspect` | the `petri inspect` document's field contract; version 3 reads the run through its store (`locator`, `run_key`; no log `path` or `torn`) |
-| the run format (5) on the run declaration, and the coordinator record version (`{seq, origin, recorded_at, body}` lines, `body` tagged by `event` with `<subject>.<verb>` names; the declaration carries the run `key`) | `execution::store` | a run written by a newer or older format is refused, never migrated; the check reads the first stored record before any other is decoded |
-| the engine log version (v10: `{seq, origin, recorded_at, body}` records, `body` tagged by `event` with `<subject>.<verb>` names), pinned by the run format | `engine::log` | a log whose version the runner does not speak is refused; replay must reproduce the log byte for byte or inspection reports corruption |
+| the run format (6) on the run declaration, and the coordinator record version (`{seq, origin, recorded_at, body}` lines, `body` tagged by `event` with `<subject>.<verb>` names; the declaration carries the run `key`; version 6 adds `scope.released` and pins engine log v11) | `execution::store` | a run written by a newer or older format is refused, never migrated; the check reads the first stored record before any other is decoded |
+| the engine log version (v11: `{seq, origin, recorded_at, body}` records, `body` tagged by `event` with `<subject>.<verb>` names; v11 adds `scope.acquired` and `scope.failed`), pinned by the run format | `engine::log` | a log whose version the runner does not speak is refused; replay must reproduce the log byte for byte or inspection reports corruption |
 | `inspect_format_version`, `event_contract_version` | in the documents themselves | |
 | Library pins (Pebble, lithos-llm, sandbox-driver, twins, the Fabro reference, the runner image) | `CONTRACT.md` "Pinned revisions", `scripts/check-pins.py` | moved together with the manifests and the evidence records |
 

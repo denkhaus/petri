@@ -104,8 +104,12 @@ fn step(
             None => state.push_error(RunError::UnknownFiring(firing)),
         },
         // Progress is observation only: logs and artifacts carry no coordination
-        // meaning, so the core records them and changes nothing.
-        Event::StepProgressRecorded { .. } => {}
+        // meaning, so the core records them and changes nothing. A scope's
+        // acquisition is the same: the driver records where the scope runs,
+        // and the core routes on what its firings report.
+        Event::StepProgressRecorded { .. }
+        | Event::ScopeAcquired { .. }
+        | Event::ScopeFailed { .. } => {}
         Event::StepFinished {
             firing,
             attempt,

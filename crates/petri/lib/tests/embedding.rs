@@ -2038,6 +2038,18 @@ async fn recovery_redelivers_with_stable_identities() {
         .position(|line| line.contains("execution.finished") && line.contains("\"execution\":0"))
         .expect("the root execution finished");
     fs::write(&coordinator, format!("{}\n", lines[..cut].join("\n"))).expect("writes");
+    // A run that never recorded its finish never released its sandbox
+    // either: forget the release the first run made, so the resume makes
+    // it, and records it, where the first run did.
+    let resources = dir.path().join("resources.jsonl");
+    let text = fs::read_to_string(&resources).expect("reads");
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| {
+            !line.contains("\"pending\":\"stop\"") && !line.contains("\"state\":\"stopped\"")
+        })
+        .collect();
+    fs::write(&resources, format!("{}\n", lines.join("\n"))).expect("writes");
 
     let second = Arc::new(CollectingSink::default());
     let projector = EventProjector::primed_run_dir(second.clone(), dir.path())

@@ -320,10 +320,13 @@ impl CoordinatorState {
             }
             // A repeated pause or unpause is accepted and changes nothing:
             // the coordinator skips the redundant record, and a log that
-            // carries one still replays. A run-level note constrains nothing.
+            // carries one still replays. A run-level note and a released
+            // scope constrain nothing: the resource log is the authority on
+            // what the run holds.
             CoordinatorEvent::RunPaused
             | CoordinatorEvent::RunUnpaused
-            | CoordinatorEvent::RunNoteRecorded { .. } => {}
+            | CoordinatorEvent::RunNoteRecorded { .. }
+            | CoordinatorEvent::ScopeReleased { .. } => {}
             CoordinatorEvent::RunFinished { status } => {
                 if self.run_status.is_some() {
                     return Err(StateError::DuplicateRunFinish);
@@ -450,6 +453,7 @@ impl CoordinatorState {
                 kind:      kind.clone(),
                 payload:   payload.clone(),
             }),
+            CoordinatorEvent::ScopeReleased { .. } => {}
             CoordinatorEvent::RunFinished { status } => {
                 self.run_status = Some(*status);
             }

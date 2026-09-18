@@ -21,8 +21,8 @@ use executor::{
     ReleaseReport, ScopeOutcome, ScopeSpec,
 };
 use ir::{
-    Budget, CancelScopeId, Control, FiringId, Graph, GraphBuilder, Outcome, RunStatus, ScopeId,
-    StepKindId, StepRef, TimeoutPolicy, Value, validate,
+    Budget, CancelScopeId, Control, FiringId, Graph, GraphBuilder, Outcome, RunStatus,
+    SandboxInstance, ScopeId, StepKindId, StepRef, TimeoutPolicy, Value, validate,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -76,6 +76,13 @@ impl Executor for NoExecutor {
         Ok(EnvHandle::new(
             scope.id,
             scope.environment.as_str().into(),
+            SandboxInstance {
+                provider:          "test".into(),
+                instance:          scope.environment.as_str().into(),
+                image:             None,
+                snapshot:          None,
+                working_directory: "/".into(),
+            },
             Arc::new(NoEnv),
             (),
         ))

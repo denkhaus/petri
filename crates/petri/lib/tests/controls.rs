@@ -336,6 +336,7 @@ async fn the_breaker_state_is_restored_on_resume() {
         .filter(|line| {
             !(line.contains("\"run.finished\"")
                 || line.contains("\"invocation.finished\"")
+                || line.contains("\"scope.released\"")
                 || (line.contains("\"execution.finished\"") && line.contains("terminal")))
         })
         .collect();

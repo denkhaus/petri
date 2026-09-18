@@ -173,7 +173,11 @@ pub struct AppliedSplice {
 
 /// Invocation-stable identity of a resource scope. Dynamic identities use
 /// the producer's ancestry, not execution-local node or scope allocations.
+///
+/// On the wire, `{"declared": <scope id>}` or `{"spliced": [..]}`: the
+/// snake-case tag every enum inside a stored record carries.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ScopeIdentity {
     Declared(ScopeId),
     /// Alternating producer node and producer-local batch ordinals, followed

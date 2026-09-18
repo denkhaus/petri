@@ -6,7 +6,7 @@ use std::fmt::Debug;
 use std::mem;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use engine::{
     Admission, CANCEL_ESCALATION_KEY, CancelTarget, Command, DecisionId, EngineExit, EngineStart,
@@ -140,6 +140,9 @@ pub enum ScopeLeases {
 pub struct ScopeLease {
     pub lease:     SandboxLeaseId,
     pub workspace: WorkspaceId,
+    /// The provider kind the lease was reserved on, for the record of an
+    /// acquisition that never reached the executor's own description.
+    pub provider:  SmolStr,
 }
 
 /// The coordinator's resource authority. Allocation completes durably before
@@ -411,9 +414,10 @@ enum Signal {
         attempt: Attempt,
     },
     AcquireFinished {
-        scope:  ScopeId,
-        id:     u64,
-        result: Result<AcquiredScope, String>,
+        scope:       ScopeId,
+        id:          u64,
+        acquisition: Acquisition,
+        result:      Result<AcquiredScope, AcquireFailure>,
     },
     /// The host's `before_attempt` answered; the resolver runs next when it
     /// admitted.
@@ -440,6 +444,43 @@ enum Signal {
         resolution:  RoutingResolution,
         notes:       Vec<Note>,
     },
+}
+
+/// What the driver knows about one acquisition whichever way it ended: the
+/// lease and workspace the scope was given, the provider the lease was
+/// reserved on, and how long the acquire took.
+struct Acquisition {
+    lease:       Option<SandboxLeaseId>,
+    workspace:   WorkspaceId,
+    provider:    Option<SmolStr>,
+    duration_ms: u64,
+}
+
+/// An acquisition's error, flattened for the record: the top message and
+/// the source chain beneath it, outermost first.
+struct AcquireFailure {
+    message: String,
+    causes:  Vec<String>,
+}
+
+impl AcquireFailure {
+    fn of(error: &dyn Error) -> Self {
+        Self {
+            message: error.to_string(),
+            causes:  chain_causes(error),
+        }
+    }
+
+    /// The whole chain on one line, as the failure message of every firing
+    /// in the scope carries it.
+    fn rendered(&self) -> String {
+        let mut out = self.message.clone();
+        for cause in &self.causes {
+            out.push_str(": ");
+            out.push_str(cause);
+        }
+        out
+    }
 }
 
 /// An acquired environment that has not reached the driver yet.
@@ -1243,8 +1284,13 @@ impl Driver {
                 attempt,
                 permit,
             } => self.on_slot_acquired(firing, attempt, permit),
-            Signal::AcquireFinished { scope, id, result } => {
-                self.on_acquire_finished(scope, id, result);
+            Signal::AcquireFinished {
+                scope,
+                id,
+                acquisition,
+                result,
+            } => {
+                self.on_acquire_finished(scope, id, acquisition, result);
             }
             Signal::HookAdmitted {
                 decision_id,
@@ -2074,6 +2120,9 @@ impl Driver {
             .checked_add(1)
             .expect("a run cannot start 2^64 scope acquisitions");
         let join = self.background.spawn(async move {
+            let started = Instant::now();
+            let mut lease = None;
+            let mut provider = None;
             let result = async {
                 if inherited_mismatch {
                     return Err(EnvError::backend(
@@ -2084,7 +2133,10 @@ impl Driver {
                 }
                 match leases {
                     ScopeLeases::None => {}
-                    ScopeLeases::Shared(lease) => ctx = ctx.with_lease(lease),
+                    ScopeLeases::Shared(shared) => {
+                        lease = Some(shared);
+                        ctx = ctx.with_lease(shared);
+                    }
                     ScopeLeases::Owned(allocator) => {
                         let identity = identity.ok_or_else(|| {
                             EnvError::backend(
@@ -2094,6 +2146,8 @@ impl Driver {
                             )
                         })?;
                         let assignment = allocator.reserve(identity, &spec).await?;
+                        lease = Some(assignment.lease);
+                        provider = Some(assignment.provider);
                         ctx = ctx.with_lease(assignment.lease);
                         spec.workspace_id = assignment.workspace;
                     }
@@ -2125,20 +2179,37 @@ impl Driver {
                 Ok(acquired)
             }
             .await
-            // The deliberate render point: the failure becomes
-            // `FailureInfo.message`, a rendered projection, so the whole
-            // source chain is flattened into it here.
-            .map_err(|error| render_chain(&error));
-            let _ = tx.send(Signal::AcquireFinished { scope, id, result }).await;
+            // The deliberate render point: the failure becomes the
+            // `scope.failed` record and `FailureInfo.message`, rendered
+            // projections, so the typed chain is flattened into them here.
+            .map_err(|error| AcquireFailure::of(&error));
+            let acquisition = Acquisition {
+                lease,
+                workspace: spec.workspace_id,
+                provider,
+                duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            };
+            let _ = tx
+                .send(Signal::AcquireFinished {
+                    scope,
+                    id,
+                    acquisition,
+                    result,
+                })
+                .await;
         });
         self.acquires.insert(scope, ScopeAcquire { id, join });
     }
 
+    /// The acquire task's result: the environment, recorded as
+    /// `scope.acquired` and held for the scope's firings, or the failure,
+    /// recorded as `scope.failed` and handed to every firing in the scope.
     fn on_acquire_finished(
         &mut self,
         scope: ScopeId,
         id: u64,
-        result: Result<AcquiredScope, String>,
+        acquisition: Acquisition,
+        result: Result<AcquiredScope, AcquireFailure>,
     ) {
         let current = self
             .acquires
@@ -2148,15 +2219,36 @@ impl Driver {
             return;
         }
         self.acquires.remove(&scope);
+        let Acquisition {
+            lease,
+            workspace,
+            provider,
+            duration_ms,
+        } = acquisition;
         match result {
             Ok(acquired) => {
-                self.envs.insert(scope, acquired.into_handle());
+                let handle = acquired.into_handle();
+                self.feed(Event::ScopeAcquired {
+                    scope,
+                    lease,
+                    workspace,
+                    sandbox: handle.sandbox().clone(),
+                    duration_ms,
+                });
+                self.envs.insert(scope, handle);
             }
-            Err(error) => {
+            Err(failure) => {
                 // Not a run abort: every firing in this scope fails, routably.
-                // The message arrives already rendered, chain and all, from
-                // the acquire task's render point.
-                self.acquire_failures.insert(scope, error);
+                self.feed(Event::ScopeFailed {
+                    scope,
+                    lease,
+                    workspace,
+                    provider,
+                    error: failure.message.clone(),
+                    causes: failure.causes.clone(),
+                    duration_ms,
+                });
+                self.acquire_failures.insert(scope, failure.rendered());
             }
         }
 
@@ -3169,17 +3261,15 @@ fn value_to_string(value: &Value) -> String {
     }
 }
 
-/// An error and its whole `source()` chain on one line, for the places that
-/// must flatten a typed error into a recorded message.
-fn render_chain(error: &dyn Error) -> String {
-    let mut out = error.to_string();
+/// The `source()` chain beneath an error, outermost first.
+fn chain_causes(error: &dyn Error) -> Vec<String> {
+    let mut causes = Vec::new();
     let mut source = error.source();
     while let Some(cause) = source {
-        out.push_str(": ");
-        out.push_str(&cause.to_string());
+        causes.push(cause.to_string());
         source = cause.source();
     }
-    out
+    causes
 }
 
 /// Replace every `{"$secret": "NAME"}` reference in a `Deliver` payload — the

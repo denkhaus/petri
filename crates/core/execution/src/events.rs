@@ -143,7 +143,15 @@ pub use export::{ExportError, verify_export, verify_export_run_dir};
 /// beside it under `derived`. The presentation names of version 2
 /// (`attempt_finished`, `routes_resolved`, `output_line` and the rest) are
 /// gone, and so is the reverse mapping: export reads `record`.
-pub const EVENT_CONTRACT_VERSION: u32 = 3;
+///
+/// Version 4 adds the scope records: `scope.acquired` and `scope.failed` in
+/// an execution's log (where a scope's environment runs, or why it could not
+/// be acquired) and `scope.released` in the coordinator log (a lease's
+/// sandbox released by retention). The records are additive to the stream;
+/// the version moves with the engine log (v11) and run format (6) that
+/// carry them, so a host reading version 3 streams cannot mistake a run
+/// with no scope records for one that had none to record.
+pub const EVENT_CONTRACT_VERSION: u32 = 4;
 
 /// Which durable log an event was derived from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -731,6 +739,9 @@ impl Projection {
             CoordinatorEvent::InvocationFinished { invocation, result } => {
                 (Some(*invocation), Some(result.final_execution), None)
             }
+            // The lease's owner; the execution that acquired it is the
+            // `scope.acquired` record's.
+            CoordinatorEvent::ScopeReleased { invocation, .. } => (Some(*invocation), None, None),
             CoordinatorEvent::InvocationCancelRequested { invocation, reason } => {
                 if let Some(CancelReason::StallTimeout {
                     stall_timeout_ms,
@@ -813,8 +824,12 @@ impl Projection {
         };
 
         let (subject, derived): (Option<Subject>, Option<Derived>) = match &record.event {
+            // A scope is not a node: its records carry their scope and have
+            // no subject.
             Event::ExecutionStarted { .. }
             | Event::KillRequested { .. }
+            | Event::ScopeAcquired { .. }
+            | Event::ScopeFailed { .. }
             | Event::CancelRequested {
                 target: CancelTarget::Scope(_),
             } => (None, None),

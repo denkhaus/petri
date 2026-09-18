@@ -295,6 +295,29 @@ impl FailureInfo {
     }
 }
 
+/// The sandbox an executor acquired for a scope, as recorded when the scope
+/// was acquired: the provider it lives on, the provider's own id for it,
+/// what it runs, and the directory the scope's steps run in. The facts a
+/// host needs to reach the same sandbox again after the run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxInstance {
+    /// The provider kind: `host`, `docker`, `daytona`, or a plugin's kind.
+    pub provider:          SmolStr,
+    /// The provider's id for the sandbox: a container id, a remote sandbox
+    /// id, the host provider's registry id.
+    pub instance:          SmolStr,
+    /// The image the sandbox runs, when the provider knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image:             Option<SmolStr>,
+    /// The snapshot the sandbox was created from, when the provider knows
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot:          Option<SmolStr>,
+    /// The directory commands run in by default: the scope's workspace as
+    /// the sandbox sees it.
+    pub working_directory: SmolStr,
+}
+
 /// Counters reported by a step. Free-form so step kinds can add their own.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Metrics {

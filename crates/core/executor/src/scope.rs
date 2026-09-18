@@ -7,7 +7,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ir::{RegistryCredentials, RuntimeSpec, ScopeId, ServiceOptions, WorkspacePolicy};
+/// The scope identities and the lease id are the IR's, so the engine's
+/// records can name them without depending on this crate.
+pub use ir::{EnvironmentId, SandboxLeaseId, WorkspaceId};
+use ir::{
+    RegistryCredentials, RuntimeSpec, SandboxInstance, ScopeId, ServiceOptions, WorkspacePolicy,
+};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
@@ -16,71 +21,6 @@ use crate::env::ExecEnv;
 use crate::error::{EnvError, ReleaseReport};
 use crate::progress::{NoProgress, ProgressSink};
 use crate::secrets::{MapSecrets, SecretProvider};
-
-macro_rules! scope_identity {
-    ($name:ident) => {
-        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-        #[serde(transparent)]
-        pub struct $name(SmolStr);
-
-        impl $name {
-            pub fn new(value: impl Into<SmolStr>) -> Self {
-                Self(value.into())
-            }
-
-            /// The scope-qualified identity `{prefix}-scope-{id}`, or the bare
-            /// `scope-{id}` without a prefix. The one owner of the fragment
-            /// every layer that names a scope's environment or workspace must
-            /// agree on.
-            pub fn scoped(prefix: Option<&str>, scope: ScopeId) -> Self {
-                match prefix {
-                    Some(prefix) => Self(SmolStr::new(format!("{prefix}-scope-{}", scope.raw()))),
-                    None => Self(SmolStr::new(format!("scope-{}", scope.raw()))),
-                }
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str(&self.0)
-            }
-        }
-    };
-}
-
-scope_identity!(EnvironmentId);
-scope_identity!(WorkspaceId);
-
-/// A durable sandbox lease: the identity a container sandbox lives under. The
-/// coordinator allocates one per `{invocation, scope}` and hands it to every
-/// execution that runs in that sandbox, so a restarted execution and a nested
-/// invocation that inherits the caller's sandbox both name the one resource.
-/// The executor never infers it from a workspace id.
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
-#[serde(transparent)]
-pub struct SandboxLeaseId(u64);
-
-impl SandboxLeaseId {
-    pub const fn new(raw: u64) -> Self {
-        Self(raw)
-    }
-
-    pub const fn raw(self) -> u64 {
-        self.0
-    }
-}
-
-impl fmt::Display for SandboxLeaseId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}", self.0)
-    }
-}
 
 /// The default time a step gets between `SIGTERM` and `SIGKILL`.
 pub const DEFAULT_GRACE: Duration = Duration::from_secs(10);
@@ -269,7 +209,8 @@ impl AcquireContext {
 }
 
 /// Whether the work in a scope succeeded, which decides workspace retention.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ScopeOutcome {
     Succeeded,
     Failed,
@@ -312,21 +253,26 @@ impl<T: Any + fmt::Debug + Send + Sync> Teardown for T {}
 pub struct EnvHandle {
     scope:    ScopeId,
     instance: SmolStr,
+    sandbox:  SandboxInstance,
     env:      Arc<dyn ExecEnv>,
     teardown: Arc<dyn Teardown>,
     runner:   Option<Arc<dyn ContainerRunner>>,
 }
 
 impl EnvHandle {
+    /// `instance` is the executor's environment id for the scope; `sandbox`
+    /// is what the executor acquired for it, as the driver records it.
     pub fn new(
         scope: ScopeId,
         instance: SmolStr,
+        sandbox: SandboxInstance,
         env: Arc<dyn ExecEnv>,
         teardown: impl Teardown,
     ) -> Self {
         Self {
             scope,
             instance,
+            sandbox,
             env,
             teardown: Arc::new(teardown),
             runner: None,
@@ -348,6 +294,12 @@ impl EnvHandle {
 
     pub fn instance(&self) -> &str {
         &self.instance
+    }
+
+    /// The sandbox the executor acquired: the record the driver appends
+    /// when the scope is acquired.
+    pub fn sandbox(&self) -> &SandboxInstance {
+        &self.sandbox
     }
 
     /// The capability handed to step kinds.
@@ -384,6 +336,7 @@ impl fmt::Debug for EnvHandle {
         f.debug_struct("EnvHandle")
             .field("scope", &self.scope)
             .field("instance", &self.instance)
+            .field("sandbox", &self.sandbox)
             .field("teardown", &self.teardown)
             .finish()
     }
