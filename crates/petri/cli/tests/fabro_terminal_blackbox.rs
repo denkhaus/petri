@@ -5,7 +5,8 @@
 //! question type with invalid input re-asked and missing input failing
 //! closed, and container (Docker) retention with the reported
 //! `petri sandbox prune` command removing the sandbox after success, failure,
-//! and cancellation. No Fabro, no database, no server.
+//! and cancellation, with the success case repeated on Daytona in the live
+//! tier. No Fabro, no database, no server.
 
 mod support;
 
@@ -648,4 +649,74 @@ async fn a_cancelled_docker_run_keeps_its_sandbox_and_prune_removes_it() {
     );
     finished.assert_no_leaked_processes().await;
     prune_removes(&case, &name).await;
+}
+
+/// A Fabro run on `--backend daytona` keeps its VM after success, reports
+/// it by provider and id with the prune command, leaves it stopped on the
+/// account, and the reported prune command deletes it. Skips without a
+/// Daytona credential and plugin, unless `PETRI_REQUIRE_DAYTONA` says the
+/// tier must run; creates one billable VM.
+#[tokio::test]
+async fn a_daytona_run_keeps_its_sandbox_after_success_and_prune_removes_it() {
+    if !support::fabro::require::daytona().await {
+        return;
+    }
+    let observer = testkit::DaytonaObserver::from_env().await;
+    let case = Case::new("daytona-success").daytona();
+    let workflow = case.workflow(DOCKER_WORKFLOW, None);
+    let finished = case.run(&workflow, &[]).await;
+    finished.assert_code(0);
+    assert_eq!(
+        finished.status_line(),
+        Some("success"),
+        "{}",
+        finished.stderr
+    );
+    assert!(
+        finished
+            .echoed()
+            .iter()
+            .any(|(node, line)| node == "verify" && line == "kept in the box"),
+        "{}",
+        finished.stderr
+    );
+    assert_eq!(
+        finished.final_context()["command.output"],
+        json!("kept in the box\n")
+    );
+    let sandboxes = finished.reported_sandboxes();
+    assert_eq!(sandboxes.len(), 1, "{}", finished.stderr);
+    let (_, provider, id) = &sandboxes[0];
+    assert_eq!(provider, "daytona", "{}", finished.stderr);
+    assert!(
+        finished.stderr.contains(&format!(
+            "(delete with `petri sandbox prune --run-dir {}`)",
+            finished.run_dir.display()
+        )),
+        "the retrieval command is reported: {}",
+        finished.stderr
+    );
+    let run_id = testkit::recorded_run_id(&finished.run_dir);
+    let status = observer
+        .sandbox(&run_id, 0)
+        .await
+        .expect("the VM is retained on the account");
+    assert_eq!(status.id.as_str(), id, "the reported id is the provider's");
+    assert!(
+        observer.is_stopped(&run_id, 0).await,
+        "the retained VM is stopped: {status:?}"
+    );
+    finished.assert_no_leaked_processes().await;
+
+    let (code, stderr) = case.prune().await;
+    assert_eq!(code, Some(0), "prune failed:\n{stderr}");
+    assert!(
+        stderr.contains("deleted") || stderr.contains("pruned"),
+        "{stderr}"
+    );
+    assert!(
+        observer.sandboxes(&run_id).await.is_empty(),
+        "prune removed the VM: {stderr}"
+    );
+    observer.shutdown().await;
 }

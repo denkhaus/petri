@@ -1,5 +1,6 @@
 //! Required assets of the black box battery: the materialized bundles, the
-//! pinned Fabro binary, the Fabro corpus, and a Docker daemon.
+//! pinned Fabro binary, the Fabro corpus, a Docker daemon, and a Daytona
+//! account.
 //!
 //! Every check follows the convention `PETRI_REQUIRE_DOCKER` set: an absent
 //! asset skips with a visible notice on a developer machine, and fails when
@@ -13,6 +14,7 @@
 //! | fabro binary | `PETRI_REQUIRE_FABRO_BINARY` | `scripts/fabro-provision.sh` (handed over as `FABRO_BIN`) |
 //! | corpus | `PETRI_REQUIRE_FABRO_CORPUS` | `scripts/corpus-fetch-fabro.sh` |
 //! | Docker | `PETRI_REQUIRE_DOCKER` | a reachable daemon and the Docker plugin |
+//! | Daytona | `PETRI_REQUIRE_DAYTONA` | `DAYTONA_API_KEY` and the Daytona plugin (`mise run test:daytona`) |
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -130,4 +132,10 @@ pub(crate) fn fabro_corpus() -> Option<PathBuf> {
 /// `PETRI_REQUIRE_DOCKER`'s convention.
 pub(crate) async fn docker() -> bool {
     testkit::is_docker_ready().await
+}
+
+/// A Daytona plugin whose backend accepts the credentials in the
+/// environment, under `PETRI_REQUIRE_DAYTONA`'s convention.
+pub(crate) async fn daytona() -> bool {
+    testkit::is_daytona_ready().await
 }

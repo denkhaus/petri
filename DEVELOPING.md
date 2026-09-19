@@ -182,9 +182,11 @@ resources are absent.
 Container scopes run through the `sandbox-driver-docker` plugin. `mise run
 plugins:build` installs it from the pinned sandbox-driver revision under
 `target/plugins/bin`; the test tasks depend on it and set
-`PETRI_SANDBOX_DOCKER_PLUGIN` to that path. To test against another build of the
-plugin, set the variable yourself. A plugin this build does not pin runs only in
-dev mode, which debug builds turn on; a release build needs
+`PETRI_SANDBOX_DOCKER_PLUGIN` to that path. `mise run plugins:build:daytona`
+adds the `sandbox-driver-daytona` plugin for the live Daytona tier
+(`SANDBOX_DRIVER_PLUGINS` names the kinds the script installs). To test against
+another build of a plugin, set the variable yourself. A plugin this build does
+not pin runs only in dev mode, which debug builds turn on; a release build needs
 `PETRI_SANDBOX_PLUGIN_DEV=1` or `--sandbox-plugin-dev`.
 
 To build plugins from the sibling sandbox-driver checkout during coordinated
@@ -218,6 +220,25 @@ variables turn an unexpected skip into a failure. Do not set them for ordinary
 local work unless the resources are available. Without them an absent asset
 prints a `skipping:` notice, and the coverage report shows the scenario as
 skipped, never as passed.
+
+The live Daytona tier is the one battery CI does not run: no runner has a
+Daytona credential. Run it by hand before a change to the executor's Daytona
+path or to the sandbox-driver pin lands:
+
+```sh
+DAYTONA_API_KEY=... mise run test:daytona
+```
+
+The task installs the Daytona plugin beside the others (`mise run
+plugins:build:daytona`, which sets `PETRI_SANDBOX_DAYTONA_PLUGIN`), sets
+`PETRI_REQUIRE_DAYTONA=1`, and runs every test whose binary or name says
+`daytona`. `DAYTONA_TARGET`, `DAYTONA_ORGANIZATION_ID` and `DAYTONA_API_URL`
+are forwarded to the plugin when set. The tier creates billable sandboxes,
+about fourteen VMs, and the first run on an account builds the shared runner
+snapshot, which can take fifteen minutes. Without the variable the same tests
+skip with a notice, which is what `mise run test` does.
+`crates/core/executor-sandbox/DAYTONA.md` describes the tier and maps Fabro's
+former live Daytona tests onto it.
 
 Every black box scenario writes an evidence record into `PETRI_EVIDENCE_DIR`
 (`mise run test:fabro:blackbox` picks a directory under

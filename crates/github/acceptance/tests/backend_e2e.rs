@@ -1,5 +1,7 @@
 //! The same action contract on a sandbox without a callback route. Docker
-//! covers it locally; the explicit live gate adds Daytona VM and job targets.
+//! covers it locally; the live Daytona tier (`PETRI_REQUIRE_DAYTONA`, see
+//! `crates/core/executor-sandbox/DAYTONA.md`) adds Daytona VM and job
+//! targets.
 
 mod support;
 
@@ -12,7 +14,7 @@ use runtime::executor::Retention;
 use runtime::ir::RunStatus;
 use runtime::{DaytonaResources, DaytonaSandboxKind, SandboxBackend, SandboxOptions};
 use support::*;
-use testkit::{RunDir, is_docker_ready};
+use testkit::{RunDir, is_daytona_ready, is_docker_ready};
 
 const WORKFLOW: &str = r#"
 on: push
@@ -124,10 +126,14 @@ async fn ordinary_actions_run_without_advertising_an_unreachable_results_service
     check_report(&report.into());
 }
 
+/// Skips without a Daytona credential and plugin, unless
+/// `PETRI_REQUIRE_DAYTONA` says the tier must run. Creates billable
+/// sandboxes: one VM and one VM with a nested job container.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires DAYTONA_API_KEY and the Daytona plugin; creates billable sandboxes"]
 async fn daytona_runs_process_and_container_jobs_with_javascript_and_docker_actions() {
-    env::var("DAYTONA_API_KEY").expect("live gate requires DAYTONA_API_KEY");
+    if !is_daytona_ready().await {
+        return;
+    }
     let kind = env::var("PETRI_TEST_DAYTONA_KIND")
         .unwrap_or_else(|_| "container".to_owned())
         .parse::<DaytonaSandboxKind>()

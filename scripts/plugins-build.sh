@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Install the sandbox-driver plugin executables the tests launch, from the
 # sandbox-driver revision Petri's workspace manifest pins, under
-# `target/plugins/bin`. With a release target, install all three plugins
-# under `target/<target>/plugins/bin` for bundling. Cargo skips a plugin
-# already installed from the same revision. Set SANDBOX_DRIVER_SOURCE to a
-# local checkout to build the provider packages during coordinated development.
+# `target/plugins/bin`: the host and Docker plugins by default, or the kinds
+# SANDBOX_DRIVER_PLUGINS lists (`mise run plugins:build:daytona` adds the
+# Daytona plugin for the live tier). With a release target, install all three
+# plugins under `target/<target>/plugins/bin` for bundling. Cargo skips a
+# plugin already installed from the same revision. Set SANDBOX_DRIVER_SOURCE
+# to a local checkout to build the provider packages during coordinated
+# development.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -13,12 +16,13 @@ if [[ $# -gt 1 ]]; then
   exit 2
 fi
 install_root="$root/target/plugins"
-kinds=(host docker)
+# shellcheck disable=SC2206 # the kinds are space-separated words by contract
+kinds=(${SANDBOX_DRIVER_PLUGINS:-host docker})
 target_args=()
 if [[ $# -eq 1 ]]; then
   install_root="$root/target/$1/plugins"
   target_args=(--target "$1")
-  kinds+=(daytona)
+  kinds=(host docker daytona)
 fi
 if [[ -n "${SANDBOX_DRIVER_SOURCE:-}" ]]; then
   source_root=$(cd "$SANDBOX_DRIVER_SOURCE" && pwd)
