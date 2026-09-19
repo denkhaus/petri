@@ -103,15 +103,14 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
         "ignored.workflow_toml.run.checkpoint",
         "ignored.workflow_toml.run.artifacts",
         "ignored.workflow_toml.run.agent.fabro_tools",
-        "ignored.workflow_toml.environments.review.network",
-        "ignored.workflow_toml.environments.review.image.dockerfile",
     ] {
         assert!(
             platform_codes.contains(&code.to_string()),
             "{code} in {platform_codes:?}"
         );
     }
-    // Sections the runner now applies do not warn.
+    // Sections the runner now applies do not warn, and neither do the
+    // platform's own environment keys (`network`, `image.dockerfile`).
     for code in [
         "ignored.workflow_toml.run.goal",
         "ignored.workflow_toml.run.clone",
@@ -120,10 +119,12 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
         "ignored.workflow_toml.run.environment",
         "ignored.workflow_toml.run.execution",
         "ignored.workflow_toml.environments",
+        "ignored.workflow_toml.environments.review.network",
+        "ignored.workflow_toml.environments.review.image.dockerfile",
     ] {
         assert!(
             !platform_codes.contains(&code.to_string()),
-            "{code} is applied, not ignored: {platform_codes:?}"
+            "{code} is applied or known, not ignored: {platform_codes:?}"
         );
     }
     assert!(
@@ -1053,13 +1054,9 @@ fn environments_come_from_every_layer_and_the_bundle_wins() {
         "{:?}",
         graph.scopes[0].runtime.target
     );
-    assert_eq!(
-        diagnostics,
-        [(
-            "ignored.workflow_toml.environments.docker-small.lifecycle".to_string(),
-            "settings.toml".to_string()
-        )],
-        "a platform-only key warns against the layer that set it"
+    assert!(
+        diagnostics.is_empty(),
+        "the host's `lifecycle` is the platform's key, known and silent: {diagnostics:?}"
     );
 
     // A bundle with no `workflow.toml` at all runs in the host's selection.
@@ -1144,6 +1141,87 @@ fn environments_come_from_every_layer_and_the_bundle_wins() {
         lowered.graph.expect("lowers").params["fabro.environment"]["image"],
         json!(null)
     );
+}
+
+/// Fabro's platform-only environment keys are known in every layer and
+/// warn nothing: a project layer like the Fabro repository's own, which
+/// declares a Daytona environment with a Dockerfile, a lifecycle and
+/// labels, lowers clean. A key neither Petri nor Fabro's table accepts
+/// still warns, against the layer that set it.
+#[test]
+fn platform_environment_keys_are_known_and_unknown_ones_warn() {
+    let project = "[run.environment]\nid = \"fabro-dev\"\n\
+                   [environments.fabro-dev]\nprovider = \"daytona\"\n\
+                   [environments.fabro-dev.image]\ndockerfile = { path = \"Dockerfile\" }\n\
+                   [environments.fabro-dev.resources]\ncpu = 8\nmemory = \"16GB\"\n\
+                   [environments.fabro-dev.lifecycle]\nauto_stop = \"30m\"\n\
+                   [environments.fabro-dev.labels]\nrepo = \"fabro-sh/fabro\"\n";
+    let lower = |project: &str, workflow: &str| {
+        let lowered = load(
+            "wf/w.fabro",
+            &dot("start -> exit"),
+            &files(&[
+                (".fabro/project.toml", project),
+                ("wf/workflow.toml", workflow),
+            ]),
+            &CompileInputs::new(),
+        );
+        let diagnostics: Vec<(String, String)> = lowered
+            .diagnostics
+            .iter()
+            .map(|d| (d.code.to_string(), d.span.file.to_string()))
+            .collect();
+        (lowered.graph.expect("lowers"), diagnostics)
+    };
+
+    let (graph, diagnostics) = lower(project, "");
+    assert!(
+        diagnostics.is_empty(),
+        "the platform's keys are known and silent: {diagnostics:?}"
+    );
+    let environment = &graph.params["fabro.environment"];
+    assert_eq!(environment["id"], json!("fabro-dev"));
+    assert_eq!(environment["provider"], json!("daytona"));
+    assert_eq!(graph.params["fabro.launch"]["cpu_cores"], json!(8));
+
+    // The same keys on an environment no run selects, and `cwd` and
+    // `network` on the selected one, are as silent.
+    let with_cwd = project.replacen(
+        "provider = \"daytona\"\n",
+        "provider = \"daytona\"\ncwd = \"/work\"\n",
+        1,
+    );
+    let (_, diagnostics) = lower(
+        &format!(
+            "{with_cwd}[environments.fabro-dev.network]\nmode = \"block\"\n\
+             [environments.other]\nprovider = \"docker\"\n\
+             [environments.other.lifecycle]\npreserve = true\n"
+        ),
+        "",
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+    // A key outside Fabro's table warns, naming the layer, in every layer
+    // and on every environment; the graph still lowers.
+    let (_, diagnostics) = lower(
+        &format!("{project}[environments.other]\nprovider = \"docker\"\nprovisioner = \"x\"\n"),
+        "[environments.fabro-dev]\nimage_pull = \"always\"\n\
+         [run.environment]\nid = \"fabro-dev\"\nlabel = \"y\"\n",
+    );
+    assert_eq!(diagnostics, [
+        (
+            "ignored.workflow_toml.environments.fabro-dev.image_pull".to_string(),
+            "wf/workflow.toml".to_string()
+        ),
+        (
+            "ignored.workflow_toml.environments.other.provisioner".to_string(),
+            ".fabro/project.toml".to_string()
+        ),
+        (
+            "ignored.workflow_toml.run.environment.label".to_string(),
+            "wf/workflow.toml".to_string()
+        ),
+    ]);
 }
 
 /// The launch's environment (`petri run --environment`, the

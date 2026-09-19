@@ -24,13 +24,17 @@
 //!   `daytona` the Daytona plugin) when `--backend` is not given;
 //!   `image.docker` is the scope's container image under those two; `env` is
 //!   the scope environment, with `{{ secrets.NAME }}` as a `$secret` reference
-//!   resolved at spawn; `resources` are the Daytona runner size. `network`,
-//!   `lifecycle`, `labels`, `cwd` and `image.dockerfile` are platform-only and
-//!   warn, as does an image on the `local` provider, which Fabro ignores on the
-//!   host. Both tables are read from every settings layer and merged key by
-//!   key, the host's settings layer under `.fabro/project.toml` under
-//!   `workflow.toml` ([`EnvironmentLayers`]), so a bundle can name an
-//!   environment the host's catalog declares.
+//!   resolved at spawn; `resources` are the Daytona runner size. The other keys
+//!   Fabro's environment table accepts (`cwd`, `network`, `lifecycle`,
+//!   `labels`, `image.dockerfile`) are the Fabro platform's: known, read by
+//!   nothing here, and accepted silently in every layer, as `[workflow] engine`
+//!   is ([`ENVIRONMENT_KEYS`]). A warning is for a key the lowering reads but
+//!   cannot apply as Fabro does: an image on the `local` provider (which Fabro
+//!   ignores on the host) and `resources` off Daytona. A key neither Petri nor
+//!   Fabro's table knows warns as ignored. Both tables are read from every
+//!   settings layer and merged key by key, the host's settings layer under
+//!   `.fabro/project.toml` under `workflow.toml` ([`EnvironmentLayers`]), so a
+//!   bundle can name an environment the host's catalog declares.
 //! - `[run.prepare]`: setup steps that run as command nodes between `start` and
 //!   its successors, in the selected environment, before any workflow node.
 //!   Each step gets the section's `timeout` (default five minutes) and
@@ -171,6 +175,7 @@ pub fn read(
     // The environment resolves over every layer, so a bundle with no
     // `workflow.toml` still runs in the environment the host's layer names.
     let layers = EnvironmentLayers::read(files, inputs, table.as_ref().map(|t| (path.as_str(), t)));
+    reader.environment_keys(&layers);
     reader.environment(&layers);
     let mut settings = reader.settings;
     settings.hooks_text = text.map(|text| (path, text));
@@ -791,10 +796,47 @@ impl Reader<'_> {
         // together with the other settings layers.
     }
 
+    /// Every `[environments.<id>]` and `[run.environment]` key of every
+    /// layer is one Fabro's table accepts, whether this lowering reads it or
+    /// the platform does; a key outside the set is ignored with a warning
+    /// that names the layer. A warning, not Fabro's refusal: the host's
+    /// settings layer is Fabro's own catalog, which its parser accepted, so
+    /// a key this build has not learned must not refuse the run.
+    fn environment_keys(&mut self, layers: &EnvironmentLayers) {
+        let default_source = self.path;
+        let at = |path: &str| layers.source_of(path).unwrap_or(default_source).to_owned();
+        for (id, table) in &layers.environments {
+            let Some(table) = table.as_table() else {
+                continue;
+            };
+            for key in table.keys() {
+                if !ENVIRONMENT_KEYS.contains(&key.as_str()) {
+                    self.ignored_in(
+                        &at(&format!("environments.{id}.{key}")),
+                        &format!("environments.{id}.{key}"),
+                        "not a key Fabro's `[environments.<id>]` table accepts",
+                    );
+                }
+            }
+        }
+        if let Some(run_env) = &layers.run_environment {
+            for key in run_env.keys() {
+                if !RUN_ENVIRONMENT_KEYS.contains(&key.as_str()) {
+                    self.ignored_in(
+                        &at(&format!("run.environment.{key}")),
+                        &format!("run.environment.{key}"),
+                        "not a key Fabro's `[run.environment]` table accepts",
+                    );
+                }
+            }
+        }
+    }
+
     /// `[run.environment]` over `[environments.<id>]`, both merged across
     /// the layers, Fabro's `combine`: the run's fields win, the named
     /// environment fills the rest; the launch's selection wins over every
     /// layer's `id`. Every diagnostic names the layer the setting came from.
+    /// The platform's keys ([`ENVIRONMENT_KEYS`]) are not inspected.
     fn environment(&mut self, layers: &EnvironmentLayers) {
         let empty = toml::Table::new();
         let run_env = match (&layers.run_environment, &layers.launch) {
@@ -874,43 +916,26 @@ impl Reader<'_> {
             memory_mb: None,
             disk_mb:   None,
         };
+        // `image.docker` only: `image.dockerfile` is the platform's, which
+        // builds the image there; the scope here runs on `image.docker` or
+        // the backend's default runner image.
         if let Some((image, table)) = field("image")
             && let Some(image) = image.as_table()
+            && let Some(docker) = image.get("docker").and_then(toml::Value::as_str)
         {
-            if let Some(docker) = image.get("docker").and_then(toml::Value::as_str) {
-                if provider == "local" {
-                    // Fabro ignores the image on the host, and a server's
-                    // catalog may carry one on a `local` environment (its
-                    // seeded default keeps the image whatever the provider).
-                    self.ignored_in(
-                        &at(&format!("{table}.image.docker")),
-                        &format!("environments.{id}.image"),
-                        "the `local` provider runs on the host; an image applies to `docker` and \
-                         `daytona`",
-                    );
-                } else {
-                    environment.image = Some(docker.to_string());
-                }
-            }
-            if image.contains_key("dockerfile") {
-                // Fabro builds the image on its platform. The standalone
-                // runner has no image build; the run uses the selected
-                // backend's default runner image, and says so.
+            if provider == "local" {
+                // Fabro ignores the image on the host, and a server's
+                // catalog may carry one on a `local` environment (its
+                // seeded default keeps the image whatever the provider).
                 self.ignored_in(
-                    &at(&format!("{table}.image.dockerfile")),
-                    &format!("environments.{id}.image.dockerfile"),
-                    "the standalone runner does not build images; the scope runs on the selected \
-                     backend's default runner image (build the image yourself and name it with \
-                     `image.docker` to use it)",
+                    &at(&format!("{table}.image.docker")),
+                    &format!("environments.{id}.image"),
+                    "the `local` provider runs on the host; an image applies to `docker` and \
+                     `daytona`",
                 );
+            } else {
+                environment.image = Some(docker.to_string());
             }
-        }
-        if base.contains_key("cwd") {
-            self.ignored_in(
-                &at(&format!("{base_table}.cwd")),
-                &format!("environments.{id}.cwd"),
-                "the working directory is the sandbox workspace the run was given",
-            );
         }
         if let Some((resources, table)) = field("resources")
             && let Some(resources) = resources.as_table()
@@ -928,22 +953,6 @@ impl Reader<'_> {
                     &format!("environments.{id}.resources"),
                     "resource limits apply to a Daytona runner; the host and Docker providers \
                      run unconstrained",
-                );
-            }
-        }
-        for (key, why) in [
-            ("network", "network policy is a Fabro platform facility"),
-            (
-                "lifecycle",
-                "sandbox lifecycle is decided by `--retain` and the run's teardown",
-            ),
-            ("labels", "sandbox labels are a Fabro platform record"),
-        ] {
-            if let Some((_, table)) = field(key) {
-                self.ignored_in(
-                    &at(&format!("{table}.{key}")),
-                    &format!("environments.{id}.{key}"),
-                    why,
                 );
             }
         }
@@ -1134,6 +1143,37 @@ const WORKFLOW_TOML_TOP_LEVEL: &[&str] = &[
 /// name, description, graph path and metadata, and `engine`
 /// (`"petri"` or `"legacy"`), which Fabro reads to choose the engine.
 const WORKFLOW_SECTION_KEYS: &[&str] = &["name", "description", "graph", "metadata", "engine"];
+
+/// The `[environments.<id>]` keys Fabro's settings parser accepts
+/// (`EnvironmentLayer` in `fabro-config`). The lowering reads `provider`,
+/// `image.docker`, `resources` and `env`; `cwd`, `network`, `lifecycle`,
+/// `labels` and `image.dockerfile` are the Fabro platform's, which acts on
+/// them around the engine (the working directory, network policy, sandbox
+/// lifecycle and labels, the image build), so they are known here and read
+/// by nothing, as `[workflow] engine` is.
+const ENVIRONMENT_KEYS: &[&str] = &[
+    "provider",
+    "cwd",
+    "image",
+    "resources",
+    "network",
+    "lifecycle",
+    "labels",
+    "env",
+];
+
+/// The `[run.environment]` keys Fabro's settings parser accepts
+/// (`RunEnvironmentLayer`): the `id` and the named environment's own
+/// overrides, less `provider` and `cwd`.
+const RUN_ENVIRONMENT_KEYS: &[&str] = &[
+    "id",
+    "image",
+    "resources",
+    "network",
+    "lifecycle",
+    "labels",
+    "env",
+];
 
 /// Legacy `[llm]` keys Fabro refuses with a rename hint.
 const WORKFLOW_TOML_LEGACY_LLM_KEYS: &[&str] = &[

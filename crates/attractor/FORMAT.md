@@ -1505,7 +1505,7 @@ Petri-stricter, tested as differences and listed in
 `crates/fabro/acceptance/CONTRACT.md`: the 500-firing cap and its
 `attractor.max_visits_too_large` / `info.budget.default` diagnostics (Fabro is
 unlimited), `outcome=success` after its sunset, the 10,000-invocation maximum,
-`image.dockerfile` and the other platform-only `workflow.toml` warnings,
+the platform-only `workflow.toml` warnings,
 unknown graph, node and edge attributes outside the `x.` namespace
 (`attractor.unknown_attribute`; Fabro has no rule for attribute names), and
 `on_failure="partially_succeed"` in the other direction: Petri accepts a

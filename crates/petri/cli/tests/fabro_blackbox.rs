@@ -873,7 +873,7 @@ async fn workflow_toml_inputs_bind_and_unsupported_sections_are_reported() {
     start -> say -> exit
 }"#,
         Some(
-            "[run.inputs]\nword = \"bound\"\n\n[run.model.fallbacks]\n\"gpt-5.6-sol\" = [\"claude-sonnet-5\"]\n\n[run.environment]\nid = \"review\"\n\n[environments.review]\nprovider = \"local\"\n\n[environments.review.network]\nmode = \"none\"\n",
+            "[run.inputs]\nword = \"bound\"\n\n[run.model.fallbacks]\n\"gpt-5.6-sol\" = [\"claude-sonnet-5\"]\n\n[run.pull_request]\nenabled = false\n\n[run.environment]\nid = \"review\"\n\n[environments.review]\nprovider = \"local\"\n\n[environments.review.network]\nmode = \"none\"\n",
         ),
     );
     let finished = case.run(&workflow, &[]).await;
@@ -890,6 +890,14 @@ async fn workflow_toml_inputs_bind_and_unsupported_sections_are_reported() {
     );
     assert!(
         finished
+            .stderr
+            .contains("ignored.workflow_toml.run.pull_request"),
+        "{}",
+        finished.stderr
+    );
+    // `network` is the Fabro platform's environment key: known, and silent.
+    assert!(
+        !finished
             .stderr
             .contains("ignored.workflow_toml.environments.review.network"),
         "{}",
