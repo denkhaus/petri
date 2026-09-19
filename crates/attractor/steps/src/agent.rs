@@ -27,6 +27,8 @@ use std::time::{Duration, Instant};
 
 pub use backend::AgentBackend;
 use backend::{AgentError, Session};
+use execution::ExecutionIdentity;
+use execution::controls::LiveTurns;
 use frontend_attractor::Policy;
 use frontend_attractor::kinds::{AGENT_KIND, MAX_OUTPUT_RETRIES, StageOutcome};
 use frontend_attractor::mcps::McpServer;
@@ -163,6 +165,13 @@ fn default_true() -> bool {
 /// its fidelity and thread resolve: `{ kind, node, firing, attempt, fidelity,
 /// fidelity_source, thread, thread_source, reused, backend }`.
 pub const THREAD_EVENT: &str = "attractor.thread";
+
+/// The `kind` of the `StepEvent::Custom` payload an agent node emits when a
+/// host's interrupt stopped its current model turn, on either backend:
+/// `{ kind, node, firing, attempt, backend, session }`. The session stays
+/// open and the node continues with its next input. On the native backend
+/// Pebble's own `RoundInterrupted` precedes it in the backend envelope.
+pub const INTERRUPTED_EVENT: &str = "attractor.turn.interrupted";
 
 pub struct AgentStep;
 
@@ -492,10 +501,21 @@ async fn run_session(
 ) -> Result<Stage, AgentError> {
     let mut prompt = config.assemble(fidelity, run_id, contract);
     let mut repairs = 0_u64;
+    // Each turn is marked live for the control service while it runs, so a
+    // host's interrupt finds it; a driver built outside the coordinator has
+    // no identity, and a host without the capability never interrupts.
+    let turns = ctx.capability::<LiveTurns>();
+    let execution = ctx
+        .capability::<ExecutionIdentity>()
+        .map(|identity| identity.execution);
     let (outcome, text) = loop {
         // Every turn, the repair turns included, runs on the same plan: a
         // provider-local failure moves the conversation to the next route,
         // inside Pebble, and the session reports the move.
+        let live = match (&turns, execution) {
+            (Some(turns), Some(execution)) => Some(turns.begin(execution, ctx.firing)),
+            _ => None,
+        };
         let text = session
             .prompt(
                 &prompt,
@@ -503,7 +523,9 @@ async fn run_session(
                 ctx.env.grace(),
                 config.timeout_ms.map(Duration::from_millis),
             )
-            .await?;
+            .await;
+        drop(live);
+        let text = text?;
         ctx.log(LogStream::Stdout, text.clone()).await;
         *turn_count += 1;
         match validate(contract, &text) {

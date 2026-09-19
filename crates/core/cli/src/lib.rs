@@ -442,7 +442,7 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
             // distribution installed, so both run at admission.
             let controls = ControlService::new();
             let hooks = controls.hooks(rt.installed_hooks());
-            let rt = rt.hooks(hooks);
+            let rt = rt.hooks(hooks).capability(controls.turns());
             let default_retention = rt
                 .frontend_for(&target.file, target.format.as_deref())
                 .ok()

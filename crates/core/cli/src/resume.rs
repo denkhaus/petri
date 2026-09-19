@@ -122,7 +122,7 @@ pub(crate) async fn resume(
     // so, before the first attempt is admitted.
     let controls = ControlService::new();
     let hooks = controls.hooks(rt.installed_hooks());
-    let rt = rt.hooks(hooks);
+    let rt = rt.hooks(hooks).capability(controls.turns());
     let options = args.run_options(&run_dir, default_retention, &launch, provider, runner);
     let answers = args.answers(&launch);
     if state.paused {

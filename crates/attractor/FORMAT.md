@@ -421,9 +421,15 @@ the coordinator registers `attractor_steps::workflow::ChildInvoker`.
 - **`attractor/agent`** assembles the prompt from the goal, the preamble of
   earlier stages at the node's resolved fidelity, and the node's prompt
   ("Fidelity and threads" below). Both backends share routing, `output_schema`
-  validation, `output_retries` repair turns, and steering deliveries. Each
-  attempt starts a fresh agent session unless the node continues a retained
-  thread at `full` fidelity (native backend only). Repair turns keep that
+  validation, `output_retries` repair turns, steering deliveries, and the
+  interrupt control: a host stops the node's current model turn (the request
+  in flight and the tool calls it is running), the session stays open, and
+  the node continues with its next input, the interrupt's text if it carries
+  one, else the next steer delivered to it. The node reports the stopped
+  turn as `kind = "attractor.turn.interrupted"` (`node`, `firing`, `attempt`,
+  `backend`, `session`). A node with no turn in flight refuses the control.
+  Each attempt starts a fresh agent session unless the node continues a
+  retained thread at `full` fidelity (native backend only). Repair turns keep that
   session's history. `speed` and `max_tokens` configure the native model
   request; on ACP they are observer metadata like the other model settings.
   `backend="api"` is the default, as Fabro's `select_run_backend` picks the
@@ -666,6 +672,14 @@ warned once per hook and tool as `attractor.hook.warning`, naming the backend
 Fabro ignores ACP tool hooks silently; the warning is an accepted
 difference.
 
+An interrupt on the ACP backend is `session/cancel` without ending the
+process: the agent answers the prompt in flight with stop reason
+`cancelled`, the client records `attractor.turn.interrupted`, and the
+session's next `session/prompt` is the interrupt's text, else the next text
+the host delivers. The interrupted turn's partial text is not the node's
+answer. An agent that ignores `session/cancel` keeps the turn running until
+it ends on its own.
+
 ## Native Pebble
 
 ```dot
@@ -772,8 +786,16 @@ ride Pebble's steering bus, one per node run, in its follow-up mode
 (`SteeringBus::follow_up`); text delivered while the session is still being
 built waits on the bus and reaches the session when it attaches, in the same
 mode. A delivered core `Answer` naming one of the session's open
-questions answers it instead (below). Cancellation settles the active prompt
-and shuts down its session.
+questions answers it instead (below). A delivered `Interrupt`
+(`{ "$interrupt": { "steer"? } }`) stops the round in progress through the
+bus: with text, `SteeringBus::interrupt_then_steer`, and the text opens the
+next round; without, `SteeringBus::interrupt`, the prompt parks at its next
+turn boundary, and the next text the host delivers is sent as steering
+(`SteeringBus::steer`), which is what wakes it. Pebble reports the stop as
+`RoundInterrupted` on its stream and the node adds
+`attractor.turn.interrupted`; the session and its history survive, with the
+cancelled tool calls answered as cancelled. Cancellation settles the active
+prompt and shuts down its session.
 Kill stops active tool processes immediately. A driver hard abort can discard
 an unsettled prompt report; scope release remains responsible for cleanup.
 
