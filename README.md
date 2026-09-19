@@ -109,6 +109,9 @@ crates/core/driver/tests/timeout.rs       exec §7 6: timeouts, and the race und
 crates/core/driver/tests/environments.rs  exec §7 7,10: acquire failure and retention
 crates/core/driver/tests/secrets.rs       exec §7 8: masking, and what reaches the log
 crates/core/driver/tests/docker.rs        exec §7 3,10 Docker halves; skipped without a daemon
+crates/core/executor-sandbox/tests/docker_backend.rs   the sandbox executor over the Docker plugin: the workspace in the sandbox, exit codes and signals, files over the wire, the crash fence, retention, services, one-shot actions
+crates/core/executor-sandbox/tests/daytona_backend.rs  the same executor over the Daytona plugin, live (`mise run test:daytona`, `PETRI_REQUIRE_DAYTONA`): the runner VM, a nested container job, files, the fence, retention, output after idle and under a burst, a preview URL, the failure modes; `DAYTONA.md` maps Fabro's former live suite onto it
+crates/petri/lib/tests/daytona.rs             the standalone host on `--backend daytona`, live: retention and `prune` with the tombstone, `resume` fencing the crashed VM
 
 crates/core/frontend/tests/expr_grammar.rs   frontend §7 1-2: grammar, precedence, coercion, fuzz, table gate
 crates/github/frontend/tests/lowering.rs     frontend §7 3-6, the pure half: what lowering produces
@@ -353,9 +356,10 @@ release and prune control cleanup. Shared runner snapshots remain available.
 Daytona has no inferred route to Petri's ObjectService. Ordinary JavaScript
 and Docker actions still run, with the service variables omitted. Artifact
 and cache actions need `PETRI_SANDBOX_DAYTONA_HOST_ADDRESS` set to a name or
-address reachable from the VM. Local transport and adapter tests pass;
-the ignored live Daytona workflow test requires credentials and has not yet
-been run against the hosted preview service.
+address reachable from the VM. Local transport and adapter tests pass. The
+live Daytona tier (`mise run test:daytona`, see
+[the live Daytona tier](crates/core/executor-sandbox/DAYTONA.md)) needs
+credentials and has not yet been run against the hosted service.
 
 Release archives bundle the Docker, Host, and Daytona plugin executables from
 the pinned revision. Petri embeds their SHA-256 digests at release build time.
@@ -395,6 +399,20 @@ snapshot. The field contract is
 `mise run test:remote` transfers an artifact through a separate Docker daemon
 with no host filesystem mounts. `mise run check` includes this test. Set
 `PETRI_REQUIRE_DOCKER=1` to require Docker instead of skipping unavailable tests.
+
+`mise run test:daytona` runs the live Daytona tier against the account
+`DAYTONA_API_KEY` names: the sandbox executor's Daytona battery
+(`crates/core/executor-sandbox/tests/daytona_backend.rs`), the host's
+retention, prune and resume cells (`crates/petri/lib/tests/daytona.rs`), the
+CLI retention cell, and the GitHub Actions cell with a VM job and a nested
+container job. It builds the Daytona plugin (`mise run plugins:build:daytona`)
+and sets `PETRI_REQUIRE_DAYTONA=1`, so a missing credential or plugin fails
+with its reason instead of skipping. Without the variable the same tests skip
+with a `skipping:` notice, which is what the routine suite does. No CI job has
+the credential, so the tier is run by hand before a change to the Daytona
+path or the sandbox-driver pin lands. It creates billable sandboxes.
+[`crates/core/executor-sandbox/DAYTONA.md`](crates/core/executor-sandbox/DAYTONA.md)
+maps Fabro's former 22 live Daytona tests onto the tier and records the gaps.
 
 `mise run test` runs all of them with Nextest, then runs the maintained doctests
 with Cargo.
@@ -1028,7 +1046,8 @@ Three things this package taught, kept because they generalise:
 - **Docker tests skip without a plugin and a daemon, and `PETRI_REQUIRE_DOCKER`
   turns that skip into a failure.** CI sets it on the Linux job. A silently skipped
   acceptance battery is indistinguishable from a passing one, and that job exists
-  precisely to say the battery ran.
+  precisely to say the battery ran. The live Daytona tier follows the same
+  convention with `PETRI_REQUIRE_DAYTONA`, which `mise run test:daytona` sets.
 - **A container test reads the workspace through the sandbox, never through a
   host path.** The workspace lives in the sandbox's own volume. A test checks a
   file the step wrote with `ExecEnv::read_file`, or with `docker exec` through

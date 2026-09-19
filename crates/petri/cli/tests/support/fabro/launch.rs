@@ -38,9 +38,47 @@ pub(crate) struct Case {
     layers:                Vec<String>,
     providers:             Vec<&'static str>,
     plugin_link:           PathBuf,
-    /// The Docker plugin, linked per case, when the case runs on
-    /// `--backend docker`.
-    docker_link:           Option<PathBuf>,
+    /// The container backend the case runs on, when it does not run on the
+    /// host: its `--backend` name and its plugin, linked per case.
+    container:             Option<ContainerBackend>,
+}
+
+/// A container backend a case runs its workflows on: `docker` through the
+/// Docker plugin, `daytona` through the Daytona plugin.
+struct ContainerBackend {
+    kind: &'static str,
+    /// The plugin, linked per case, so a leaked plugin process is
+    /// attributable to the case by its command line.
+    link: PathBuf,
+}
+
+impl ContainerBackend {
+    /// The variables Petri forwards to this kind's plugin: the daemon or
+    /// account this test process was pointed at, so the binary's plugin
+    /// reaches the same one. Unset, the plugin uses its defaults.
+    fn forwarded_env(&self) -> &'static [&'static str] {
+        match self.kind {
+            "docker" => &[
+                "DOCKER_HOST",
+                "DOCKER_TLS_VERIFY",
+                "DOCKER_CERT_PATH",
+                "DOCKER_API_VERSION",
+            ],
+            "daytona" => &[
+                "DAYTONA_API_KEY",
+                "DAYTONA_JWT_TOKEN",
+                "DAYTONA_ORGANIZATION_ID",
+                "DAYTONA_API_URL",
+                "DAYTONA_TARGET",
+            ],
+            other => panic!("no container backend `{other}`"),
+        }
+    }
+
+    /// `PETRI_SANDBOX_<KIND>_PLUGIN`.
+    fn plugin_variable(&self) -> String {
+        format!("PETRI_SANDBOX_{}_PLUGIN", self.kind.to_ascii_uppercase())
+    }
 }
 
 impl Case {
@@ -72,26 +110,55 @@ impl Case {
             layers: Vec::new(),
             providers: Vec::new(),
             plugin_link,
-            docker_link: None,
+            container: None,
         }
     }
 
     /// Run this case's workflows on `--backend docker` through the Docker
     /// plugin `PETRI_SANDBOX_DOCKER_PLUGIN` names. The caller checks that a
     /// daemon is reachable first (`testkit::is_docker_ready`).
-    pub(crate) fn docker(mut self) -> Self {
-        let plugin = env::var_os("PETRI_SANDBOX_DOCKER_PLUGIN")
-            .map(PathBuf::from)
-            .expect("PETRI_SANDBOX_DOCKER_PLUGIN names the Docker sandbox plugin");
-        let link = self.root.join("plugins").join("sandbox-driver-docker");
-        link_plugin(&plugin, &link);
-        self.docker_link = Some(link);
+    pub(crate) fn docker(self) -> Self {
+        self.on_container_backend("docker")
+    }
+
+    /// Run this case's workflows on `--backend daytona` through the Daytona
+    /// plugin `PETRI_SANDBOX_DAYTONA_PLUGIN` names, with the credentials in
+    /// this process's environment. The caller checks the tier is available
+    /// first (`testkit::is_daytona_ready`).
+    pub(crate) fn daytona(self) -> Self {
+        self.on_container_backend("daytona")
+    }
+
+    fn on_container_backend(mut self, kind: &'static str) -> Self {
+        let backend = ContainerBackend {
+            kind,
+            link: self
+                .root
+                .join("plugins")
+                .join(format!("sandbox-driver-{kind}")),
+        };
+        let variable = backend.plugin_variable();
+        let plugin = env::var_os(&variable).map_or_else(
+            || panic!("{variable} names the {kind} sandbox plugin"),
+            PathBuf::from,
+        );
+        link_plugin(&plugin, &backend.link);
+        self.container = Some(backend);
         self
     }
 
     /// Whether this case runs on `--backend docker`.
     pub(crate) fn is_docker(&self) -> bool {
-        self.docker_link.is_some()
+        self.container
+            .as_ref()
+            .is_some_and(|backend| backend.kind == "docker")
+    }
+
+    /// The `--backend` argument of a case on a container backend.
+    fn backend_args(&self) -> Vec<&str> {
+        self.container
+            .as_ref()
+            .map_or_else(Vec::new, |backend| vec!["--backend", backend.kind])
     }
 
     /// The environment every `petri` command of this case runs with.
@@ -110,17 +177,9 @@ impl Case {
             .env("PETRI_SANDBOX_HOST_PLUGIN", &self.plugin_link)
             .env("PETRI_SANDBOX_PLUGIN_DEV", "1")
             .env("PETRI_LOG", "warn");
-        if let Some(docker) = &self.docker_link {
-            command.env("PETRI_SANDBOX_DOCKER_PLUGIN", docker);
-            // The daemon this test process was pointed at, so the binary's
-            // plugin reaches the same one: the variables Petri forwards to
-            // the Docker plugin. Unset, the plugin uses the default socket.
-            for name in [
-                "DOCKER_HOST",
-                "DOCKER_TLS_VERIFY",
-                "DOCKER_CERT_PATH",
-                "DOCKER_API_VERSION",
-            ] {
+        if let Some(backend) = &self.container {
+            command.env(backend.plugin_variable(), &backend.link);
+            for name in backend.forwarded_env() {
                 if let Some(value) = env::var_os(name) {
                     command.env(name, value);
                 }
@@ -140,10 +199,8 @@ impl Case {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        if self.docker_link.is_some() {
-            command.args(["--backend", "docker"]);
-        }
+            .kill_on_drop(true)
+            .args(self.backend_args());
         let output = timeout(RUN_DEADLINE, command.output())
             .await
             .expect("prune finishes before the deadline")
@@ -253,10 +310,11 @@ impl Case {
             Target::Run(_) => "run",
             Target::Resume => "resume",
         });
-        if self.docker_link.is_some() {
-            command.args(["--backend", "docker"]);
-        }
-        command.args(args).arg("--run-dir").arg(&self.run_dir);
+        command
+            .args(self.backend_args())
+            .args(args)
+            .arg("--run-dir")
+            .arg(&self.run_dir);
         if let Target::Run(workflow) = target {
             command.arg(workflow);
         }

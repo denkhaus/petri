@@ -28,6 +28,11 @@ run = "cargo run --locked -p petri-cli --"
 description = "Install the sandbox-driver plugins the tests launch, at Petri's pinned revision"
 run = "scripts/plugins-build.sh"
 
+[tasks."plugins:build:daytona"]
+description = "Install the Daytona plugin beside the host and Docker ones, for the live Daytona tier"
+env = { SANDBOX_DRIVER_PLUGINS = "host docker daytona" }
+run = "scripts/plugins-build.sh"
+
 [tasks.fmt]
 description = "Format Rust with the pinned nightly formatter"
 run = "cargo +nightly-2026-04-14 fmt --all"
@@ -79,6 +84,12 @@ description = "Run the differential matrix: the reference-version check, then ev
 depends = ["plugins:build"]
 env = { CARGO_PROFILE_TEST_DEBUG = "0", PETRI_SANDBOX_DOCKER_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-docker", PETRI_SANDBOX_HOST_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-host" }
 run = "scripts/test-fabro-differential.sh"
+
+[tasks."test:daytona"]
+description = "Run the live Daytona tier against the account DAYTONA_API_KEY names: every Daytona test is required, so a missing credential or plugin fails instead of skipping. Creates billable sandboxes"
+depends = ["plugins:build:daytona"]
+env = { CARGO_PROFILE_TEST_DEBUG = "0", PETRI_REQUIRE_DAYTONA = "1", PETRI_SANDBOX_DAYTONA_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-daytona", PETRI_SANDBOX_DOCKER_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-docker", PETRI_SANDBOX_HOST_PLUGIN = "{{config_root}}/target/plugins/bin/sandbox-driver-host" }
+run = "cargo nextest run --locked --workspace --all-targets --all-features --no-tests=fail --no-fail-fast -E 'binary(daytona_backend) | binary(daytona) | test(/daytona/)'"
 
 [tasks."test:release"]
 description = "Run all Rust tests in release mode"
