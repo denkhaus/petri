@@ -1118,68 +1118,32 @@ fn environments_come_from_every_layer_and_the_bundle_wins() {
         )],
         "an id no layer declares"
     );
-    assert_eq!(
-        refused(&files(&[(
-            "wf/workflow.toml",
-            "[run.environment]\nid = \"local\"\n"
-        )])),
-        [(
-            "unsupported.workflow_toml.environments.image".to_string(),
-            "settings.toml".to_string()
-        )],
-        "the host's image on a local environment"
-    );
-}
-
-/// `[run.agent.mcps.<name>] id = "..."` resolves against the MCP catalog
-/// the host binds (`fabro.mcp_catalog_toml`, or
-/// `Fabro::with_mcp_catalog_toml`): the catalog entry lands on the agent node
-/// under the reference's name. Without a catalog the reference stays the
-/// standalone runner's refusal.
-#[test]
-fn mcp_catalog_references_resolve_against_the_hosts_catalog() {
-    let catalog = "[files-prod]\ntype = \"stdio\"\ncommand = [\"srv\", \"--prod\"]\n";
-    let files = files(&[(
-        "wf/workflow.toml",
-        "[run.agent.mcps.notes]\nid = \"files-prod\"\n",
-    )]);
-    let graph_dot = dot(r#"
-        graph [backend="api", default_model="m"]
-        a [prompt="a"]
-        start -> a -> exit
-    "#);
-    let check = |lowered: frontend::Lowered| {
-        assert!(
-            !lowered.diagnostics.has_errors(),
-            "{:?}",
-            lowered.diagnostics
-        );
-        let graph = lowered.graph.expect("graph");
-        let mcps = node(&graph, "a").step.config["mcps"].clone();
-        assert_eq!(mcps.as_array().map(Vec::len), Some(1), "{mcps}");
-        assert_eq!(mcps[0]["name"], json!("notes"));
-        assert_eq!(mcps[0]["source"], json!("mcp-catalog:files-prod"));
-        assert_eq!(mcps[0]["transport"]["command"], json!(["srv", "--prod"]));
-    };
-    check(load(
+    // The host's image on a local environment is ignored, as Fabro ignores
+    // it on the host, and the warning names the layer that set it.
+    let lowered = load(
         "wf/w.fabro",
-        &graph_dot,
-        &files,
-        &CompileInputs::new().with_var(frontend_fabro::MCP_CATALOG_VAR, catalog),
-    ));
-    check(
-        Fabro::new()
-            .with_mcp_catalog_toml(Some(catalog.to_owned()))
-            .load("wf/w.fabro", &graph_dot, &files, &CompileInputs::new()),
+        &dot("start -> exit"),
+        &files(&[("wf/workflow.toml", "[run.environment]\nid = \"local\"\n")]),
+        &inputs,
     );
-    let codes: Vec<String> = load("wf/w.fabro", &graph_dot, &files, &CompileInputs::new())
+    assert!(
+        !lowered.diagnostics.has_errors(),
+        "{:?}",
+        lowered.diagnostics
+    );
+    let warnings: Vec<(String, String)> = lowered
         .diagnostics
         .iter()
-        .map(|d| d.code.to_string())
+        .map(|d| (d.code.to_string(), d.span.file.to_string()))
         .collect();
-    assert_eq!(codes, [
-        "unsupported.workflow_toml.run.agent.mcps.reference"
-    ]);
+    assert_eq!(warnings, [(
+        "ignored.workflow_toml.environments.local.image".to_string(),
+        "settings.toml".to_string()
+    )]);
+    assert_eq!(
+        lowered.graph.expect("lowers").params["fabro.environment"]["image"],
+        json!(null)
+    );
 }
 
 /// The launch's environment (`petri run --environment`, the

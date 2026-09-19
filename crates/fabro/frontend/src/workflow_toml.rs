@@ -26,7 +26,8 @@
 //!   the scope environment, with `{{ secrets.NAME }}` as a `$secret` reference
 //!   resolved at spawn; `resources` are the Daytona runner size. `network`,
 //!   `lifecycle`, `labels`, `cwd` and `image.dockerfile` are platform-only and
-//!   warn. Both tables are read from every settings layer and merged key by
+//!   warn, as does an image on the `local` provider, which Fabro ignores on the
+//!   host. Both tables are read from every settings layer and merged key by
 //!   key, the host's settings layer under `.fabro/project.toml` under
 //!   `workflow.toml` ([`EnvironmentLayers`]), so a bundle can name an
 //!   environment the host's catalog declares.
@@ -878,15 +879,14 @@ impl Reader<'_> {
         {
             if let Some(docker) = image.get("docker").and_then(toml::Value::as_str) {
                 if provider == "local" {
-                    let source = at(&format!("{table}.image.docker"));
-                    self.unsupported_in(
-                        &source,
-                        "workflow_toml.environments.image",
-                        format!(
-                            "`[{table}] image.docker` in `{source}` names a container image, but \
-                             the `local` provider runs on the host"
-                        ),
-                        "use `provider = \"docker\"`, or drop the image",
+                    // Fabro ignores the image on the host, and a server's
+                    // catalog may carry one on a `local` environment (its
+                    // seeded default keeps the image whatever the provider).
+                    self.ignored_in(
+                        &at(&format!("{table}.image.docker")),
+                        &format!("environments.{id}.image"),
+                        "the `local` provider runs on the host; an image applies to `docker` and \
+                         `daytona`",
                     );
                 } else {
                     environment.image = Some(docker.to_string());
