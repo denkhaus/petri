@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 use store::RunKey;
 
+use crate::host::ForkOrigin;
 use crate::{ExecutionId, GraphDigest, InvocationId, ParentCallKey, SandboxLeaseId};
 
 /// Version 2 records stable dynamic scope identities and their runtime and
@@ -25,8 +26,10 @@ use crate::{ExecutionId, GraphDigest, InvocationId, ParentCallKey, SandboxLeaseI
 /// (`scope.acquired`, `scope.failed`), records `scope.released` when a
 /// lease's sandbox is released by retention, and spells the scope identity
 /// inside a resource record with snake-case tags; a version 5 run is
-/// refused, never migrated.
-pub const COORDINATOR_FORMAT_VERSION: u32 = 6;
+/// refused, never migrated. Version 7 lets the run declaration carry
+/// `forked_from`, the source and position a forked run was seeded from
+/// (`FORK.md`); a version 6 run is refused, never migrated.
+pub const COORDINATOR_FORMAT_VERSION: u32 = 7;
 
 /// Name-only child secret bindings. Plaintext is not representable here.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,6 +158,11 @@ pub enum CoordinatorEvent {
         key:              RunKey,
         root:             InvocationId,
         middleware_chain: Vec<MiddlewareKey>,
+        /// Where a forked run was seeded from: the source run and the
+        /// position its records were kept up to. Absent on a run that
+        /// started fresh. See `FORK.md`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forked_from:      Option<ForkOrigin>,
     },
     #[serde(rename = "graph.registered")]
     GraphRegistered { digest: GraphDigest },

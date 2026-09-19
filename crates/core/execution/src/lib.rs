@@ -6,6 +6,7 @@ pub mod controls;
 mod coordinator;
 mod event;
 pub mod events;
+mod fork;
 pub mod hooks;
 pub mod host;
 mod id;

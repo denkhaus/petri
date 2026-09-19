@@ -90,6 +90,7 @@ tags. Run statuses are `success`, `failed`, `cancelled`. Node statuses are
 | `coordinator_format_version` | The run's own format, from its run declaration. |
 | `locator` | Where the run lives, as its store names it: a run directory's path, or a database and an id. |
 | `run_key` | The run's identity in its store and on its sandbox providers: the run id every sandbox of the run is labelled with. |
+| `forked_from` | Where the run was forked from, or `null` on a run that started fresh: `source` (the source run's key), `execution` and `firing` (the position the source's records were kept up to), `rerun_last` (whether the position's firing runs again). See `FORK.md`. Additive in format version 3. |
 | `complete` | `true` only when `incomplete` is empty. |
 | `status` | The recorded run status, or `null` until the run finished. |
 | `incomplete` | Every reason `complete` is `false`, in the order found. |

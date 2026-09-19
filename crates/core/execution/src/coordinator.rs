@@ -518,12 +518,20 @@ impl Coordinator {
             });
         }
         validate_resources(&mut store, &resources).await?;
-        for lease in store.state().invocations.values().filter_map(|invocation| {
-            match invocation.declaration.sandbox {
+        // A finished invocation is never dispatched again, so its inherited
+        // lease need not be in this run's ledger: a forked run carries the
+        // source's finished children, whose leases were the source's
+        // (`FORK.md`).
+        for lease in store
+            .state()
+            .invocations
+            .values()
+            .filter(|invocation| invocation.result.is_none())
+            .filter_map(|invocation| match invocation.declaration.sandbox {
                 SandboxBinding::Inherited { lease } => Some(lease),
                 SandboxBinding::Isolated => None,
-            }
-        }) {
+            })
+        {
             resources.resolve(lease)?;
         }
         let coordinator = Self::assemble(store, resources, runtime, middleware, options, true);

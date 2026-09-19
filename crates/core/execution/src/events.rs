@@ -150,7 +150,9 @@ pub use export::{ExportError, verify_export, verify_export_run_dir};
 /// sandbox released by retention). The records are additive to the stream;
 /// the version moves with the engine log (v11) and run format (6) that
 /// carry them, so a host reading version 3 streams cannot mistake a run
-/// with no scope records for one that had none to record.
+/// with no scope records for one that had none to record. Within version 4,
+/// `run.started` gained the optional `forked_from` (run format 7): a forked
+/// run's stream names its source before any copied record (`FORK.md`).
 pub const EVENT_CONTRACT_VERSION: u32 = 4;
 
 /// Which durable log an event was derived from.

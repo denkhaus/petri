@@ -15,6 +15,15 @@ records are additive, but the engine log (v11) and the run format (6) that
 carry them are not: a run written before them holds no scope records, is
 refused by this build, and is never migrated.
 
+Added within version 4 on 2026-09-18: `run.started` carries `forked_from`
+on a forked run (`FORK.md`). The field is additive to the stream; the run
+format that carries it moves to 7, and a version 6 run is refused. A forked
+run's stream is the copied prefix of its source's records, with their
+original recording times and their identities renumbered only in the
+coordinator log, followed by the fork's own records; `run.started` is the
+first event either way, so a host knows it is reading a fork before any
+copied record.
+
 Renamed within version 3 on 2026-09-14, with no host consuming the stream
 yet: the step kinds the Attractor frontend lowers to (`fabro/agent`,
 `fabro/command`, `fabro/stage`, ... are now `attractor/agent`,
@@ -204,7 +213,7 @@ run directory), origin always external. Log identity
 
 | `event` | Body type | Fields and derived values |
 | --- | --- | --- |
-| `run.started` | `CoordinatorEvent::RunStarted` | `format_version`, `root`, `middleware_chain`. Nothing derived |
+| `run.started` | `CoordinatorEvent::RunStarted` | `format_version`, `key`, `root`, `middleware_chain`, and `forked_from` on a forked run (`source`, the source run's key; `execution` and `firing`, the position its records were kept up to; `rerun_last`). Nothing derived |
 | `graph.registered` | `GraphRegistered` | `digest`, before any invocation declares the graph. Nothing derived |
 | `invocation.declared` | `InvocationDeclared` | `invocation`, `call` (absent on the root), `graph`, `context`, the name-only `secret_bindings`, the `sandbox` binding, the `admission` gate. Nothing derived; `context.parent` is the call as a `ParentLink` |
 | `execution.declared` | `ExecutionDeclared` | `execution`, `invocation`, `predecessor`, the whole engine `start` (entry, context, inherited firing counts, index, restart limit), `middleware_state`. Nothing derived |

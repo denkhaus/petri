@@ -64,6 +64,7 @@ subset; the unconfigured path stays the standalone runner.
 | Pause, unpause, steer, cancel | `execution::controls` (the control service; `petri run --control <FILE>` is the terminal transport), `RunHandle` for cancel and kill | `crates/core/execution/src/controls.rs` |
 | The public event stream | `execution::events::{EventProjector, RunEventSink, replay_run, replay_since}`; `EVENT_CONTRACT_VERSION`. A public event carries its record unchanged under `record`, plus what Petri derived under `derived`; `execution::events::verify_export` proves the records equal the stored logs and replay, at the end of every run | `crates/core/execution/EVENTS.md` ("Export") |
 | Durable inspection of a stored run | `execution::inspect::inspect_run` over a read handle (`inspect_run_dir` and `petri inspect --run-dir --json` over a run directory), `INSPECT_FORMAT_VERSION` | `crates/core/execution/INSPECT.md` |
+| Fork a stored run at a position (rewind, fork, retry) | `execution::host::fork_from(rt, source, ForkPosition {execution, firing}, ForkOptions {rerun_last})` seeds a new run in the runtime's store from the source's records up to the position: the same graphs, the position execution's log cut after the firing's routing (before its first record with `rerun_last`), the finished children called before the position, and a `run.started` whose `forked_from` names the source and position. No sandbox lease is carried over; the host restores the checkpoint's commit in `scope_acquired`, then continues the run with `host::resume_configured` under the source's middleware. A position inside a child invocation is refused (`ForkError::PositionInChild`) | `crates/core/execution/FORK.md` |
 | Output references and large values | the `OutputStore` capability (`BlobStore`); the default is a local store under `<run_dir>/blobs` writing `blob://sha256/<hex>` | `crates/attractor/steps/src/blobs.rs` |
 | Secrets | the `SecretProvider` capability; the standalone runner reads `PETRI_SECRET_<NAME>`; records are masked before they are appended | `crates/core/executor/src/secrets.rs` |
 | Sandboxes | every provider (host, Docker, Daytona) through the sandbox-driver JSON-RPC plugin protocol; `Retention` (`Always` is the Fabro default), `petri sandbox prune` | `crates/core/executor-sandbox/`, `README.md` |
@@ -146,6 +147,35 @@ with it — is the same live and on replay, so run, stage, attempt and
 interview times come from the logs, never from the time of a replay.
 `observed_at` is the one live-only field. `run.paused` and `run.unpaused`
 are coordinator records like any other, so replay carries them.
+
+## Forks: rewind, fork and retry
+
+Fabro's rewind, fork and retry are one Petri operation over its own
+checkpoint record. Fabro's checkpoint ties a position `(execution, firing)`
+to a Git commit. `execution::host::fork_from` seeds a new run from the
+source's records up to that position (`crates/core/execution/FORK.md`): the
+new run holds the same graphs, the position execution's log cut after the
+firing's routing, the finished children the kept firings called, and a
+`run.started` whose `forked_from` names the source key, the position and
+whether the firing runs again. The source's later firings, later executions
+and unfinished children are dropped; nothing of its sandbox leases is
+carried over, and the fork's resource log starts empty.
+
+The host then continues the new run exactly as it resumes a crashed one:
+`host::resume_configured` under the source's middleware list, with
+`RunOptions::run_key` naming the fork. The position execution's scopes are
+acquired fresh, so `scope_acquired` runs before the first attempt after the
+position, which is where Fabro restores the checkpoint's commit into the new
+workspace. A fork is a run like any other afterwards: `inspect_run` reports
+`forked_from`, the public stream starts with the fork's `run.started`, the
+copied records keep their recording times, and `verify_export` holds before
+and after the run.
+
+Retry is a fork at the last position: without `rerun_last` it reruns nothing
+and finishes as the source did; with it, the last stage runs again from its
+first attempt. Rewind is a fork Fabro records as superseding the source. A
+position inside a branch's child invocation is refused
+(`ForkError::PositionInChild`); fork at the parent's firing instead.
 
 ## Two shapes for the run record
 
@@ -241,9 +271,9 @@ acknowledgement gates the next step of the run:
 
 | Version | Where | Rule |
 |---|---|---|
-| `EVENT_CONTRACT_VERSION` (4) | `execution::events` | additive within a version; a host checks it before projecting. Version 3 names every event after its record, carries the stored line under `record` and the derived values under `derived`; the version 2 presentation names are gone. Version 4 adds the scope records (`scope.acquired`, `scope.failed`, `scope.released`) |
-| `INSPECT_FORMAT_VERSION` (3) | `execution::inspect` | the `petri inspect` document's field contract; version 3 reads the run through its store (`locator`, `run_key`; no log `path` or `torn`) |
-| the run format (6) on the run declaration, and the coordinator record version (`{seq, origin, recorded_at, body}` lines, `body` tagged by `event` with `<subject>.<verb>` names; the declaration carries the run `key`; version 6 adds `scope.released` and pins engine log v11) | `execution::store` | a run written by a newer or older format is refused, never migrated; the check reads the first stored record before any other is decoded |
+| `EVENT_CONTRACT_VERSION` (4) | `execution::events` | additive within a version; a host checks it before projecting. Version 3 names every event after its record, carries the stored line under `record` and the derived values under `derived`; the version 2 presentation names are gone. Version 4 adds the scope records (`scope.acquired`, `scope.failed`, `scope.released`) and, additively, `forked_from` on `run.started` |
+| `INSPECT_FORMAT_VERSION` (3) | `execution::inspect` | the `petri inspect` document's field contract; version 3 reads the run through its store (`locator`, `run_key`; no log `path` or `torn`) and, additively, reports `forked_from` |
+| the run format (7) on the run declaration, and the coordinator record version (`{seq, origin, recorded_at, body}` lines, `body` tagged by `event` with `<subject>.<verb>` names; the declaration carries the run `key`; version 6 adds `scope.released` and pins engine log v11; version 7 lets the declaration carry `forked_from`) | `execution::store` | a run written by a newer or older format is refused, never migrated; the check reads the first stored record before any other is decoded |
 | the engine log version (v11: `{seq, origin, recorded_at, body}` records, `body` tagged by `event` with `<subject>.<verb>` names; v11 adds `scope.acquired` and `scope.failed`), pinned by the run format | `engine::log` | a log whose version the runner does not speak is refused; replay must reproduce the log byte for byte or inspection reports corruption |
 | `inspect_format_version`, `event_contract_version` | in the documents themselves | |
 | Library pins (Pebble, lithos-llm, sandbox-driver, twins, the Fabro reference, the runner image) | `CONTRACT.md` "Pinned revisions", `scripts/check-pins.py` | moved together with the manifests and the evidence records |

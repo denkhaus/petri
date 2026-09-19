@@ -95,6 +95,7 @@ impl CoordinatorStore {
                 key,
                 root: InvocationId::ROOT,
                 middleware_chain,
+                forked_from: None,
             })
             .await?;
         store.opening.push(started);

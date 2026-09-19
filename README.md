@@ -135,7 +135,8 @@ crates/attractor/steps/tests/prompt.rs           readiness item 4: `attractor/pr
 crates/attractor/steps/tests/admission.rs        model resolution at admission: concrete routes and frozen plans on every LLM node, `attractor.model.unknown` and `attractor.model.fallbacks` at the node's span, the graph unchanged without a client, the `start` stage's table check without a catalog
 crates/fabro/acceptance/tests/e2e.rs         Fabro plan §7 6: gh-list, hello, a for_each fan-out, random selection, two 1,000-item forks in one run, end to end
 crates/petri/cli/tests/fabro_cli.rs          Fabro plan §6: `petri run --auto-approve` answers a human gate
-crates/petri/cli/tests/inspect_cli.rs        black box phase 2: `petri inspect` over finished, restarted, failed, cancelled and damaged run dirs
+crates/petri/cli/tests/inspect_cli.rs        black box phase 2: `petri inspect` over finished, restarted, failed, cancelled and damaged run dirs, and over a fork of a run the binary wrote, which `petri resume` then continues
+crates/petri/lib/tests/fork.rs               `host::fork_from` through the embedding boundary: a three-stage run forked after its first stage, a fork at the last position with and without `rerun_last`, a fork after a parallel fan-in and before it, a position inside a branch refused, a fork at a failed firing on its failure route, and a fork in a host's own store
 crates/petri/cli/tests/fabro_resume_blackbox.rs  `petri resume` through the binary: a run killed with SIGKILL continues without repeating finished work, a paused run stays paused across the resume until an unpause, a waiting gate asks again, `inspect` reports `paused`, and the refusals (finished, leased, missing, corrupt)
 crates/core/execution/tests/inspect.rs      black box phase 2: `inspect_run` reconstruction, retries, children, torn and corrupt logs
 crates/petri/cli/tests/fabro_blackbox.rs     the Fabro black box battery: the shipped binary against provider twins on loopback, scripted interviews, retention, the readiness milestone A smoke run with no `fabro` on PATH (`milestone_a_smoke_run_without_fabro_on_path`); every read of a finished run goes through `petri inspect --json`
@@ -1297,6 +1298,16 @@ things, all Petri-owned types with no platform vocabulary in them:
   registers none.
 - **Questions.** `execution::Interviewer` and the `InterviewDispatcher`, as
   on the terminal path.
+- **Forks.** `execution::host::fork_from` seeds a new run from a stored
+  run's records up to a position (an execution and a firing of the root
+  invocation): the same graphs, the position execution's log cut after the
+  firing's routing, the finished children the kept firings called, and a
+  run declaration whose `forked_from` names the source. No sandbox lease
+  is carried over; the host continues the new run with
+  `host::resume_configured`, restoring whatever it wants in the fresh
+  workspace from `scope_acquired`. `ForkOptions::rerun_last` runs the
+  position's firing again instead of keeping its finish. The design is
+  `crates/core/execution/FORK.md`.
 
 `crates/petri/lib/tests/embedding.rs` is the worked example: a Fabro workflow
 run without adapters, then with fake adapters that exercise every point, with
