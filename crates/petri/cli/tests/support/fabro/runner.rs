@@ -242,9 +242,16 @@ async fn run(scenario: Scenario, backend: Backend, agent: Agent, cell: &str) -> 
         path_prefix.push(bin);
     }
     if let Some(settings) = &scenario.fixture.settings {
+        // The scenario's layer, with the `local` environment every case
+        // selects appended after it.
         let home = case.root.join("home").join(".fabro");
         fs::create_dir_all(&home).expect("fabro home");
-        fs::write(home.join("settings.toml"), bindings.text(settings)).expect("settings.toml");
+        let text = format!(
+            "{}\n{}",
+            bindings.text(settings),
+            super::launch::LOCAL_ENVIRONMENT_SETTINGS
+        );
+        fs::write(home.join("settings.toml"), text).expect("settings.toml");
     }
 
     // ── Twins ───────────────────────────────────────────────────────────
@@ -300,8 +307,12 @@ async fn run(scenario: Scenario, backend: Backend, agent: Agent, cell: &str) -> 
         workflow.display()
     );
     let mut args: Vec<String> = Vec::new();
-    // The cell picks where the run executes, as an operator's environment
-    // choice does; a bundle's own `[run.environment]` may name Daytona.
+    // The cell picks where the run executes, as the pinned Fabro's harness
+    // does on every `fabro run` (`--environment local`, declared in the
+    // case's settings layer); a bundle's own `[run.environment]` may name
+    // Daytona. A Docker cell keeps `--backend docker` over the provider.
+    args.push("--environment".into());
+    args.push("local".into());
     if backend == Backend::Host {
         args.push("--backend".into());
         args.push("host".into());

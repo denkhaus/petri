@@ -5,6 +5,7 @@ use ir::{RunStatus, Value};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
+use crate::host::ForkOrigin;
 use crate::{
     AttemptAdmission, CancelReason, CoordinatorEvent, CoordinatorRecord, ExecutionId, GraphDigest,
     InvocationId, InvocationResult, ParentCallKey, SandboxBinding, SecretBindings,
@@ -98,6 +99,10 @@ pub enum StateError {
 pub struct CoordinatorState {
     pub root:             Option<InvocationId>,
     pub middleware_chain: Vec<MiddlewareKey>,
+    /// Where the run was forked from, when it was seeded from another run's
+    /// records (`FORK.md`). Additive in format version 7.
+    #[serde(default)]
+    pub forked_from:      Option<ForkOrigin>,
     pub graphs:           BTreeSet<GraphDigest>,
     pub invocations:      BTreeMap<InvocationId, InvocationState>,
     pub executions:       BTreeMap<ExecutionId, ExecutionState>,
@@ -196,6 +201,7 @@ impl CoordinatorState {
                 key: _,
                 root,
                 middleware_chain: _,
+                forked_from: _,
             } => {
                 if self.root.is_some() {
                     return Err(StateError::DuplicateRunStart);
@@ -320,10 +326,13 @@ impl CoordinatorState {
             }
             // A repeated pause or unpause is accepted and changes nothing:
             // the coordinator skips the redundant record, and a log that
-            // carries one still replays. A run-level note constrains nothing.
+            // carries one still replays. A run-level note and a released
+            // scope constrain nothing: the resource log is the authority on
+            // what the run holds.
             CoordinatorEvent::RunPaused
             | CoordinatorEvent::RunUnpaused
-            | CoordinatorEvent::RunNoteRecorded { .. } => {}
+            | CoordinatorEvent::RunNoteRecorded { .. }
+            | CoordinatorEvent::ScopeReleased { .. } => {}
             CoordinatorEvent::RunFinished { status } => {
                 if self.run_status.is_some() {
                     return Err(StateError::DuplicateRunFinish);
@@ -360,9 +369,11 @@ impl CoordinatorState {
                 key: _,
                 root,
                 middleware_chain,
+                forked_from,
             } => {
                 self.root = Some(*root);
                 self.middleware_chain.clone_from(middleware_chain);
+                self.forked_from.clone_from(forked_from);
             }
             CoordinatorEvent::GraphRegistered { digest } => {
                 self.graphs.insert(*digest);
@@ -450,6 +461,7 @@ impl CoordinatorState {
                 kind:      kind.clone(),
                 payload:   payload.clone(),
             }),
+            CoordinatorEvent::ScopeReleased { .. } => {}
             CoordinatorEvent::RunFinished { status } => {
                 self.run_status = Some(*status);
             }

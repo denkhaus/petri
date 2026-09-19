@@ -6,12 +6,17 @@ use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use attractor_steps::command::OUTPUT_CAP;
+use attractor_steps::command::{
+    DROPPED_BYTES_METRIC, INCOMPLETE_METRIC, OUTPUT_CAP, TRUNCATED_LINES_METRIC,
+};
 use attractor_steps::{LocalBlobStore, blobs, register};
+use execution::events::replay_run_dir;
+use execution::host;
 use frontend_attractor::load;
 use runtime::driver::{EventObserver, ExecutionReport, RunHandle};
-use runtime::engine::{EngineState, Event, EventRecord, ReplayMismatch};
+use runtime::engine::{EngineState, Event, EventRecord, ReplayMismatch, RouteApplied};
 use runtime::executor::Retention;
+use runtime::executor::lines::LINE_CAP;
 use runtime::frontend::{CompileInputs, NoFiles};
 use runtime::ir::{CancelScopeId, Graph, RunStatus, TimeoutPolicy};
 use runtime::steps::{Answer, Question, Steer};
@@ -149,6 +154,176 @@ async fn large_command_output_is_offloaded_and_reads_back_logically() {
 /// The in-memory cap sits above the offload threshold, so a value the store
 /// takes was never truncated first.
 const _: () = assert!(OUTPUT_CAP > 200_000);
+
+/// The line cap sits above the offload threshold too, so one long line
+/// reaches the store whole rather than being cut below it.
+const _: () = assert!(LINE_CAP > blobs::OFFLOAD_THRESHOLD);
+
+/// No output byte is lost silently. A 120 000-byte line passes the line cap
+/// whole, takes the output past the offload threshold, and is stored whole
+/// as a blob with nothing recorded as dropped. A line past the cap is cut
+/// at the cap, ends with a marker naming the bytes dropped, and the
+/// outcome's metrics count the loss.
+#[tokio::test]
+async fn a_long_line_is_stored_whole_or_its_loss_is_recorded() {
+    let graph = lower(&dot(r#"
+        long [shape=parallelogram, script="head -c 120000 /dev/zero | tr '[:cntrl:]' x; echo"]
+        start -> long -> exit
+    "#));
+    let dir = RunDir::new("fabro-command-long-line");
+    let rt = runtime(&dir);
+    let report = rt.run(graph).await.expect("replay is byte-identical");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let recorded = output_of(&report, "long")["stdout"]
+        .as_str()
+        .expect("string output")
+        .to_string();
+    assert!(
+        recorded.starts_with("blob://sha256/"),
+        "the line crossed the offload threshold whole: {}",
+        &recorded[..recorded.len().min(80)]
+    );
+    let digest = recorded.trim_start_matches("blob://sha256/");
+    let stored = fs::read(dir.path().join("blobs").join(digest)).expect("the blob file");
+    assert_eq!(stored.len(), 120_001, "the whole line and its newline");
+    assert!(stored[..120_000].iter().all(|b| *b == b'x'));
+    let metrics = &report
+        .state
+        .history()
+        .iter()
+        .find(|row| row.name == "long")
+        .expect("the command ran")
+        .outcome
+        .metrics;
+    assert!(
+        !metrics.custom.contains_key(DROPPED_BYTES_METRIC)
+            && !metrics.custom.contains_key(TRUNCATED_LINES_METRIC),
+        "nothing was dropped: {:?}",
+        metrics.custom
+    );
+
+    let over = LINE_CAP + 10;
+    let graph = lower(&dot(&format!(
+        r#"
+        huge [shape=parallelogram, script="head -c {over} /dev/zero | tr '[:cntrl:]' y; echo"]
+        start -> huge -> exit
+    "#
+    )));
+    let dir = RunDir::new("fabro-command-over-cap");
+    let rt = runtime(&dir);
+    let report = rt.run(graph).await.expect("replay is byte-identical");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let recorded = output_of(&report, "huge")["stdout"]
+        .as_str()
+        .expect("string output")
+        .to_string();
+    let digest = recorded.trim_start_matches("blob://sha256/");
+    let stored =
+        String::from_utf8(fs::read(dir.path().join("blobs").join(digest)).expect("the blob file"))
+            .expect("utf-8");
+    assert!(stored[..LINE_CAP].bytes().all(|b| b == b'y'));
+    assert_eq!(
+        &stored[LINE_CAP..],
+        " …[line truncated: 10 bytes dropped]\n",
+        "the cut line says how much was dropped"
+    );
+    let metrics = &report
+        .state
+        .history()
+        .iter()
+        .find(|row| row.name == "huge")
+        .expect("the command ran")
+        .outcome
+        .metrics;
+    assert_eq!(metrics.custom.get(DROPPED_BYTES_METRIC), Some(&json!(10)));
+    assert_eq!(metrics.custom.get(TRUNCATED_LINES_METRIC), Some(&json!(1)));
+    assert!(!metrics.custom.contains_key(INCOMPLETE_METRIC));
+}
+
+/// A host renders a command stage and its routing decision from the public
+/// stream alone: the script is on the stage's `subject.node.meta.script`,
+/// and the condition the decision matched is the `meta.edges` entry of the
+/// edge `route.applied` names, as written in the workflow.
+#[tokio::test]
+async fn the_public_stream_carries_the_script_and_the_matched_condition() {
+    let graph = lower(&dot(r#"
+        build [shape=parallelogram, script="echo built; exit 0"]
+        ok [shape=parallelogram, script="true"]
+        bad [shape=parallelogram, script="true"]
+        start -> build
+        build -> ok [condition="outcome=succeeded"]
+        build -> bad [label="[F] Failed"]
+        ok -> exit
+        bad -> exit
+    "#));
+    let dir = RunDir::new("fabro-command-meta");
+    let rt = runtime(&dir);
+    let report = host::run(&rt, graph).await.expect("the run completes");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let events = replay_run_dir(dir.path()).await.expect("the run replays");
+    let started = events
+        .iter()
+        .find(|event| {
+            matches!(event.engine(), Some(Event::StepStarted { .. }))
+                && event
+                    .subject
+                    .as_ref()
+                    .is_some_and(|s| s.node.name == "build")
+        })
+        .expect("the command started");
+    let meta = &started.subject.as_ref().expect("a subject").node.meta;
+    assert_eq!(meta["kind"], json!("command"));
+    assert_eq!(meta["script"], json!("echo built; exit 0"));
+    let applied = events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.engine(),
+                Some(Event::RouteApplied {
+                    applied: RouteApplied::Edge { .. },
+                })
+            ) && event
+                .subject
+                .as_ref()
+                .is_some_and(|s| s.node.name == "build")
+        })
+        .expect("the command's route was applied");
+    let Some(Event::RouteApplied {
+        applied: RouteApplied::Edge { edge, .. },
+    }) = applied.engine()
+    else {
+        unreachable!("matched above");
+    };
+    let meta = &applied.subject.as_ref().expect("a subject").node.meta;
+    let entry = &meta["edges"][edge.raw().to_string()];
+    assert_eq!(entry["to"], json!("ok"));
+    assert_eq!(entry["condition"], json!("outcome=succeeded"));
+    // The other arm is there too, without a condition, so a host can show
+    // what was not taken.
+    let other = meta["edges"]
+        .as_object()
+        .expect("the edge table")
+        .values()
+        .find(|entry| entry["to"] == "bad")
+        .expect("the unconditional arm");
+    assert_eq!(other["label"], json!("[F] Failed"));
+    assert!(other.get("condition").is_none());
+}
 
 #[tokio::test]
 async fn a_failing_command_fails_with_its_exit_status_and_routes() {
@@ -298,7 +473,13 @@ const GATE: &str = r#"
 "#;
 
 async fn run_gate(answer: Answer, label: &str) -> (ExecutionReport, Vec<Question>) {
-    let graph = lower(&dot(GATE));
+    run_gate_on(GATE, answer, label).await
+}
+
+/// Run the gate graph `body` with `answer` delivered to its first question;
+/// the report and every question asked.
+async fn run_gate_on(body: &str, answer: Answer, label: &str) -> (ExecutionReport, Vec<Question>) {
+    let graph = lower(&dot(body));
     let dir = RunDir::new(label);
     let rt = runtime(&dir);
     let answerer = Arc::new(Answerer {
@@ -364,6 +545,71 @@ async fn a_human_gate_routes_free_text_to_the_freeform_edge() {
 async fn a_label_answer_matches_without_its_accelerator() {
     let (report, _) = run_gate(Answer::choice("yes"), "fabro-human-label").await;
     assert_eq!(status_of(&report, "yes").as_deref(), Some("success"));
+}
+
+/// What a host shows beside the question: each choice's `human.description`
+/// and `human.preview` from its edge, and the previous stage's response as
+/// the question's context, as Fabro's gate shows it. A choice whose edge
+/// says nothing carries neither; a gate with no response before it has no
+/// context.
+#[tokio::test]
+async fn a_human_gate_carries_choice_descriptions_previews_and_its_context() {
+    const DESCRIBED: &str = r#"
+        plan [shape=parallelogram, output_schema="routing", script="echo '{\"outcome\": \"succeeded\", \"context_updates\": {\"last_stage\": \"plan\", \"response.plan\": \"  Ship the fix in one commit.  \"}}'"]
+        gate [shape=hexagon, label="Deploy?"]
+        yes [shape=parallelogram, script="true"]
+        no [shape=parallelogram, script="true"]
+        start -> plan -> gate
+        gate -> yes [label="[Y] Yes", "human.description"="Merge and deploy to production", "human.preview"="deploy --prod"]
+        gate -> no [label="[N] No"]
+        yes -> exit
+        no -> exit
+    "#;
+    let (report, asked) =
+        run_gate_on(DESCRIBED, Answer::choice("Y"), "fabro-human-described").await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert_eq!(asked.len(), 1);
+    let question = &asked[0];
+    assert_eq!(
+        question.context.as_deref(),
+        Some("Ship the fix in one commit."),
+        "the context is the last stage's response, trimmed"
+    );
+    assert_eq!(question.options.len(), 2);
+    assert_eq!(question.options[0].key, "Y");
+    assert_eq!(
+        question.options[0].description.as_deref(),
+        Some("Merge and deploy to production")
+    );
+    assert_eq!(
+        question.options[0].preview.as_deref(),
+        Some("deploy --prod")
+    );
+    assert_eq!(question.options[1].key, "N");
+    assert_eq!(question.options[1].description, None);
+    assert_eq!(question.options[1].preview, None);
+    // The fields are in the recorded question too, absent where unset.
+    let recorded = report
+        .state
+        .log
+        .events()
+        .find_map(|event| match event {
+            Event::StepProgressRecorded { ev, .. } => Question::from_event(ev),
+            _ => None,
+        })
+        .expect("the question is in the log");
+    assert_eq!(&recorded, question);
+    assert_eq!(status_of(&report, "yes").as_deref(), Some("success"));
+
+    let (_, asked) = run_gate(Answer::choice("n"), "fabro-human-no-context").await;
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].context, None, "no stage before the gate responded");
+    assert!(asked[0].options.iter().all(|o| o.description.is_none()));
 }
 
 #[tokio::test]

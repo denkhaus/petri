@@ -103,15 +103,14 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
         "ignored.workflow_toml.run.checkpoint",
         "ignored.workflow_toml.run.artifacts",
         "ignored.workflow_toml.run.agent.fabro_tools",
-        "ignored.workflow_toml.environments.review.network",
-        "ignored.workflow_toml.environments.review.image.dockerfile",
     ] {
         assert!(
             platform_codes.contains(&code.to_string()),
             "{code} in {platform_codes:?}"
         );
     }
-    // Sections the runner now applies do not warn.
+    // Sections the runner now applies do not warn, and neither do the
+    // platform's own environment keys (`network`, `image.dockerfile`).
     for code in [
         "ignored.workflow_toml.run.goal",
         "ignored.workflow_toml.run.clone",
@@ -120,10 +119,12 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
         "ignored.workflow_toml.run.environment",
         "ignored.workflow_toml.run.execution",
         "ignored.workflow_toml.environments",
+        "ignored.workflow_toml.environments.review.network",
+        "ignored.workflow_toml.environments.review.image.dockerfile",
     ] {
         assert!(
             !platform_codes.contains(&code.to_string()),
-            "{code} is applied, not ignored: {platform_codes:?}"
+            "{code} is applied or known, not ignored: {platform_codes:?}"
         );
     }
     assert!(
@@ -998,4 +999,289 @@ fn the_launch_model_default_sits_below_every_layer() {
     assert_eq!(node(&graph, "a").step.config.get("model"), None);
     assert_eq!(graph.params["fabro.launch"]["model"], json!(null));
     assert_eq!(graph.params["fabro.launch"]["provider"], json!(null));
+}
+
+/// `[environments.<id>]` and `[run.environment]` come from every settings
+/// layer: a bundle names an environment only the host's layer declares (a
+/// Fabro server's catalog), a bundle with no `[run.environment]` takes the
+/// host's selection, the bundle's keys win over the project's over the
+/// host's key by key, and every diagnostic names the layer its setting came
+/// from.
+#[test]
+fn environments_come_from_every_layer_and_the_bundle_wins() {
+    let host = "[run.environment]\nid = \"docker-small\"\n\
+                [environments.docker-small]\nprovider = \"docker\"\n\
+                [environments.docker-small.image]\ndocker = \"catalog/runner:1\"\n\
+                [environments.docker-small.env]\nFROM = \"catalog\"\nSHARED = \"catalog\"\n\
+                [environments.docker-small.lifecycle]\npreserve = false\n\
+                [environments.local]\nprovider = \"local\"\n\
+                [environments.local.image]\ndocker = \"catalog/host:1\"\n";
+    let inputs = CompileInputs::new().with_var(SETTINGS_HOOKS_VAR, host);
+    let lower = |files: &dyn frontend::FileSource| {
+        let lowered = load("wf/w.fabro", &dot("start -> exit"), files, &inputs);
+        assert!(
+            !lowered.diagnostics.has_errors(),
+            "{:?}",
+            lowered.diagnostics
+        );
+        let files: Vec<(String, String)> = lowered
+            .diagnostics
+            .iter()
+            .map(|d| (d.code.to_string(), d.span.file.to_string()))
+            .collect();
+        (lowered.graph.expect("lowers"), files)
+    };
+
+    // The bundle names the host's environment and declares none itself.
+    let (graph, diagnostics) = lower(&files(&[(
+        "wf/workflow.toml",
+        "[run.environment]\nid = \"docker-small\"\n",
+    )]));
+    let environment = &graph.params["fabro.environment"];
+    assert_eq!(environment["id"], json!("docker-small"));
+    assert_eq!(environment["provider"], json!("docker"));
+    assert_eq!(environment["image"], json!("catalog/runner:1"));
+    assert_eq!(environment["env"]["FROM"], json!("catalog"));
+    assert_eq!(
+        Fabro::new()
+            .launch_settings(&graph)
+            .sandbox_backend
+            .as_deref(),
+        Some("docker")
+    );
+    assert!(
+        matches!(&graph.scopes[0].runtime.target, ir::RuntimeTarget::Container { image, .. } if image == "catalog/runner:1"),
+        "{:?}",
+        graph.scopes[0].runtime.target
+    );
+    assert!(
+        diagnostics.is_empty(),
+        "the host's `lifecycle` is the platform's key, known and silent: {diagnostics:?}"
+    );
+
+    // A bundle with no `workflow.toml` at all runs in the host's selection.
+    let (graph, _) = lower(&frontend::NoFiles);
+    assert_eq!(
+        graph.params["fabro.environment"]["id"],
+        json!("docker-small")
+    );
+
+    // Key by key: the bundle over the project over the host.
+    let (graph, _) = lower(&files(&[
+        (
+            ".fabro/project.toml",
+            "[environments.docker-small.image]\ndocker = \"project/runner:2\"\n\
+             [environments.docker-small.env]\nSHARED = \"project\"\n",
+        ),
+        (
+            "wf/workflow.toml",
+            "[run.environment]\nid = \"docker-small\"\n\
+             [environments.docker-small.env]\nSHARED = \"bundle\"\nOWN = \"bundle\"\n",
+        ),
+    ]));
+    let environment = &graph.params["fabro.environment"];
+    assert_eq!(environment["image"], json!("project/runner:2"));
+    assert_eq!(
+        environment["env"],
+        json!({ "FROM": "catalog", "SHARED": "bundle", "OWN": "bundle" })
+    );
+    let (graph, _) = lower(&files(&[(
+        "wf/workflow.toml",
+        "[run.environment]\nid = \"docker-small\"\n\
+         [environments.docker-small.image]\ndocker = \"bundle/runner:3\"\n",
+    )]));
+    assert_eq!(
+        graph.params["fabro.environment"]["image"],
+        json!("bundle/runner:3")
+    );
+
+    // Refusals name the layer the offending setting came from.
+    let refused = |files: &dyn frontend::FileSource| {
+        load("wf/w.fabro", &dot("start -> exit"), files, &inputs)
+            .diagnostics
+            .iter()
+            .filter(|d| d.code.starts_with("unsupported."))
+            .map(|d| (d.code.to_string(), d.span.file.to_string()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        refused(&files(&[(
+            "wf/workflow.toml",
+            "[run.environment]\nid = \"nowhere\"\n"
+        )])),
+        [(
+            "unsupported.workflow_toml.run.environment".to_string(),
+            "wf/workflow.toml".to_string()
+        )],
+        "an id no layer declares"
+    );
+    // The host's image on a local environment is ignored, as Fabro ignores
+    // it on the host, and the warning names the layer that set it.
+    let lowered = load(
+        "wf/w.fabro",
+        &dot("start -> exit"),
+        &files(&[("wf/workflow.toml", "[run.environment]\nid = \"local\"\n")]),
+        &inputs,
+    );
+    assert!(
+        !lowered.diagnostics.has_errors(),
+        "{:?}",
+        lowered.diagnostics
+    );
+    let warnings: Vec<(String, String)> = lowered
+        .diagnostics
+        .iter()
+        .map(|d| (d.code.to_string(), d.span.file.to_string()))
+        .collect();
+    assert_eq!(warnings, [(
+        "ignored.workflow_toml.environments.local.image".to_string(),
+        "settings.toml".to_string()
+    )]);
+    assert_eq!(
+        lowered.graph.expect("lowers").params["fabro.environment"]["image"],
+        json!(null)
+    );
+}
+
+/// Fabro's platform-only environment keys are known in every layer and
+/// warn nothing: a project layer like the Fabro repository's own, which
+/// declares a Daytona environment with a Dockerfile, a lifecycle and
+/// labels, lowers clean. A key neither Petri nor Fabro's table accepts
+/// still warns, against the layer that set it.
+#[test]
+fn platform_environment_keys_are_known_and_unknown_ones_warn() {
+    let project = "[run.environment]\nid = \"fabro-dev\"\n\
+                   [environments.fabro-dev]\nprovider = \"daytona\"\n\
+                   [environments.fabro-dev.image]\ndockerfile = { path = \"Dockerfile\" }\n\
+                   [environments.fabro-dev.resources]\ncpu = 8\nmemory = \"16GB\"\n\
+                   [environments.fabro-dev.lifecycle]\nauto_stop = \"30m\"\n\
+                   [environments.fabro-dev.labels]\nrepo = \"fabro-sh/fabro\"\n";
+    let lower = |project: &str, workflow: &str| {
+        let lowered = load(
+            "wf/w.fabro",
+            &dot("start -> exit"),
+            &files(&[
+                (".fabro/project.toml", project),
+                ("wf/workflow.toml", workflow),
+            ]),
+            &CompileInputs::new(),
+        );
+        let diagnostics: Vec<(String, String)> = lowered
+            .diagnostics
+            .iter()
+            .map(|d| (d.code.to_string(), d.span.file.to_string()))
+            .collect();
+        (lowered.graph.expect("lowers"), diagnostics)
+    };
+
+    let (graph, diagnostics) = lower(project, "");
+    assert!(
+        diagnostics.is_empty(),
+        "the platform's keys are known and silent: {diagnostics:?}"
+    );
+    let environment = &graph.params["fabro.environment"];
+    assert_eq!(environment["id"], json!("fabro-dev"));
+    assert_eq!(environment["provider"], json!("daytona"));
+    assert_eq!(graph.params["fabro.launch"]["cpu_cores"], json!(8));
+
+    // The same keys on an environment no run selects, and `cwd` and
+    // `network` on the selected one, are as silent.
+    let with_cwd = project.replacen(
+        "provider = \"daytona\"\n",
+        "provider = \"daytona\"\ncwd = \"/work\"\n",
+        1,
+    );
+    let (_, diagnostics) = lower(
+        &format!(
+            "{with_cwd}[environments.fabro-dev.network]\nmode = \"block\"\n\
+             [environments.other]\nprovider = \"docker\"\n\
+             [environments.other.lifecycle]\npreserve = true\n"
+        ),
+        "",
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+    // A key outside Fabro's table warns, naming the layer, in every layer
+    // and on every environment; the graph still lowers.
+    let (_, diagnostics) = lower(
+        &format!("{project}[environments.other]\nprovider = \"docker\"\nprovisioner = \"x\"\n"),
+        "[environments.fabro-dev]\nimage_pull = \"always\"\n\
+         [run.environment]\nid = \"fabro-dev\"\nlabel = \"y\"\n",
+    );
+    assert_eq!(diagnostics, [
+        (
+            "ignored.workflow_toml.environments.fabro-dev.image_pull".to_string(),
+            "wf/workflow.toml".to_string()
+        ),
+        (
+            "ignored.workflow_toml.environments.other.provisioner".to_string(),
+            ".fabro/project.toml".to_string()
+        ),
+        (
+            "ignored.workflow_toml.run.environment.label".to_string(),
+            "wf/workflow.toml".to_string()
+        ),
+    ]);
+}
+
+/// The launch's environment (`petri run --environment`, the
+/// `petri.launch_environment` variable) selects the id over every layer's
+/// `[run.environment]`, as `fabro run --environment` does: a bundle whose
+/// project file selects one environment runs in the launch's; a bundle with
+/// no `[run.environment]` anywhere runs in it too; an id no layer declares
+/// is refused.
+#[test]
+fn the_launch_environment_wins_over_every_layer() {
+    let host = "[environments.local]\nprovider = \"local\"\n\
+                [environments.big]\nprovider = \"daytona\"\n\
+                [environments.big.resources]\ncpu = 8\n";
+    let files = files(&[(".fabro/project.toml", "[run.environment]\nid = \"big\"\n")]);
+    let launch = |id: &str| {
+        CompileInputs::new()
+            .with_var(SETTINGS_HOOKS_VAR, host)
+            .with_var(frontend::LAUNCH_ENVIRONMENT_VAR, id)
+    };
+    let lowered = load(
+        "wf/w.fabro",
+        &dot("start -> exit"),
+        &files,
+        &launch("local"),
+    );
+    assert!(
+        !lowered.diagnostics.has_errors(),
+        "{:?}",
+        lowered.diagnostics
+    );
+    let graph = lowered.graph.expect("lowers");
+    assert_eq!(graph.params["fabro.environment"]["id"], json!("local"));
+    assert_eq!(
+        Fabro::new()
+            .launch_settings(&graph)
+            .sandbox_backend
+            .as_deref(),
+        Some("host")
+    );
+    // Without the launch, the project's selection stands.
+    let graph = lower_ok_with(
+        &dot("start -> exit"),
+        &files,
+        &CompileInputs::new().with_var(SETTINGS_HOOKS_VAR, host),
+    );
+    assert_eq!(graph.params["fabro.environment"]["id"], json!("big"));
+    assert_eq!(graph.params["fabro.launch"]["cpu_cores"], json!(8));
+    // No `[run.environment]` anywhere: the launch alone selects.
+    let graph = lower_ok_with(&dot("start -> exit"), &frontend::NoFiles, &launch("big"));
+    assert_eq!(graph.params["fabro.environment"]["id"], json!("big"));
+    // An id no layer declares.
+    let codes: Vec<String> = load(
+        "wf/w.fabro",
+        &dot("start -> exit"),
+        &files,
+        &launch("nowhere"),
+    )
+    .diagnostics
+    .iter()
+    .map(|d| d.code.to_string())
+    .collect();
+    assert_eq!(codes, ["unsupported.workflow_toml.run.environment"]);
 }

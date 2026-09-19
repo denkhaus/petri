@@ -25,7 +25,6 @@
 | `attractor.internal_context` | 1 |
 | `attractor.prompt_missing` | 40 |
 | `deprecated.auto_status` | 8 |
-| `ignored.workflow_toml.environments.code-review.image.dockerfile` | 1 |
 | `ignored.workflow_toml.run.artifacts` | 1 |
 | `ignored.workflow_toml.run.checkpoint` | 1 |
 | `ignored.workflow_toml.run.integrations` | 6 |
@@ -39,7 +38,7 @@
 |---|---|---|---|
 | `.fabro/workflows/card-game-fast/workflow.fabro` | warnings | 7 | `info.budget.default` |
 | `.fabro/workflows/card-game/workflow.fabro` | warnings | 21 | `info.budget.default` |
-| `.fabro/workflows/code-review/code-review.fabro` | warnings | 26 | `attractor.internal_context`, `ignored.workflow_toml.environments.code-review.image.dockerfile`, `ignored.workflow_toml.run.artifacts`, `ignored.workflow_toml.run.checkpoint`, `ignored.workflow_toml.run.integrations`, `ignored.workflow_toml.run.pull_request`, `ignored.workflow_toml.run.run_branch` |
+| `.fabro/workflows/code-review/code-review.fabro` | warnings | 26 | `attractor.internal_context`, `ignored.workflow_toml.run.artifacts`, `ignored.workflow_toml.run.checkpoint`, `ignored.workflow_toml.run.integrations`, `ignored.workflow_toml.run.pull_request`, `ignored.workflow_toml.run.run_branch` |
 | `.fabro/workflows/context-demo/workflow.fabro` | clean | 3 |  |
 | `.fabro/workflows/daytona-medium/workflow.fabro` | warnings | 4 | `info.budget.default` |
 | `.fabro/workflows/gh-list/workflow.fabro` | warnings | 4 | `ignored.workflow_toml.run.integrations` |

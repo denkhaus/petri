@@ -35,6 +35,8 @@ use store::RunLogs;
 
 use crate::breaker::CircuitBreaker;
 use crate::events::{ExportError, verify_export};
+/// Forking a stored run at a position: the design is in `FORK.md`.
+pub use crate::fork::{ForkError, ForkOptions, ForkOrigin, ForkPosition, ForkedRun, fork_from};
 use crate::store::{decode_graph, graph_bytes, read_coordinator_log};
 use crate::{
     Coordinator, CoordinatorError, CoordinatorHandle, CoordinatorOptions, CoordinatorState,
@@ -76,6 +78,9 @@ pub enum HostError {
     Store(#[from] store::StoreError),
     #[error("the coordinator finished the root invocation without a final execution report")]
     MissingExecutionReport,
+    /// A fork position the source run cannot be forked at.
+    #[error(transparent)]
+    Fork(#[from] ForkError),
 }
 
 /// Why `events.jsonl` bytes could not become an [`engine::EventLog`]: this

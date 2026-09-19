@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
 
 use engine::{EngineExit, EngineStart, EventOrigin, MiddlewareKey};
-use ir::{FailureInfo, RunStatus, ScopeId, Value};
+use executor::ScopeOutcome;
+use ir::{FailureInfo, RunStatus, ScopeId, Value, WorkspaceId};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 use store::RunKey;
 
+use crate::host::ForkOrigin;
 use crate::{ExecutionId, GraphDigest, InvocationId, ParentCallKey, SandboxLeaseId};
 
 /// Version 2 records stable dynamic scope identities and their runtime and
@@ -20,8 +22,14 @@ use crate::{ExecutionId, GraphDigest, InvocationId, ParentCallKey, SandboxLeaseI
 /// the store seam: the run declaration carries the run's `key`, the engine
 /// log version is pinned by this version and no engine log carries a header
 /// line, and sandbox resources are one append-only log; a version 4 run is
-/// refused, never migrated.
-pub const COORDINATOR_FORMAT_VERSION: u32 = 5;
+/// refused, never migrated. Version 6 pins engine log version 11
+/// (`scope.acquired`, `scope.failed`), records `scope.released` when a
+/// lease's sandbox is released by retention, and spells the scope identity
+/// inside a resource record with snake-case tags; a version 5 run is
+/// refused, never migrated. Version 7 lets the run declaration carry
+/// `forked_from`, the source and position a forked run was seeded from
+/// (`FORK.md`); a version 6 run is refused, never migrated.
+pub const COORDINATOR_FORMAT_VERSION: u32 = 7;
 
 /// Name-only child secret bindings. Plaintext is not representable here.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +158,11 @@ pub enum CoordinatorEvent {
         key:              RunKey,
         root:             InvocationId,
         middleware_chain: Vec<MiddlewareKey>,
+        /// Where a forked run was seeded from: the source run and the
+        /// position its records were kept up to. Absent on a run that
+        /// started fresh. See `FORK.md`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forked_from:      Option<ForkOrigin>,
     },
     #[serde(rename = "graph.registered")]
     GraphRegistered { digest: GraphDigest },
@@ -212,6 +225,30 @@ pub enum CoordinatorEvent {
         kind:      SmolStr,
         #[serde(default)]
         payload:   Value,
+    },
+    /// A lease's sandbox was released once the invocation that owns it
+    /// finished: stopped and kept, or deleted, as the run's retention decides
+    /// for `outcome`. `retained` is whether the sandbox and its workspace
+    /// still exist on the provider afterwards; `problems` is what the release
+    /// could not do, in which case the sandbox is still there and the next
+    /// release (`finish`, or `petri sandbox prune`) tries again. Usually
+    /// before `run.finished`; a lease a crash left live is released by the
+    /// resumed run's end, after it.
+    #[serde(rename = "scope.released")]
+    ScopeReleased {
+        invocation: InvocationId,
+        lease:      SandboxLeaseId,
+        /// The stable identity of the scope the lease was reserved for.
+        scope:      engine::ScopeIdentity,
+        workspace:  WorkspaceId,
+        provider:   SmolStr,
+        /// The provider's id for the sandbox, when one was created.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instance:   Option<SmolStr>,
+        outcome:    ScopeOutcome,
+        retained:   bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        problems:   Vec<String>,
     },
     #[serde(rename = "run.finished")]
     RunFinished { status: RunStatus },

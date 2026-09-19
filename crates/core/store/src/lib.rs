@@ -8,7 +8,9 @@
 //! [`RunLogs::get_blob`]) and stores what it is given: a backend never sees
 //! an observer, a projection, a decoded record, a version number or a digest
 //! to verify. Decoding, version checks and digest checks stay on Petri's
-//! side of the seam.
+//! side of the seam. A sixth method, [`RunLogs::read_from`], has a default
+//! over `read`; a backend that can key on `seq` overrides it so a reader
+//! that holds a prefix of a log is handed the rest without the prefix.
 //!
 //! The stored unit is the record ([`Record`]): the line a public event
 //! carries under `record`, `{seq, origin, recorded_at, body}`, with `seq` and
@@ -42,7 +44,9 @@
 //!   [`StoreError::ReadOnly`].
 //! - `read` hands back every record of one log in seq order, and an empty list
 //!   for a log nothing was appended to. A run-directory backend drops a torn
-//!   tail before it answers, and reports nothing.
+//!   tail before it answers, and reports nothing. `read_from` hands back the
+//!   records of one log at or past a seq, in seq order: what `read` would, with
+//!   the records before that seq left out.
 //! - Blobs are content-addressed by SHA-256 ([`Digest::of`]); a blob write is
 //!   idempotent by construction.
 
@@ -420,6 +424,17 @@ pub trait RunLogs: Send + Sync {
     /// Every record of one log in seq order; empty if the log does not
     /// exist.
     async fn read(&self, log: &LogId) -> Result<Vec<Record>, StoreError>;
+
+    /// The records of one log at or past `seq`, in seq order: what
+    /// [`read`](Self::read) hands back with the records before `seq` left
+    /// out; empty if the log does not exist or ends before `seq`. The
+    /// default reads the log whole and drops the prefix; a backend that can
+    /// key on `seq` answers without reading it.
+    async fn read_from(&self, log: &LogId, seq: u64) -> Result<Vec<Record>, StoreError> {
+        let mut records = self.read(log).await?;
+        records.retain(|record| record.seq >= seq);
+        Ok(records)
+    }
 
     /// Store a blob by content, idempotently, and hand back its digest.
     async fn put_blob(&self, bytes: &[u8]) -> Result<Digest, StoreError>;

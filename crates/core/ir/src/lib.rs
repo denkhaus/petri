@@ -40,7 +40,7 @@ pub use expr::{
 };
 pub use flow::{
     Control, FailureClass, FailureInfo, LogStream, Metrics, NodeRecord, Outcome, RunContext,
-    RunStatus, Status, StatusKind, StepEvent, Token,
+    RunStatus, SandboxInstance, Status, StatusKind, StepEvent, Token,
 };
 pub use graph::{
     Backoff, Budget, Candidate, Completion, Edge, EdgeTransition, Exhaustion, ExpandTarget,
@@ -50,8 +50,8 @@ pub use graph::{
     TimeoutPolicy, WorkspacePolicy,
 };
 pub use ids::{
-    Attempt, CancelScopeId, EdgeId, ExecutionId, ExprId, FiringId, Generation, InvocationId, Live,
-    Local, NodeId, ScopeId, StepKindId,
+    Attempt, CancelScopeId, EdgeId, EnvironmentId, ExecutionId, ExprId, FiringId, Generation,
+    InvocationId, Live, Local, NodeId, SandboxLeaseId, ScopeId, StepKindId, WorkspaceId,
 };
 pub use splice::{
     Attachment, ExistingNodeRef, FragmentErrorKind, FragmentValidationError, GraphFragment,

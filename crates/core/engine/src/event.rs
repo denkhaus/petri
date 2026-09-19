@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use ir::{
     Attempt, CancelScopeId, Control, EdgeId, FiringId, Generation, Node, NodeId, Outcome,
-    PickPolicy, RunStatus, ScopeId, StepEvent, Token, Value, placeholder,
+    PickPolicy, RunStatus, SandboxInstance, SandboxLeaseId, ScopeId, StepEvent, Token, Value,
+    WorkspaceId, placeholder,
 };
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
@@ -319,6 +320,40 @@ pub enum Event {
     /// must not fail the run (§6).
     #[serde(rename = "control.requested")]
     ControlRequested { firing: FiringId, ctl: Control },
+    /// The driver acquired a scope's environment: which sandbox on which
+    /// provider, the workspace it holds, the lease it lives under when a
+    /// coordinator allocated one, and how long the acquisition took. Recorded
+    /// once per acquisition, before any attempt runs in the scope; a resumed
+    /// execution and an inherited sandbox's execution each record their own.
+    /// Observation only: the core changes nothing.
+    #[serde(rename = "scope.acquired")]
+    ScopeAcquired {
+        scope:       ScopeId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lease:       Option<SandboxLeaseId>,
+        workspace:   WorkspaceId,
+        #[serde(flatten)]
+        sandbox:     SandboxInstance,
+        duration_ms: u64,
+    },
+    /// The driver could not acquire a scope's environment. Every firing in the
+    /// scope then fails, routably, with `error` as its failure message; the
+    /// run itself does not abort. `causes` is the error's source chain, the
+    /// outermost first; `provider` is the kind the lease was reserved on,
+    /// when one was. Observation only: the core changes nothing.
+    #[serde(rename = "scope.failed")]
+    ScopeFailed {
+        scope:       ScopeId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lease:       Option<SandboxLeaseId>,
+        workspace:   WorkspaceId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider:    Option<SmolStr>,
+        error:       String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        causes:      Vec<String>,
+        duration_ms: u64,
+    },
 }
 
 impl Event {

@@ -10,12 +10,12 @@ use ir::{Control, Value};
 use pebble_coding_agent::{CodingAgentExport, ShutdownReason};
 use serde::Deserialize;
 use smol_str::SmolStr;
-use steps::StepCtx;
+use steps::{SECRET_UNAVAILABLE_CLASS, StepCtx};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use super::AgentConfig;
-use crate::acp::{AcpError, AcpHooks, Client};
+use crate::acp::{AcpError, AcpHooks, Client, Stage};
 use crate::fallback::{ModelFailure, Plan};
 use crate::hooks::step_view;
 use crate::pebble::{NativeSession, Resume};
@@ -32,7 +32,7 @@ pub enum AgentBackend {
 }
 
 pub(crate) enum Session {
-    Acp(Client),
+    Acp(Box<Client>),
     Pebble(Box<NativeSession>),
 }
 
@@ -101,13 +101,26 @@ impl Session {
                 {
                     tracing::warn!(node = %config.node, "the ACP command owns model selection; model, provider and reasoning_effort are observer metadata");
                 }
-                let mut client = Client::spawn(ctx.env.as_ref(), &command, ctx.logs.clone())
+                // The agent's environment: the command's own `env` with its
+                // secret references resolved, and every product credential the
+                // run's secrets know, so a product in a container has its key.
+                let spec = command
+                    .spec(ctx.secrets.as_ref())
+                    .map_err(|e| AgentError::failed(SECRET_UNAVAILABLE_CLASS.as_str(), e))?;
+                let stage = Stage {
+                    node:    ctx.node.clone(),
+                    firing:  ctx.firing,
+                    attempt: ctx.attempt,
+                    scope:   ctx.scope,
+                    masker:  ctx.secrets.masker(),
+                };
+                let mut client = Client::spawn(ctx.env.as_ref(), spec, ctx.logs.clone(), stage)
                     .await
                     .map_err(|e| AgentError::failed("spawn_failed", e.to_string()))?;
-                // The hook service is asked at the one boundary ACP has (a
-                // permission request), whoever serves it. The service also
-                // says which tool hooks are configured, so the node can warn
-                // about the boundaries this backend lacks for each of them.
+                // The hook service is asked at the two boundaries ACP has (a
+                // permission request, a reported tool call finishing),
+                // whoever serves it. The service also says which tool hooks
+                // are configured, so the node can say what each one sees.
                 if let Some(handle) = ctx.capability::<HookServiceHandle>() {
                     let service = &handle.0;
                     let mut post = service.configured_hooks(HookPoint::AfterToolUse);
@@ -127,7 +140,7 @@ impl Session {
                     client.terminate(ctx.env.grace()).await;
                     return Err(error.into());
                 }
-                Ok(Self::Acp(client))
+                Ok(Self::Acp(Box::new(client)))
             }
         }
     }
@@ -198,7 +211,7 @@ impl Session {
     }
     pub(crate) fn metrics(&self, turns: u64) -> BTreeMap<SmolStr, Value> {
         match self {
-            Self::Acp(_) => BTreeMap::from([("acp.turns".into(), Value::from(turns))]),
+            Self::Acp(client) => client.metrics(turns),
             Self::Pebble(session) => session.metrics(),
         }
     }

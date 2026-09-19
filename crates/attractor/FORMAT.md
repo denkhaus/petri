@@ -85,7 +85,7 @@ a warning; the importing workflow's stylesheet governs.
 | `box` agent | `attractor/agent` | prompt, goal, `fidelity` and `default_fidelity`, `thread_id`, `default_thread` and the node's classes, `project_memory`, `backend`, model settings (`model`, `provider`, `reasoning_effort`, `speed`, `max_tokens`), `output_schema`, `output_retries`, `acp`, `mcps` (the run's MCP servers), the workflow's stage list for the preamble |
 | `tab` prompt | `attractor/prompt` | prompt, goal, `fidelity` and the thread attributes (accepted; a prompt node never continues a conversation), `project_memory`, model settings (`model`, `provider`, `reasoning_effort`, `speed`, `max_tokens`), `output_schema`, `output_retries`; API-only: `backend="acp"` on the node is `attractor.prompt_backend`, and the graph's ACP settings never reach it |
 | `parallelogram` command, or any node with `script` | `attractor/command` | script, language, `stdin` (an expression over `kv`), `output_schema`, `env` (`[run.prepare]` step env and the environment's `$secret` values) |
-| `hexagon` human | `attractor/human` | the choices (from the edges), `question_type`, `freeform_target`, `sensitive`, `review_target`, `default_choice` (from `human.default_choice`), `timeout_ms` |
+| `hexagon` human | `attractor/human` | the choices (from the edges, each with the edge's `human.description` and `human.preview` when set), `question_type`, `freeform_target`, `sensitive`, `review_target`, `default_choice` (from `human.default_choice`), `timeout_ms` |
 | `component` parallel | `attractor/fork`: takes the fork snapshot of `kv` (and of the stage records for agent or prompt targets) once per visit, offloads the `for_each` source list and every other value above 4 KiB to the output store, and outputs `{ snapshot, nodes }`; each branch target becomes a synthetic `attractor/branch` delegate (`kind = "parallel.branch"`) that runs a copy of the target in a child invocation from that snapshot; `for_each` marks the delegate `Expansion::ForEach` (below) | fork: `label`, `node`, `kv`, `nodes`, `source`, `inline`; branch: `label`, `node`, `fork`, `index`, `item`, `for_each`, `max_parallel`, `child_digest`, `target_kind`, `kv`, `nodes`, `generation` |
 | `tripleoctagon` fan-in | `attractor/fan_in`, `join: all`; publishes `parallel.results` and `parallel.branch_count`; its output is the ordered branch results | |
 | `tripleoctagon` fan-in with a `prompt` | `attractor/prompt`, `join: all`: the ordered barrier, the same `parallel.results` publication, then one model call over the branch results (`sources`, `branch_results`) | |
@@ -95,7 +95,15 @@ a warning; the importing workflow's stylesheet governs.
 | `circle`, `doublecircle`, other shapes | `attractor/agent`, with an `attractor.unknown_shape` warning | |
 
 Every node's `meta` carries `label`, `shape`, `kind`, `classes`, `span`, and
-`model` / `provider` / `reasoning_effort` when set. Every step config carries
+`model` / `provider` / `reasoning_effort` when set; a command node's `meta`
+also carries `script`, the text the step runs (the same value as its
+config's), and every node with outgoing edges carries `edges`, one entry per
+routing arm keyed by the arm's edge id (the id a `route.applied` record
+names): `{ to, label, condition }`, the target node name, the edge's `label`
+(null without one) and its `condition` as written, trimmed (absent on an
+unconditional edge). A host that shows a stage's script or the condition a
+routing decision matched reads both off `subject.node.meta`
+(`crates/core/execution/EVENTS.md`, "Source metadata"). Every step config carries
 `kv` (the run context at spawn) and `on_failure`; a node whose `on_failure` is
 `succeed` or `partially_succeed` also carries `routes`, its explicit routes
 (condition texts, label keys, unconditional targets) for the promotion check
@@ -391,7 +399,17 @@ the coordinator registers `attractor_steps::workflow::ChildInvoker`.
   reads the last JSON object of the output as the routing directive
   (`outcome`, `preferred_next_label`, `suggested_next_ids`, `context_updates`,
   `failure_reason`). Output above 100 KiB leaves the record for the output
-  store (below); the in-memory cap is 8 MiB.
+  store (below); the in-memory cap is 8 MiB. No output byte is lost
+  silently: a line up to 1 MiB (the executor's line cap,
+  `executor::lines::LINE_CAP`) reaches the step whole, so a long line takes
+  the output to the store whole; a longer line is cut at the cap and ends
+  with ` …[line truncated: N bytes dropped]`; the in-memory cap discards
+  the front of the output behind `… [output truncated]`. Every byte either
+  cap discarded is counted on the attempt's metrics as
+  `output.dropped_bytes`, with `output.truncated_lines` for the lines the
+  line cap cut, both present only when not zero; a capture that ended on
+  silence after the script was gone records `output.incomplete: true`
+  beside its marker, since nobody counted that loss.
 - **`attractor/prompt`** is one model call through the application's `lithos-llm`
   client (the `PebbleClient` capability), with no tools and no coding-agent
   loop: the goal, the preamble of earlier stages at the node's resolved
@@ -421,9 +439,15 @@ the coordinator registers `attractor_steps::workflow::ChildInvoker`.
 - **`attractor/agent`** assembles the prompt from the goal, the preamble of
   earlier stages at the node's resolved fidelity, and the node's prompt
   ("Fidelity and threads" below). Both backends share routing, `output_schema`
-  validation, `output_retries` repair turns, and steering deliveries. Each
-  attempt starts a fresh agent session unless the node continues a retained
-  thread at `full` fidelity (native backend only). Repair turns keep that
+  validation, `output_retries` repair turns, steering deliveries, and the
+  interrupt control: a host stops the node's current model turn (the request
+  in flight and the tool calls it is running), the session stays open, and
+  the node continues with its next input, the interrupt's text if it carries
+  one, else the next steer delivered to it. The node reports the stopped
+  turn as `kind = "attractor.turn.interrupted"` (`node`, `firing`, `attempt`,
+  `backend`, `session`). A node with no turn in flight refuses the control.
+  Each attempt starts a fresh agent session unless the node continues a
+  retained thread at `full` fidelity (native backend only). Repair turns keep that
   session's history. `speed` and `max_tokens` configure the native model
   request; on ACP they are observer metadata like the other model settings.
   `backend="api"` is the default, as Fabro's `select_run_backend` picks the
@@ -434,7 +458,8 @@ the coordinator registers `attractor_steps::workflow::ChildInvoker`.
   `backend="acp"` starts
   the Agent Client Protocol command from `acp.command` / `acp.config` (node,
   graph, then `PETRI_ACP_COMMAND`). The ACP command owns model selection;
-  model settings are observer metadata. `provider` (or `default_provider`) qualifies the
+  model settings are observer metadata. What a real product needs, and what
+  the client gives it, is under "ACP products" below. `provider` (or `default_provider`) qualifies the
   model selector, and `reasoning_effort` configures the actual model request.
   The node's backend overrides the graph's backend; model stylesheets can also
   select it. Graph ACP configuration applies only to ACP nodes. Setting ACP
@@ -459,6 +484,16 @@ the coordinator registers `attractor_steps::workflow::ChildInvoker`.
   the wait was cancelled) fails the gate closed with class `interrupted`. A
   delivered steer (`{"$steer": ...}`) is not an answer: the gate ignores it
   and keeps its question open.
+  - What a host shows beside the question. Each choice carries its edge's
+    `human.description` (what choosing it means) and `human.preview` (a
+    sample of what it would do) as the option's `description` and `preview`;
+    both are Petri extensions to the edge attributes, optional, and a blank
+    value is the same as none. The question's `context` is the previous
+    stage's response (`response.<last_stage>`, trimmed, when `last_stage`
+    names a stage whose response has text), as Fabro's gate shows it; an
+    offloaded response shows as its reference text. A native agent's
+    question carries Pebble's own option descriptions and previews the same
+    way and no context.
   - `timeout` is the answer deadline. An unanswered question expires in the
     step, which reports the expiry on its progress channel first
     (`parsed.expired` on the `step.progress.recorded` event, `timed_out` with the default
@@ -656,15 +691,99 @@ warnings). Tool and run-level reports are `StepEvent::Custom` with
 an enforcement gap is `kind = "attractor.hook.warning"` (`backend`, `hook`,
 `event`, `boundary`, `message`).
 
-Tool hooks on the ACP backend are best effort: the client answers
-`session/request_permission` with the hooks' decision, rejecting the call
-when a `pre_tool_use` hook blocks, and reports `post_tool_use` from the tool
-call updates it observes. A tool call the agent runs without asking (a
-permission mode that never asks, a tool the agent treats as safe) is
-warned once per hook and tool as `attractor.hook.warning`, naming the backend
-(`acp`), the hook, the event and the boundary the agent did not offer.
-Fabro ignores ACP tool hooks silently; the warning is an accepted
-difference.
+Tool hooks on the ACP backend map onto the two tool boundaries the protocol
+offers, and both are best effort because the agent decides what it asks
+and what it reports:
+
+- `pre_tool_use` runs at `session/request_permission`, with the request's
+  tool title as `tool_name`, its `toolCallId` and its `rawInput`. A block
+  answers with the rejecting option (`reject_once`, else `reject_always`),
+  so the effect does not happen for that call and the agent sees the
+  denial. Otherwise the request is allowed: with the `allow_always` option
+  when no `pre_tool_use` hook is configured (nothing needs to see the next
+  call of that kind, as Fabro's client answered), and with `allow_once` when
+  one is, so every later call of that kind asks again and the hook keeps
+  running.
+- `post_tool_use` and `post_tool_use_failure` run when the agent reports a
+  tool call finished: a `tool_call_update` (or `tool_call`) with status
+  `completed` carries the call's text content, else its `rawOutput`, as
+  `tool_output`; status `failed` carries the same as `error_message`. The
+  decisions are ignored, as Fabro ignores them.
+
+A tool call the agent runs without asking (a permission mode that never
+asks, a tool the agent treats as safe) is seen when it is reported running
+or finished, and warned once per hook and tool as `attractor.hook.warning`,
+naming the backend (`acp`), the hook, the event and the boundary
+(`session/update`). Before the first prompt the node says, once per
+configured tool hook, what that hook can see: the permission boundary for
+`pre_tool_use`, the update boundary for the post-tool events. Fabro ignores
+ACP tool hooks silently; the warnings are an accepted difference.
+
+An interrupt on the ACP backend is `session/cancel` without ending the
+process: the agent answers the prompt in flight with stop reason
+`cancelled`, the client records `attractor.turn.interrupted`, and the
+session's next `session/prompt` is the interrupt's text, else the next text
+the host delivers. The interrupted turn's partial text is not the node's
+answer. An agent that ignores `session/cancel` keeps the turn running until
+it ends on its own.
+
+### ACP products
+
+The ACP client (`attractor_steps::acp`) speaks ACP 1 over the agent's
+stdio and is complete against what Claude Code and Gemini CLI speak. Claude
+Code has no ACP mode of its own; it speaks the protocol through the
+`claude-code-acp` adapter (the `@zed-industries/claude-code-acp` package),
+so the command is `acp.command="claude-code-acp"`. Gemini CLI speaks it as
+`acp.command="gemini --acp"`. The command is started in the node's scope, a
+host directory or a container, so the product must be installed where the
+scope runs (a container image with the product on `PATH`).
+
+The agent's environment is the scope's, plus:
+
+- every product credential the run's secrets know: `ANTHROPIC_API_KEY`,
+  `GEMINI_API_KEY` and `OPENAI_API_KEY` (`attractor_steps::acp::PRODUCT_CREDENTIALS`),
+  each resolved through the run's secret provider (the standalone runner
+  reads `PETRI_SECRET_<NAME>`; Fabro its vault) and masked in every log; a
+  name the provider does not know is left out. A product in a container
+  gets its key this way without the workflow naming it.
+- the command's own `env` from `acp.config`, on top. A value is a string or
+  a `{"$secret": "NAME"}` reference resolved the same way; a reference the
+  run cannot supply fails the node with class `secret_unavailable` before
+  the agent starts.
+
+The session opens in the scope's workspace (`session/new` with `cwd`). An
+agent that answers `session/new` with `auth_required` (Gemini CLI, until
+it has authenticated) is authenticated with the API-key method it
+advertised at `initialize` (the first marked `_meta.api-key`, else the
+first whose id says `api-key`), then asked again; an agent that advertises
+no such method fails the node with the agent's own error. `session/prompt`
+sends the node's prompt as one text block; the turn's text is the
+`agent_message_chunk` text.
+
+Every notification the agent sends is recorded on the public stream as the
+backend envelope, `StepEvent::Custom` with `kind = "acp"`: `{ kind, node,
+firing, attempt, scope, event }`, where `event` is `{ session_id, seq,
+tool_call_id?, method, update }` for a `session/update` of any variant
+(`agent_message_chunk`, `agent_thought_chunk`, `user_message_chunk`,
+`tool_call`, `tool_call_update`, `plan`, `available_commands_update`,
+`current_mode_update`, `usage_update`, and whatever a product adds),
+`{ session_id, seq, method, params }` for any other notification, and
+`{ session_id, seq, tool_call_id?, method, params, outcome, blocked }` for a
+`session/request_permission` with the answer Petri gave and the blocking
+hook's reason when one blocked. `seq` counts the envelopes of one agent
+process; `tool_call_id` is the update's `toolCallId` when it names one.
+
+Usage comes from the session usage extension (`unstable_session_usage`),
+which Gemini CLI reports and the Claude Code adapter (0.16.2) does not: the
+`usage` a `session/prompt` response carries (`inputTokens`, `outputTokens`,
+`thoughtTokens`, `cachedReadTokens`, `cachedWriteTokens`) is summed over the
+node's turns into `acp.usage.tokens`, and a `usage_update` notification sets
+`acp.context` (`used`, `size`) and, when its `cost` is in USD, the session's
+cumulative cost as `acp.usage.cost` (`usd_micros`, source `provider`).
+
+The live tier `crates/petri/lib/tests/acp_products.rs` runs both products
+on the host and in a container (`#[ignore]`; each cell skips itself without
+the product's binary and credential).
 
 ## Native Pebble
 
@@ -772,8 +891,16 @@ ride Pebble's steering bus, one per node run, in its follow-up mode
 (`SteeringBus::follow_up`); text delivered while the session is still being
 built waits on the bus and reaches the session when it attaches, in the same
 mode. A delivered core `Answer` naming one of the session's open
-questions answers it instead (below). Cancellation settles the active prompt
-and shuts down its session.
+questions answers it instead (below). A delivered `Interrupt`
+(`{ "$interrupt": { "steer"? } }`) stops the round in progress through the
+bus: with text, `SteeringBus::interrupt_then_steer`, and the text opens the
+next round; without, `SteeringBus::interrupt`, the prompt parks at its next
+turn boundary, and the next text the host delivers is sent as steering
+(`SteeringBus::steer`), which is what wakes it. Pebble reports the stop as
+`RoundInterrupted` on its stream and the node adds
+`attractor.turn.interrupted`; the session and its history survive, with the
+cancelled tool calls answered as cancelled. Cancellation settles the active
+prompt and shuts down its session.
 Kill stops active tool processes immediately. A driver hard abort can discard
 an unsettled prompt report; scope release remains responsible for cleanup.
 
@@ -784,6 +911,25 @@ secret masker applies before forwarding. These events use Petri's existing
 log pipeline. A successful node's session is retained in memory for the run
 by thread ("Fidelity and threads"); nothing is checkpointed, so a resumed run
 starts every thread again.
+
+Pebble puts no event on its stream that lists a session's tools, so the
+backend records the list itself, once per session, as `StepEvent::Custom`
+with `kind = "attractor.tools"`: `{ kind, node, firing, attempt, session,
+tools }`, where `tools` is one entry per tool the model was offered, in
+Pebble's order (by name): `{ name, description, source, category }`. `name`
+and `description` are what the model sees; `source` is Pebble's
+`ToolSource` as it reports it (`{"kind": "native"}`, `{"kind":
+"application"}`, `{"kind": "mcp", "server_name", "original_name"}`,
+`{"kind": "skill"}`); `category` is Petri's grouping: `builtin` (Pebble's
+own tools and a skill's), `mcp`, `subagent` (`spawn_agent`, `send_input`,
+`wait`, `close_agent`), `host` (a `HostTools` tool), `question` (the
+question tool). The node's own session is listed once the agent is built,
+from Pebble's snapshot, before the first prompt; each child session is
+listed right after its `SessionStarted` envelope, with the tools Pebble's
+inheritance gives a child, as Petri reads that rule: every built-in, skill
+and MCP tool, a host tool the host marked `allow_in_subagents`, never the
+question tool. A node that continues a retained thread opens a session of
+its own and lists it again under the new node.
 
 The session's question tool (`request_user_input` for GPT-5.6 and GPT-6,
 `AskUserQuestion` for Claude) reaches the same interviewer a human gate does.
@@ -801,8 +947,10 @@ and `pebble.tool_ms`. They sum all settled prompt reports, including repair
 turns, failed prompts, and cancellation. These metrics exclude the model
 calls a tool makes. They include the compaction summary call, which Pebble
 bills to the prompt that compacted; `pebble.compactions` and
-`pebble.compaction_usage` break that share out (below, "Compaction"). ACP
-continues to report `acp.turns`.
+`pebble.compaction_usage` break that share out (below, "Compaction"). An ACP
+node reports `acp.turns`, `acp.usage` (the session usage extension as
+lithos-llm's `Usage`, "ACP products" above) and, once the agent reported
+its context window, `acp.context` (`used`, `size`).
 
 ### Usage
 
@@ -1357,7 +1505,7 @@ Petri-stricter, tested as differences and listed in
 `crates/fabro/acceptance/CONTRACT.md`: the 500-firing cap and its
 `attractor.max_visits_too_large` / `info.budget.default` diagnostics (Fabro is
 unlimited), `outcome=success` after its sunset, the 10,000-invocation maximum,
-`image.dockerfile` and the other platform-only `workflow.toml` warnings,
+the platform-only `workflow.toml` warnings,
 unknown graph, node and edge attributes outside the `x.` namespace
 (`attractor.unknown_attribute`; Fabro has no rule for attribute names), and
 `on_failure="partially_succeed"` in the other direction: Petri accepts a

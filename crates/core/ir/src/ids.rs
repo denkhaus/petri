@@ -373,3 +373,61 @@ impl ExecutionId {
         format!("execution-{self}")
     }
 }
+
+run_id!(
+    /// A durable sandbox lease: the identity a sandbox lives under. The
+    /// coordinator allocates one per `{invocation, scope}` and hands it to
+    /// every execution that runs in that sandbox, so a restarted execution
+    /// and a nested invocation that inherits the caller's sandbox both name
+    /// the one resource. An executor never infers it from a workspace id.
+    SandboxLeaseId
+);
+
+/// The scope-qualified identities an executor keys a scope's environment
+/// and workspace by. Every layer that names one agrees on the spelling
+/// [`scoped`](WorkspaceId::scoped) produces.
+macro_rules! scope_identity {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(SmolStr);
+
+        impl $name {
+            pub fn new(value: impl Into<SmolStr>) -> Self {
+                Self(value.into())
+            }
+
+            /// The scope-qualified identity `{prefix}-scope-{id}`, or the bare
+            /// `scope-{id}` without a prefix. The one owner of the fragment
+            /// every layer that names a scope's environment or workspace must
+            /// agree on.
+            pub fn scoped(prefix: Option<&str>, scope: ScopeId) -> Self {
+                match prefix {
+                    Some(prefix) => Self(SmolStr::new(format!("{prefix}-scope-{}", scope.raw()))),
+                    None => Self(SmolStr::new(format!("scope-{}", scope.raw()))),
+                }
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(&self.0)
+            }
+        }
+    };
+}
+
+scope_identity!(
+    /// Process, container, and service fence identity of one scope instance.
+    EnvironmentId
+);
+scope_identity!(
+    /// Persistent filesystem identity of one scope. It can outlive an
+    /// environment.
+    WorkspaceId
+);

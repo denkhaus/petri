@@ -109,6 +109,9 @@ crates/core/driver/tests/timeout.rs       exec §7 6: timeouts, and the race und
 crates/core/driver/tests/environments.rs  exec §7 7,10: acquire failure and retention
 crates/core/driver/tests/secrets.rs       exec §7 8: masking, and what reaches the log
 crates/core/driver/tests/docker.rs        exec §7 3,10 Docker halves; skipped without a daemon
+crates/core/executor-sandbox/tests/docker_backend.rs   the sandbox executor over the Docker plugin: the workspace in the sandbox, exit codes and signals, files over the wire, the crash fence, retention, services, one-shot actions
+crates/core/executor-sandbox/tests/daytona_backend.rs  the same executor over the Daytona plugin, live (`mise run test:daytona`, `PETRI_REQUIRE_DAYTONA`): the runner VM, a nested container job, files, the fence, retention, output after idle and under a burst, a preview URL, the failure modes; `DAYTONA.md` maps Fabro's former live suite onto it
+crates/petri/lib/tests/daytona.rs             the standalone host on `--backend daytona`, live: retention and `prune` with the tombstone, `resume` fencing the crashed VM
 
 crates/core/frontend/tests/expr_grammar.rs   frontend §7 1-2: grammar, precedence, coercion, fuzz, table gate
 crates/github/frontend/tests/lowering.rs     frontend §7 3-6, the pure half: what lowering produces
@@ -135,7 +138,8 @@ crates/attractor/steps/tests/prompt.rs           readiness item 4: `attractor/pr
 crates/attractor/steps/tests/admission.rs        model resolution at admission: concrete routes and frozen plans on every LLM node, `attractor.model.unknown` and `attractor.model.fallbacks` at the node's span, the graph unchanged without a client, the `start` stage's table check without a catalog
 crates/fabro/acceptance/tests/e2e.rs         Fabro plan §7 6: gh-list, hello, a for_each fan-out, random selection, two 1,000-item forks in one run, end to end
 crates/petri/cli/tests/fabro_cli.rs          Fabro plan §6: `petri run --auto-approve` answers a human gate
-crates/petri/cli/tests/inspect_cli.rs        black box phase 2: `petri inspect` over finished, restarted, failed, cancelled and damaged run dirs
+crates/petri/cli/tests/inspect_cli.rs        black box phase 2: `petri inspect` over finished, restarted, failed, cancelled and damaged run dirs, and over a fork of a run the binary wrote, which `petri resume` then continues
+crates/petri/lib/tests/fork.rs               `host::fork_from` through the embedding boundary: a three-stage run forked after its first stage, a fork at the last position with and without `rerun_last`, a fork after a parallel fan-in and before it, a position inside a branch refused, a fork at a failed firing on its failure route, and a fork in a host's own store
 crates/petri/cli/tests/fabro_resume_blackbox.rs  `petri resume` through the binary: a run killed with SIGKILL continues without repeating finished work, a paused run stays paused across the resume until an unpause, a waiting gate asks again, `inspect` reports `paused`, and the refusals (finished, leased, missing, corrupt)
 crates/core/execution/tests/inspect.rs      black box phase 2: `inspect_run` reconstruction, retries, children, torn and corrupt logs
 crates/petri/cli/tests/fabro_blackbox.rs     the Fabro black box battery: the shipped binary against provider twins on loopback, scripted interviews, retention, the readiness milestone A smoke run with no `fabro` on PATH (`milestone_a_smoke_run_without_fabro_on_path`); every read of a finished run goes through `petri inspect --json`
@@ -144,11 +148,14 @@ crates/petri/cli/tests/fabro_differential.rs black box phase 5: every scenario t
 crates/fabro/acceptance/tests/reference_version.rs  every oracle fixture, scenario reference, decision record, staged bundle and evidence record names the pinned Fabro revision
 crates/petri/lib/tests/interview.rs          the interview dispatcher on the standalone host: parallel gates, sensitive masking, a failing interviewer, cancellation, occurrence across a loop, nested invocation paths, the re-ask, expiry
 crates/petri/lib/tests/controls.rs           readiness item 6: the circuit breaker across restarts and resume, node visit totals across `loop_restart`, the stall watchdog, pause, cancel while paused, steering; the durable pause (a pause survives a dropped coordinator and holds admission on resume until an unpause; a paused resumed run can be cancelled)
+crates/petri/lib/tests/interrupt.rs          the interrupt control: an interrupt with text during a native tool call ends the turn, keeps the session, and the text opens the next turn; a plain interrupt parks the turn until the next steer; a gate with no turn refuses it by name; the ACP backend's `session/cancel` without ending the agent
 crates/core/driver/tests/interview_budget.rs readiness item 6 on a controlled clock: own-stage and sibling waits, overlapping questions, active work after a wait, handler-managed nodes, cancellation during a wait, a fresh budget on redispatch
 crates/petri/lib/tests/embedding.rs          readiness item 7: a Fabro workflow without adapters, then with fake adapters (pause, skip, block, prepared results, route override, fatal and best-effort transitions, a hook service); the timeline reconstructed from public events; slow, failing and recovering consumers
-crates/attractor/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wait, human answered through deliver; Fabro's failure promotion; output references above 100 KiB
+crates/attractor/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wait, human answered through deliver; Fabro's failure promotion; output references above 100 KiB; a long line stored whole, or its loss counted on the outcome
 crates/attractor/steps/tests/agent.rs            Fabro plan §7 6: the agent step against Fabro's fake ACP agent
-crates/fabro/frontend/tests/hooks.rs         readiness item 5: `[[run.hooks]]` at every phase with Fabro's payload and order, decisions, placement, timeouts, HTTP, prompt and agent hooks, native tool hooks, threads and fidelity, project memory, `speed` and `max_tokens`, ACP best effort
+crates/attractor/steps/tests/acp.rs              follow-up C3: the ACP client against Petri's scripted agent (`tests/testdata/scripted_acp_agent.py`): every `session/update` variant as the `acp` envelope, the permission policy without a hook, the session usage extension in the stage's metrics, `authenticate` before `session/new`, product credentials and `$secret` references in the agent's environment, masked
+crates/petri/lib/tests/acp_products.rs       follow-up C3, live (`--ignored`): Claude Code (`claude-code-acp`) and Gemini CLI (`gemini --acp`) through the ACP step, on the host and in a container the test builds, creating a file, the session's tool calls and usage on the stream, a `[[run.hooks]]` block honoured; each cell skips itself without the product's binary and credential
+crates/fabro/frontend/tests/hooks.rs         readiness item 5: `[[run.hooks]]` at every phase with Fabro's payload and order, decisions, placement, timeouts, HTTP, prompt and agent hooks, native tool hooks, threads and fidelity, project memory, `speed` and `max_tokens`, the ACP hook mapping (a block rejects the permission request, the post-tool hooks run on reported tool calls, allow once under a hook)
 crates/fabro/frontend/tests/mcp.rs           readiness item 9b: `[run.agent.mcps]` against the scripted `mcp_server.py`: a stdio server's tool writes into the workspace, hooks block MCP tools, error results, timeouts, a crashed server, cancellation, a retained thread, start failures, the http and sandbox transports over streamable HTTP and SSE, every fact read from Pebble's own events
 crates/petri/cli/tests/fabro_mcp_blackbox.rs  readiness item 9b (milestone C2) through the binary: a configured MCP server's tool called by the twin's model under its qualified name, the effect in the workspace and the result in the next request, a hook block, failures, Ctrl-C, a retained thread, a start failure on the terminal, a masked secret, refused settings
 crates/petri/cli/tests/fabro_fallback_blackbox.rs  readiness item 9a (milestone C1) through the binary: `[run.model.fallbacks]` with the twins injecting failures: a successful primary, qualifying and non-qualifying failures, a third provider after two failures, chain exhaustion, a tool effect not repeated across a failover, cancellation during fallback, refusal versus other content filters, a request timeout, client retries spent before the chain advances, a workflow retry that is not a failover, reasoning effort mapping with `NoNearbyReasoningLevel` and `ChainEmpty`, repair turns on the plan with a target's chain inert, a retained thread on the fallback route, a prompt node
@@ -349,9 +356,10 @@ release and prune control cleanup. Shared runner snapshots remain available.
 Daytona has no inferred route to Petri's ObjectService. Ordinary JavaScript
 and Docker actions still run, with the service variables omitted. Artifact
 and cache actions need `PETRI_SANDBOX_DAYTONA_HOST_ADDRESS` set to a name or
-address reachable from the VM. Local transport and adapter tests pass;
-the ignored live Daytona workflow test requires credentials and has not yet
-been run against the hosted preview service.
+address reachable from the VM. Local transport and adapter tests pass. The
+live Daytona tier (`mise run test:daytona`, see
+[the live Daytona tier](crates/core/executor-sandbox/DAYTONA.md)) needs
+credentials and has not yet been run against the hosted service.
 
 Release archives bundle the Docker, Host, and Daytona plugin executables from
 the pinned revision. Petri embeds their SHA-256 digests at release build time.
@@ -391,6 +399,20 @@ snapshot. The field contract is
 `mise run test:remote` transfers an artifact through a separate Docker daemon
 with no host filesystem mounts. `mise run check` includes this test. Set
 `PETRI_REQUIRE_DOCKER=1` to require Docker instead of skipping unavailable tests.
+
+`mise run test:daytona` runs the live Daytona tier against the account
+`DAYTONA_API_KEY` names: the sandbox executor's Daytona battery
+(`crates/core/executor-sandbox/tests/daytona_backend.rs`), the host's
+retention, prune and resume cells (`crates/petri/lib/tests/daytona.rs`), the
+CLI retention cell, and the GitHub Actions cell with a VM job and a nested
+container job. It builds the Daytona plugin (`mise run plugins:build:daytona`)
+and sets `PETRI_REQUIRE_DAYTONA=1`, so a missing credential or plugin fails
+with its reason instead of skipping. Without the variable the same tests skip
+with a `skipping:` notice, which is what the routine suite does. No CI job has
+the credential, so the tier is run by hand before a change to the Daytona
+path or the sandbox-driver pin lands. It creates billable sandboxes.
+[`crates/core/executor-sandbox/DAYTONA.md`](crates/core/executor-sandbox/DAYTONA.md)
+maps Fabro's former 22 live Daytona tests onto the tier and records the gaps.
 
 `mise run test` runs all of them with Nextest, then runs the maintained doctests
 with Cargo.
@@ -1024,7 +1046,8 @@ Three things this package taught, kept because they generalise:
 - **Docker tests skip without a plugin and a daemon, and `PETRI_REQUIRE_DOCKER`
   turns that skip into a failure.** CI sets it on the Linux job. A silently skipped
   acceptance battery is indistinguishable from a passing one, and that job exists
-  precisely to say the battery ran.
+  precisely to say the battery ran. The live Daytona tier follows the same
+  convention with `PETRI_REQUIRE_DAYTONA`, which `mise run test:daytona` sets.
 - **A container test reads the workspace through the sandbox, never through a
   host path.** The workspace lives in the sandbox's own volume. A test checks a
   file the step wrote with `ExecEnv::read_file`, or with `docker exec` through
@@ -1120,11 +1143,16 @@ answering: a control line (below) never consumes a pending question's answer.
 live, one per appended line: `pause` holds every attempt not yet admitted
 (running work continues, and Ctrl-C still cancels), `unpause` releases them,
 `steer <node> <text>` delivers guidance to the named stage's live firing (an
-agent queues it for its session; a human gate ignores it), and `cancel`
-cancels the run (a second `cancel` reaches the kill tier). Each line's effect
-is reported as `control: ...` on stderr; a line that is not a command or names
-a stage that is not running is reported and skipped. An embedded host drives
-the same `execution::controls::ControlService`.
+agent queues it for its session; a human gate ignores it), `interrupt <node>
+[text]` stops the named agent stage's current model turn and keeps its
+session (the text, else the next `steer`, is the stage's next input; a stage
+with no turn in flight refuses it), and `cancel` cancels the run (a second
+`cancel` reaches the kill tier). Each line's effect is reported as
+`control: ...` on stderr; a line that is not a command, names a stage that is
+not running, or interrupts a stage with no model turn is reported and
+skipped. An embedded host drives the same
+`execution::controls::ControlService`, installing its live-turn set as a
+capability so `interrupt` can find a turn.
 
 The pause is durable. Each `pause` and `unpause` is a coordinator record
 (`RunPaused`, `RunUnpaused`), so `petri inspect` reports `paused` and a resume
@@ -1189,6 +1217,14 @@ persisted root graph's `fabro.launch` parameter (`model`, `provider`, as
 given), so `petri inspect` and a replay see it; `petri replay` takes the same
 options so the graph lowers the same. `petri resume` needs nothing: the
 stored graph already carries the default.
+
+**Environment selection.** `petri run --environment <id>` selects the
+`[environments.<id>]` table the run executes in over what any settings layer's
+`[run.environment]` names, as `fabro run --environment` does; the table may
+come from `workflow.toml`, `.fabro/project.toml` or the user settings layer
+(`$FABRO_HOME/settings.toml`), which is how a bundle whose project file selects
+a Daytona environment still runs on the host. The resolved environment lands
+in the persisted root graph's `fabro.environment` parameter.
 
 **Retention.** `--retain always|on-failure|never` decides what happens to the
 run's workspaces at teardown. The default is the workflow format's: Fabro
@@ -1297,6 +1333,16 @@ things, all Petri-owned types with no platform vocabulary in them:
   registers none.
 - **Questions.** `execution::Interviewer` and the `InterviewDispatcher`, as
   on the terminal path.
+- **Forks.** `execution::host::fork_from` seeds a new run from a stored
+  run's records up to a position (an execution and a firing of the root
+  invocation): the same graphs, the position execution's log cut after the
+  firing's routing, the finished children the kept firings called, and a
+  run declaration whose `forked_from` names the source. No sandbox lease
+  is carried over; the host continues the new run with
+  `host::resume_configured`, restoring whatever it wants in the fresh
+  workspace from `scope_acquired`. `ForkOptions::rerun_last` runs the
+  position's firing again instead of keeping its finish. The design is
+  `crates/core/execution/FORK.md`.
 
 `crates/petri/lib/tests/embedding.rs` is the worked example: a Fabro workflow
 run without adapters, then with fake adapters that exercise every point, with

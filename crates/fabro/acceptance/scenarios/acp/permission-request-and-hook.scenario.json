@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "acp/permission-request-and-hook",
   "family": "acp",
-  "title": "A scripted ACP agent asks permission for a shell call under a configured pre_tool_use command hook that blocks: the client answers with the rejecting option, the agent records that answer and skips the effect, the run warns once per configured tool hook about the boundary ACP does not offer, the post_tool_use hook never runs, and the run succeeds.",
+  "title": "A scripted ACP agent asks permission for a shell call under a configured pre_tool_use command hook that blocks: the client answers with the rejecting option, the agent records that answer and skips the effect, the run warns once per configured tool hook about what its boundary can see, the post_tool_use hook never runs because the scripted agent reports no tool call finishing, and the run succeeds.",
   "obligation": null,
   "bundle": {
     "inline": "graphs/permission-request-and-hook.fabro"
@@ -58,7 +58,7 @@
       },
       "stderr_contains": [
         "hook warning (acp): hook `deny-shell` on `pre_tool_use`: the ACP agent decides which tool calls ask for permission; this hook runs only for those, and a tool call the agent does not ask about is not intercepted",
-        "hook warning (acp): hook `log-tools` on `post_tool_use`: ACP exposes no post-tool result boundary; this hook does not run for this node",
+        "hook warning (acp): hook `log-tools` on `post_tool_use`: the ACP agent decides which tool calls it reports; this hook runs for the calls it reports finished (`tool_call_update` with status `completed` or `failed`), and a call the agent never reports is not seen",
         "pre_tool_use hook blocked a permission request: shell is not allowed here"
       ]
     },

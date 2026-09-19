@@ -51,7 +51,13 @@ use crate::event::Event;
 /// takes snake-case tags, and the persisted line is
 /// `{"seq", "origin", "recorded_at", "body"}` (`source` became `origin`).
 /// Standing policy, no migrator: a v9 log is rejected cleanly.
-pub const LOG_VERSION: u32 = 10;
+///
+/// v10 → v11: `ScopeAcquired` and `ScopeFailed` joined the vocabulary: the
+/// driver records where each scope's environment runs (the provider, the
+/// sandbox, the workspace, the lease, the acquisition time) or why it could
+/// not be acquired. The core applies neither. Standing policy, no migrator:
+/// a v10 log is rejected cleanly.
+pub const LOG_VERSION: u32 = 11;
 
 /// Where an event came from.
 ///

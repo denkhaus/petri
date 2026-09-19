@@ -39,6 +39,7 @@ pub async fn conformance(fresh: impl Fn() -> Arc<dyn RunStore>) {
     an_append_retried_after_a_lost_reply_leaves_one_record(&fresh()).await;
     a_different_record_at_a_taken_seq_is_a_conflict(&fresh()).await;
     records_read_back_equal_the_records_written(&fresh()).await;
+    a_log_read_from_a_seq_is_the_tail_of_the_log(&fresh()).await;
     blobs_round_trip_by_digest(&fresh()).await;
     a_dropped_handle_ends_the_lease(&fresh()).await;
 }
@@ -374,6 +375,54 @@ async fn records_read_back_equal_the_records_written(store: &Arc<dyn RunStore>) 
     );
     let reader = store.open(&key, Access::Read).await.expect("reads");
     assert_eq!(reader.read(&log).await.expect("reads"), records);
+}
+
+/// `read_from` is `read` without the prefix: every record at or past the
+/// seq, in order, none before it, and nothing for a seq past the log's end
+/// or a log that does not exist.
+async fn a_log_read_from_a_seq_is_the_tail_of_the_log(store: &Arc<dyn RunStore>) {
+    let key = RunKey::new("read-from");
+    let logs = store
+        .open(&key, Access::Create {
+            owner: OwnerId::new("owner"),
+        })
+        .await
+        .expect("creates");
+    let log = LogId::Execution(store::ExecutionId::new(0));
+    let records: Vec<Record> = (0..5).map(|seq| record(seq, "step.started")).collect();
+    logs.append(&log, &records[..3]).await.expect("appends");
+    logs.append(&log, &records[3..]).await.expect("appends");
+    let whole = logs.read(&log).await.expect("reads");
+    assert_eq!(whole, records);
+    assert_eq!(
+        logs.read_from(&log, 0).await.expect("reads from the start"),
+        records,
+        "from seq 0 is the whole log"
+    );
+    assert_eq!(
+        logs.read_from(&log, 3).await.expect("reads a tail"),
+        records[3..],
+        "from a seq inside the log is its tail"
+    );
+    assert_eq!(
+        logs.read_from(&log, 4)
+            .await
+            .expect("reads the last record"),
+        records[4..]
+    );
+    assert!(
+        logs.read_from(&log, 5)
+            .await
+            .expect("reads past the end")
+            .is_empty(),
+        "from the seq past the head is empty"
+    );
+    assert!(
+        logs.read_from(&LogId::Coordinator, 0)
+            .await
+            .expect("reads a log nothing was appended to")
+            .is_empty()
+    );
 }
 
 async fn blobs_round_trip_by_digest(store: &Arc<dyn RunStore>) {

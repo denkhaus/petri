@@ -176,6 +176,39 @@ struct CompletedExecution {
     slot:             Option<ExecutionSlot>,
 }
 
+/// One lease's release: what the run asked for and what the executor did.
+struct LeaseRelease {
+    lease:   crate::SandboxLeaseId,
+    outcome: executor::ScopeOutcome,
+    report:  executor::ReleaseReport,
+}
+
+/// A finished invocation's leases, released.
+struct InvocationReleased {
+    invocation: InvocationId,
+    releases:   Vec<LeaseRelease>,
+}
+
+/// The scope outcome an invocation's status maps to, which decides the
+/// retention of its sandboxes.
+fn scope_outcome(status: RunStatus) -> executor::ScopeOutcome {
+    if status == RunStatus::Success {
+        executor::ScopeOutcome::Succeeded
+    } else {
+        executor::ScopeOutcome::Failed
+    }
+}
+
+fn log_release_problems(lease: crate::SandboxLeaseId, report: &executor::ReleaseReport) {
+    for problem in &report.problems {
+        tracing::warn!(
+            lease = lease.raw(),
+            problem,
+            "sandbox lease release problem"
+        );
+    }
+}
+
 type ExecutionLeases = Arc<Mutex<BTreeMap<ScopeId, crate::SandboxLeaseId>>>;
 
 /// The coordinator delegates reservation to each execution's acquire tasks.
@@ -245,6 +278,7 @@ impl ScopeLeaseAllocator for InvocationLeaseAllocator {
             ScopeLease {
                 lease:     record.lease,
                 workspace: record.workspace.clone(),
+                provider:  record.provider.clone(),
             }
         };
         self.acquired
@@ -484,12 +518,20 @@ impl Coordinator {
             });
         }
         validate_resources(&mut store, &resources).await?;
-        for lease in store.state().invocations.values().filter_map(|invocation| {
-            match invocation.declaration.sandbox {
+        // A finished invocation is never dispatched again, so its inherited
+        // lease need not be in this run's ledger: a forked run carries the
+        // source's finished children, whose leases were the source's
+        // (`FORK.md`).
+        for lease in store
+            .state()
+            .invocations
+            .values()
+            .filter(|invocation| invocation.result.is_none())
+            .filter_map(|invocation| match invocation.declaration.sandbox {
                 SandboxBinding::Inherited { lease } => Some(lease),
                 SandboxBinding::Isolated => None,
-            }
-        }) {
+            })
+        {
             resources.resolve(lease)?;
         }
         let coordinator = Self::assemble(store, resources, runtime, middleware, options, true);
@@ -730,7 +772,7 @@ impl Coordinator {
     /// — with the run's own status, tear the run services down and stop the
     /// store writer. The run's store handle comes back, still holding the
     /// lease, so the caller can read the finished run through it.
-    pub async fn finish(self) -> Arc<dyn RunLogs> {
+    pub async fn finish(mut self) -> Arc<dyn RunLogs> {
         let status = self
             .store
             .state()
@@ -753,7 +795,18 @@ impl Coordinator {
             })
             .collect();
         for (lease, owner_status) in remaining {
-            self.release_lease(lease, owner_status).await;
+            let release = self.release_lease(lease, owner_status).await;
+            let invocation = self
+                .resources()
+                .await
+                .resolve(lease)
+                .map(|record| record.allocation.invocation)
+                .ok();
+            if let Some(invocation) = invocation
+                && let Err(error) = self.append_scope_released(invocation, release).await
+            {
+                tracing::warn!(%error, lease = lease.raw(), "the scope's release was not recorded");
+            }
         }
         self.runtime.finish().await;
         if let Err(error) = self.writer.shutdown().await {
@@ -770,20 +823,49 @@ impl Coordinator {
     /// outcome `status` maps to. Release is best effort; a problem is
     /// logged, and the record keeps its pending intent for the next attempt
     /// (`finish`, or `petri sandbox prune`).
-    async fn release_lease(&self, lease: crate::SandboxLeaseId, status: RunStatus) {
-        let outcome = if status == RunStatus::Success {
-            executor::ScopeOutcome::Succeeded
-        } else {
-            executor::ScopeOutcome::Failed
-        };
+    async fn release_lease(&self, lease: crate::SandboxLeaseId, status: RunStatus) -> LeaseRelease {
+        let outcome = scope_outcome(status);
         let report = self.runtime.release_lease(lease, outcome).await;
-        for problem in &report.problems {
-            tracing::warn!(
-                lease = lease.raw(),
-                problem,
-                "sandbox lease release problem"
-            );
+        log_release_problems(lease, &report);
+        LeaseRelease {
+            lease,
+            outcome,
+            report,
         }
+    }
+
+    /// Record a lease's release as the run's `scope.released`: the lease's
+    /// record after the release says whether its sandbox is still there.
+    async fn append_scope_released(
+        &mut self,
+        invocation: InvocationId,
+        release: LeaseRelease,
+    ) -> Result<(), CoordinatorError> {
+        let LeaseRelease {
+            lease,
+            outcome,
+            report,
+        } = release;
+        let record = {
+            let resources = self.resources().await;
+            let Ok(record) = resources.resolve(lease) else {
+                return Ok(());
+            };
+            record.clone()
+        };
+        self.append(CoordinatorEvent::ScopeReleased {
+            invocation,
+            lease,
+            scope: record.allocation.scope,
+            workspace: record.workspace,
+            provider: record.provider,
+            instance: record.resource_id,
+            outcome,
+            retained: record.state != crate::LeaseState::Deleted,
+            problems: report.problems,
+        })
+        .await?;
+        Ok(())
     }
 
     /// Release the leases `invocation` allocated, now that it has finished.
@@ -793,7 +875,7 @@ impl Coordinator {
         &mut self,
         invocation: InvocationId,
         status: RunStatus,
-        releasing: &mut JoinSet<InvocationId>,
+        releasing: &mut JoinSet<InvocationReleased>,
     ) {
         let owned: Vec<crate::SandboxLeaseId> = self
             .resources()
@@ -811,24 +893,23 @@ impl Coordinator {
                 gate.started.notify_one();
                 gate.complete.notified().await;
             }
+            let mut releases = Vec::new();
             if let Some(router) = router {
-                let outcome = if status == RunStatus::Success {
-                    executor::ScopeOutcome::Succeeded
-                } else {
-                    executor::ScopeOutcome::Failed
-                };
+                let outcome = scope_outcome(status);
                 for lease in owned {
                     let report = router.release_lease(lease, outcome).await;
-                    for problem in report.problems {
-                        tracing::warn!(
-                            lease = lease.raw(),
-                            problem,
-                            "sandbox lease release problem"
-                        );
-                    }
+                    log_release_problems(lease, &report);
+                    releases.push(LeaseRelease {
+                        lease,
+                        outcome,
+                        report,
+                    });
                 }
             }
-            invocation
+            InvocationReleased {
+                invocation,
+                releases,
+            }
         });
     }
 
@@ -848,7 +929,7 @@ impl Coordinator {
     async fn drive_invocations(
         &mut self,
         running: &mut JoinSet<CompletedExecution>,
-        releasing: &mut JoinSet<InvocationId>,
+        releasing: &mut JoinSet<InvocationReleased>,
     ) -> Result<InvocationResult, CoordinatorError> {
         let mut completed = BTreeMap::new();
         if self.store.state().invocations[&InvocationId::ROOT]
@@ -885,7 +966,11 @@ impl Coordinator {
                     }
                 }
                 result = releasing.join_next(), if !releasing.is_empty() => {
-                    let invocation = result.expect("the release set is not empty")?;
+                    let InvocationReleased { invocation, releases } =
+                        result.expect("the release set is not empty")?;
+                    for release in releases {
+                        self.append_scope_released(invocation, release).await?;
+                    }
                     self.active.remove(&invocation);
                     if let Some(sender) = self.statuses.get(&invocation) {
                         let result = self.store.state().invocations[&invocation].result.clone()
@@ -1077,7 +1162,7 @@ impl Coordinator {
         &mut self,
         done: CompletedExecution,
         running: &mut JoinSet<CompletedExecution>,
-        releasing: &mut JoinSet<InvocationId>,
+        releasing: &mut JoinSet<InvocationReleased>,
     ) -> Result<(), CoordinatorError> {
         let CompletedExecution {
             invocation,

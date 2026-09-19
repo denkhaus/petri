@@ -66,6 +66,20 @@ fn summary(inspection: &RunInspection) -> String {
             " (incomplete)"
         }
     );
+    if let Some(origin) = &inspection.forked_from {
+        let _ = writeln!(
+            out,
+            "forked from: run {} at execution {} firing {}{}",
+            origin.source,
+            origin.position.execution,
+            origin.position.firing,
+            if origin.rerun_last {
+                " (the firing runs again)"
+            } else {
+                ""
+            }
+        );
+    }
     if inspection.paused {
         let _ = writeln!(
             out,

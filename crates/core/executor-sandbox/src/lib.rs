@@ -35,7 +35,7 @@ use executor::{
     AcquireContext, EnvError, EnvHandle, Executor, ReleaseReport, Retention, SandboxLeaseId,
     ScopeOutcome, ScopeSpec,
 };
-use ir::{ContainerOptions, RuntimeTarget};
+use ir::{ContainerOptions, RuntimeTarget, SandboxInstance};
 use sandbox_driver::{Sandbox, SandboxProvider, SandboxSource, SandboxSpec, WorkspaceOwnership};
 use sandbox_driver_daytona_config::{
     DaytonaProviderConfig, DockerExecutionTarget, NestedDockerConfig,
@@ -173,6 +173,7 @@ impl SandboxExecutor {
             env_overrides.extend(options.env.clone());
         }
         let workspace = sandbox.working_directory().to_owned();
+        let instance = self.describe(&**sandbox, &workspace).await;
         let host = self.options.backend == SandboxBackend::Host
             && matches!(scope.runtime.target, RuntimeTarget::HostProcess);
         let env = SandboxEnv {
@@ -201,10 +202,35 @@ impl SandboxExecutor {
         Ok(EnvHandle::new(
             scope.id,
             SmolStr::new(scope.environment.as_str()),
+            instance,
             Arc::new(env),
             teardown,
         )
         .with_runner(Arc::new(runner)))
+    }
+
+    /// The record of an acquired sandbox: its provider and id, and what the
+    /// provider reports it runs. A provider that cannot describe the sandbox
+    /// still has one: the image and snapshot are then unknown.
+    async fn describe(&self, sandbox: &dyn Sandbox, workspace: &str) -> SandboxInstance {
+        let (image, snapshot) = match sandbox.describe().await {
+            Ok(status) => (status.image, status.snapshot),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    sandbox = %sandbox.id(),
+                    "the acquired sandbox could not be described; its image is unrecorded"
+                );
+                (None, None)
+            }
+        };
+        SandboxInstance {
+            provider:          SmolStr::new(self.manager.source().kind()),
+            instance:          SmolStr::new(sandbox.id().as_str()),
+            image:             image.map(SmolStr::new),
+            snapshot:          snapshot.map(SmolStr::new),
+            working_directory: SmolStr::new(workspace),
+        }
     }
 
     async fn build_spec(

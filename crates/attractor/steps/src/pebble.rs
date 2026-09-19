@@ -22,9 +22,10 @@
 //! Pebble knows: routes, MCP servers and their calls, tools, usage. The sink
 //! restates none of it as a Petri event; it emits a `StepEvent::Custom` only
 //! for a fact Pebble cannot know (a server never named to it,
-//! [`mcp::UNAVAILABLE_EVENT`]; the skill directories' conventions), and puts
-//! two of Pebble's facts on the node's stderr for the terminal: a fallback
-//! move and a server that did not start.
+//! [`mcp::UNAVAILABLE_EVENT`]; the skill directories' conventions) or puts
+//! on no event of its own (the tools a session has, [`tools::EVENT`], once
+//! per session), and puts two of Pebble's facts on the node's stderr for
+//! the terminal: a fallback move and a server that did not start.
 //!
 //! Text a host delivers to the node (`Control::Deliver`) that is not an
 //! answer to the agent's question is a follow-up: it runs as its own user
@@ -32,15 +33,25 @@
 //! steering bus, one per node run: text that arrives before the session is
 //! built waits on the bus and reaches the session when it attaches, in the
 //! same mode.
+//!
+//! A host's interrupt (`Interrupt` under `$interrupt`) stops the current
+//! model turn through the same bus: the request in flight and the tool calls
+//! it is running are cancelled, Pebble publishes `RoundInterrupted`, and the
+//! session stays open. With `steer` text the interrupt and the text land in
+//! one step and the text opens the next turn. Without it the prompt parks at
+//! its next turn boundary, and the next text the host delivers is sent as
+//! steering, not as a follow-up, so it is what wakes the prompt. The node
+//! reports the stop as [`INTERRUPTED_EVENT`] beside Pebble's own event.
 
 pub mod environment;
 pub mod mcp;
 pub mod questions;
+pub mod tools;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::error::Error;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use environment::{PebbleEnvironment, ScopePortRoutes, elapsed_ms};
@@ -54,20 +65,20 @@ use pebble_coding_agent::events::{
     AgentProfileKind, CodingAgentEvent, CodingEvent, EventSink, EventSinkError, PermissionLevel,
 };
 use pebble_coding_agent::extensions::Redactor;
-use pebble_coding_agent::steering::SteeringBus;
+use pebble_coding_agent::steering::{DroppedSteer, SteeringBus};
 use pebble_coding_agent::{
     CodingAgent, CodingAgentBuilder, CodingAgentExport, CodingAgentOptions, CodingInput,
-    MemoryDiscovery, PromptReport, ShutdownReason,
+    MemoryDiscovery, PromptReport, ShutdownReason, SteeringMessage,
 };
 use questions::AgentQuestions;
 use serde_json::json;
 use smol_str::SmolStr;
-use steps::{ProgressError, ProgressSender, Steer, StepCtx};
+use steps::{Interrupt, ProgressError, ProgressSender, Steer, StepCtx};
 use tokio::sync::mpsc;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
-use crate::agent::AgentConfig;
 use crate::agent::backend::AgentError;
+use crate::agent::{AgentConfig, INTERRUPTED_EVENT};
 use crate::compaction::{self, CompactionPolicyHandle};
 use crate::fallback::{self, Disposition, Plan};
 use crate::hooks::tools::ToolHooks;
@@ -232,6 +243,9 @@ impl NativeSession {
         // hooks and on the same event stream.
         let host_tools = host_tools::for_node(ctx)
             .map_err(|failure| AgentError::failed(failure.class.as_str(), failure.message))?;
+        // Which host tools a child may inherit, read before the builder
+        // takes them: the tools event names them for each child session.
+        let inheritable_hosts = tools::inheritable_host_tools(&host_tools);
         let cancel = CancellationToken::new();
         let kill = CancellationToken::new();
         let guard = cancel.clone().drop_guard();
@@ -248,6 +262,7 @@ impl NativeSession {
             node:       ctx.node.clone(),
             skills:     skill_labels,
             compaction: compaction_accounting.clone(),
+            tools:      Mutex::new(Vec::new()),
         });
         // The plan's remaining routes, for Pebble to fail over to in order,
         // each with its own controls; an export starts with none of its own.
@@ -342,7 +357,8 @@ impl NativeSession {
         };
         tokio::pin!(build);
         // Text delivered before the session exists waits on the bus, as a
-        // follow-up, and reaches the session when it attaches below.
+        // follow-up, and reaches the session when it attaches below. An
+        // interrupt finds no turn here: only the text it carries is kept.
         let steering = SteeringBus::new();
         let mut closed = false;
         let agent = loop {
@@ -351,7 +367,7 @@ impl NativeSession {
                 control = ctx.control.recv(), if !closed => {
                     match control {
                         Some(Control::Deliver(value)) if !cancel.is_cancelled() => {
-                            if !questions.answer(&value) && let Some(text) = steering_text(&value) { follow_up(&steering, text); }
+                            if !questions.answer(&value) && let Some(text) = delivered_text(&value) { follow_up(&steering, text); }
                         },
                         Some(Control::Kill) => { kill.cancel(); cancel.cancel(); },
                         Some(Control::Cancel) => cancel.cancel(),
@@ -362,6 +378,15 @@ impl NativeSession {
             }
         };
         questions.set_session(agent.snapshot().session_id());
+        // The session's tools, once, now that Pebble has registered them
+        // all; the sink keeps the list for the children Pebble builds from
+        // it. A send that fails here means the driver stopped taking this
+        // attempt's progress; the first prompt reports that.
+        let session_tools = tools::of_session(agent.snapshot().tools(), &inheritable_hosts);
+        let _ = events
+            .tools(agent.snapshot().session_id(), &session_tools)
+            .await;
+        events.set_tools(session_tools);
         let mut session = Self {
             compaction: compaction_accounting,
             agent,
@@ -421,12 +446,15 @@ impl NativeSession {
                 .prompt_with_cancellation(CodingInput::text(prompt), &cancel);
             tokio::pin!(prompt);
             let mut closed = false;
+            // A plain interrupt parked the prompt: the next delivered text
+            // is its next input and goes as steering.
+            let mut awaiting_input = false;
             loop {
                 tokio::select! {
                     biased;
                     message = control.recv(), if !closed => match message {
                         Some(Control::Deliver(value)) if !cancel.is_cancelled() => {
-                            if !questions.answer(&value) && let Some(text) = steering_text(&value) { follow_up(&self.steering, text); }
+                            if !questions.answer(&value) { deliver(&self.steering, &mut awaiting_input, &value); }
                         },
                         Some(Control::Kill) => { kill.cancel(); cancel.cancel(); },
                         Some(Control::Cancel) => cancel.cancel(),
@@ -545,16 +573,63 @@ fn steering_text(value: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The text a delivered value carries for the session, whatever the
+/// control: a steer's guidance, or the next input an interrupt names.
+fn delivered_text(value: &Value) -> Option<String> {
+    match Interrupt::from_value(value) {
+        Some(interrupt) => interrupt.steer,
+        None => steering_text(value),
+    }
+}
+
+/// Apply a delivered value that is not an answer while a prompt runs. An
+/// interrupt stops the round through the bus: with text, the text replaces
+/// the round in one step; without, the prompt parks and `awaiting_input` is
+/// set so the next text wakes it as steering. Any other text is a follow-up.
+fn deliver(bus: &SteeringBus<SmolStr>, awaiting_input: &mut bool, value: &Value) {
+    if let Some(interrupt) = Interrupt::from_value(value) {
+        if let Some(text) = interrupt.steer {
+            let message: SteeringMessage = text.into();
+            let done = bus.interrupt_then_steer(&message);
+            *awaiting_input = false;
+            tracing::info!(
+                sessions = done.interrupted.len(),
+                "model turn interrupted; the delivered text opens the next"
+            );
+            report_dropped(&done.dropped);
+        } else {
+            let done = bus.interrupt();
+            *awaiting_input = true;
+            tracing::info!(
+                sessions = done.interrupted.len(),
+                "model turn interrupted; the prompt waits for its next input"
+            );
+        }
+    } else if let Some(text) = steering_text(value) {
+        if *awaiting_input {
+            let delivery = bus.steer(text.into());
+            *awaiting_input = false;
+            report_dropped(&delivery.dropped);
+        } else {
+            follow_up(bus, text);
+        }
+    }
+}
+
 /// Queue delivered text on the node run's bus as a follow-up: on the
 /// attached session, to run as its own turn once the current answer is
 /// reached, or on the bus itself while no session is attached yet. A full
 /// queue evicts its oldest message; the bus reports what it dropped.
 fn follow_up(bus: &SteeringBus<SmolStr>, text: String) {
     let delivery = bus.follow_up(text.into());
-    if !delivery.dropped.is_empty() {
+    report_dropped(&delivery.dropped);
+}
+
+fn report_dropped(dropped: &[DroppedSteer<SmolStr>]) {
+    if !dropped.is_empty() {
         tracing::warn!(
-            dropped = delivery.dropped.len(),
-            "a follow-up queue was full; the oldest follow-up was dropped"
+            dropped = dropped.len(),
+            "a steering queue was full; its oldest message was dropped"
         );
     }
 }
@@ -579,11 +654,13 @@ impl Redactor for PetriRedactor {
 /// `(stream_id, seq)` in the nested envelope is the idempotency key.
 ///
 /// Beside the envelope, the sink emits Petri's own events only for what
-/// Pebble cannot know: the conventions behind the skill directories Pebble
-/// reports having searched, a server never named to Pebble because its
-/// secret is unavailable ([`PetriEvents::unavailable`]), and the node and
-/// attempt a completed compaction of the session belongs to
+/// Pebble cannot know or puts on no event: the conventions behind the skill
+/// directories Pebble reports having searched, a server never named to
+/// Pebble because its secret is unavailable ([`PetriEvents::unavailable`]),
+/// the node and attempt a completed compaction of the session belongs to
 /// ([`compaction::EVENT`], folded from Pebble's `CompactionCompleted` as it
+/// is recorded), and the tools a session has ([`tools::EVENT`]: the node's
+/// own session once it is built, each child session as its `SessionStarted`
 /// is recorded). Two of Pebble's facts also go to the node's stderr, for
 /// the terminal: a fallback move and a server that did not start
 /// ([`stderr_line`]).
@@ -598,9 +675,46 @@ struct PetriEvents {
     skills:     skills::Labels,
     /// The session's own compactions, folded as Pebble reports them.
     compaction: Arc<compaction::Accounting>,
+    /// The node's session's tools, set once the agent is built; what each
+    /// child session's list is derived from.
+    tools:      Mutex<Vec<tools::Tool>>,
 }
 
 impl PetriEvents {
+    /// The session's tool list, kept for the children built from it.
+    fn set_tools(&self, list: Vec<tools::Tool>) {
+        *self.tools.lock().unwrap_or_else(PoisonError::into_inner) = list;
+    }
+
+    /// The [`tools::EVENT`] payload for `session`, acknowledged.
+    async fn tools(&self, session: &str, list: &[tools::Tool]) -> Result<(), ProgressError> {
+        self.sender
+            .send_acked(StepEvent::Custom(self.masker.mask_value(&json!({
+                "kind": tools::EVENT,
+                "node": self.node,
+                "firing": self.firing,
+                "attempt": self.attempt,
+                "session": session,
+                "tools": list,
+            }))))
+            .await
+    }
+
+    /// A child session Pebble just started: its tools are the ones it
+    /// inherits from this node's session.
+    async fn child_started(&self, event: &CodingAgentEvent) -> Result<(), EventSinkError> {
+        if event.parent_session_id.is_none()
+            || !matches!(event.event, CodingEvent::SessionStarted { .. })
+        {
+            return Ok(());
+        }
+        let inherited =
+            tools::inherited(&self.tools.lock().unwrap_or_else(PoisonError::into_inner));
+        self.tools(&event.session_id, &inherited)
+            .await
+            .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))
+    }
+
     /// A server Petri never named to Pebble because a secret its entry
     /// needs is unavailable: the line on the node's stderr, then
     /// [`mcp::UNAVAILABLE_EVENT`], both acknowledged.
@@ -668,6 +782,27 @@ impl EventSink for PetriEvents {
                 .await
                 .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))?;
         }
+        // The node's own turn was stopped by a host's interrupt: Pebble's
+        // fact is the envelope above, this is the node's report of it. A
+        // child session's interrupt is the child's.
+        if matches!(event.event, CodingEvent::RoundInterrupted { .. })
+            && event.parent_session_id.is_none()
+        {
+            self.sender
+                .send_acked(StepEvent::Custom(json!({
+                    "kind": INTERRUPTED_EVENT,
+                    "node": self.node,
+                    "firing": self.firing,
+                    "attempt": self.attempt,
+                    "backend": "api",
+                    "session": event.session_id,
+                })))
+                .await
+                .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))?;
+        }
+        // A child's tools, right after the child's own start: the envelope
+        // above is Pebble's record of the session, this is what it can call.
+        self.child_started(event).await?;
         // The directories Pebble searched are Petri's record, with the
         // convention behind each; a skipped file or directory is Pebble's
         // report and the diagnostic is Petri's.

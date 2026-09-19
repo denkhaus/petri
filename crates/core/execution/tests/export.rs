@@ -194,6 +194,7 @@ async fn a_crash_prefix_exports_what_is_stored_and_resume_stores_the_rest() {
         .filter(|line| {
             !line.contains("\"execution.finished\"")
                 && !line.contains("\"invocation.finished\"")
+                && !line.contains("\"scope.released\"")
                 && !line.contains("\"run.finished\"")
         })
         .collect();

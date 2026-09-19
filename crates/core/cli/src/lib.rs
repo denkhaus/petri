@@ -32,8 +32,8 @@ use execution::prune as sandbox_prune;
 use runtime::engine::{self, EventLog};
 use runtime::executor::Retention;
 use runtime::frontend::{
-    self, CompileInputs, Frontend, LAUNCH_MODEL_VAR, LAUNCH_PROVIDER_VAR, LaunchSettings, Lowered,
-    WorkspaceRetention,
+    self, CompileInputs, Frontend, LAUNCH_ENVIRONMENT_VAR, LAUNCH_MODEL_VAR, LAUNCH_PROVIDER_VAR,
+    LaunchSettings, Lowered, WorkspaceRetention,
 };
 use runtime::ir::Graph;
 use runtime::{DaytonaSandboxKind, LoadError, RunOptions, Runtime, SandboxBackend, SandboxOptions};
@@ -140,30 +140,40 @@ impl FileArgs {
     }
 }
 
-/// `--model` and `--provider`: the launch-level model default. A format
-/// whose LLM nodes may name no model reads them below its own defaults (the
-/// node, the graph, the run configuration); a format without such nodes
-/// ignores them.
+/// `--model`, `--provider` and `--environment`: the launch-level settings a
+/// format's run configuration reads. A format whose LLM nodes may name no
+/// model reads the model default below its own defaults (the node, the
+/// graph, the run configuration); a format with named environments reads
+/// the environment selection over its files, as Fabro's own environment
+/// option does. A format without either ignores them.
 #[derive(Args, Default)]
 struct ModelArgs {
     /// The model a prompt or agent node runs on when neither it, the graph
     /// nor the workflow's run configuration names one.
     #[arg(long)]
-    model:    Option<String>,
+    model:       Option<String>,
     /// The provider of that model. Alone, the provider's default model in
     /// the runner's catalog.
     #[arg(long)]
-    provider: Option<String>,
+    provider:    Option<String>,
+    /// The execution environment to run in, by the id the workflow's run
+    /// configuration declares it under, over what the configuration
+    /// selects itself.
+    #[arg(long)]
+    environment: Option<String>,
 }
 
 impl ModelArgs {
-    /// Bind the launch default as compile variables, for the format to read.
+    /// Bind the launch settings as compile variables, for the format to read.
     fn bind(&self, mut inputs: CompileInputs) -> CompileInputs {
         if let Some(model) = &self.model {
             inputs = inputs.with_var(LAUNCH_MODEL_VAR, model.as_str());
         }
         if let Some(provider) = &self.provider {
             inputs = inputs.with_var(LAUNCH_PROVIDER_VAR, provider.as_str());
+        }
+        if let Some(environment) = &self.environment {
+            inputs = inputs.with_var(LAUNCH_ENVIRONMENT_VAR, environment.as_str());
         }
         inputs
     }
@@ -442,7 +452,7 @@ pub async fn main(make: impl Fn(RuntimeMode) -> Runtime) -> ExitCode {
             // distribution installed, so both run at admission.
             let controls = ControlService::new();
             let hooks = controls.hooks(rt.installed_hooks());
-            let rt = rt.hooks(hooks);
+            let rt = rt.hooks(hooks).capability(controls.turns());
             let default_retention = rt
                 .frontend_for(&target.file, target.format.as_deref())
                 .ok()

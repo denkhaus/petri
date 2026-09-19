@@ -8,6 +8,10 @@
 //! sensitive answer crosses as a `{"$secret": "answer:<id>"}` reference the
 //! answerer registered on the run's secret provider first, so the value is
 //! maskable and never enters the log.
+//!
+//! Two other payloads ride the same control: a [`Steer`], guidance for an
+//! agent's session, and an [`Interrupt`], which stops an agent's current
+//! model turn. Neither is ever read as an answer.
 
 use ir::{Control, StepEvent, Value};
 use serde::{Deserialize, Serialize};
@@ -25,12 +29,34 @@ pub const ANSWER_SECRET_PREFIX: &str = "answer:";
 /// steer is never an answer: a step waiting on a question ignores it, and an
 /// agent step queues it as guidance for its session.
 pub const STEER_KEY: &str = "$steer";
+/// The key an interrupt rides under in a `Control::Deliver` value. Like a
+/// steer, an interrupt is never an answer.
+pub const INTERRUPT_KEY: &str = "$interrupt";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuestionOption {
     /// The shortcut a person types.
-    pub key:   String,
-    pub label: String,
+    pub key:         String,
+    pub label:       String,
+    /// What choosing the option means, when the label is not enough.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// A sample of what the option would do or produce, for a host that
+    /// can show one beside the label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview:     Option<String>,
+}
+
+impl QuestionOption {
+    /// An option with a key and a label, and nothing else.
+    pub fn new(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            key:         key.into(),
+            label:       label.into(),
+            description: None,
+            preview:     None,
+        }
+    }
 }
 
 /// Something a person should look at before answering: a review document,
@@ -73,6 +99,11 @@ pub struct Question {
     /// step owns the expiry; a host shows the deadline so a person knows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// What a person should read beside the question before answering: the
+    /// text the asking step chose as the question's context (a human gate
+    /// shows the previous stage's response, as Fabro's gate does).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context:    Option<String>,
 }
 
 impl Question {
@@ -88,6 +119,7 @@ impl Question {
             kind:       None,
             reference:  None,
             timeout_ms: None,
+            context:    None,
         }
     }
 
@@ -161,6 +193,42 @@ impl Steer {
     /// The steer a delivered value carries, if it is one.
     pub fn from_value(value: &Value) -> Option<Self> {
         serde_json::from_value(value.get(STEER_KEY)?.clone()).ok()
+    }
+}
+
+/// A host stops a running agent stage's current model turn: the request in
+/// flight and the tool calls it is running end, the session stays open, and
+/// the stage continues with its next input. `steer` is that input when the
+/// host gives it in the same control; without it the stage waits for the
+/// next delivered text. Not an answer to anything.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Interrupt {
+    /// The stage's next input, when the host names it with the interrupt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steer: Option<String>,
+}
+
+impl Interrupt {
+    /// Stop the turn; the next delivered text is the stage's next input.
+    pub fn new() -> Self {
+        Self { steer: None }
+    }
+
+    /// Stop the turn and make `text` the stage's next input.
+    pub fn and_steer(text: impl Into<String>) -> Self {
+        Self {
+            steer: Some(text.into()),
+        }
+    }
+
+    /// The control a host delivers.
+    pub fn to_control(&self) -> Control {
+        Control::Deliver(json!({ INTERRUPT_KEY: self }))
+    }
+
+    /// The interrupt a delivered value carries, if it is one.
+    pub fn from_value(value: &Value) -> Option<Self> {
+        serde_json::from_value(value.get(INTERRUPT_KEY)?.clone()).ok()
     }
 }
 
@@ -251,7 +319,7 @@ impl Answer {
         if let Some(inner) = value.get(ANSWER_KEY) {
             return serde_json::from_value(inner.clone()).ok();
         }
-        if value.get(STEER_KEY).is_some() {
+        if value.get(STEER_KEY).is_some() || value.get(INTERRUPT_KEY).is_some() {
             return None;
         }
         match value {
@@ -277,22 +345,47 @@ mod tests {
         let question = Question {
             id:         "q1".into(),
             text:       "Ship?".into(),
-            options:    vec![QuestionOption {
-                key:   "Y".into(),
-                label: "[Y] Yes".into(),
-            }],
+            options:    vec![
+                QuestionOption {
+                    key:         "Y".into(),
+                    label:       "[Y] Yes".into(),
+                    description: Some("Merge and deploy".into()),
+                    preview:     Some("deploy --prod".into()),
+                },
+                QuestionOption::new("N", "[N] No"),
+            ],
             default:    Some("Y".into()),
             freeform:   false,
             sensitive:  false,
             kind:       Some("yes_no".into()),
             reference:  None,
             timeout_ms: None,
+            context:    Some("The diff summary".into()),
         };
         assert_eq!(
             Question::from_event(&question.to_event()),
             Some(question.clone())
         );
         assert_eq!(question.secret_name(), "answer:q1");
+        // The optional fields are absent from the wire when unset, so a
+        // host reading an older question sees the same shape.
+        let StepEvent::Custom(value) = question.to_event() else {
+            panic!("custom");
+        };
+        assert_eq!(
+            value[QUESTION_KEY]["options"][1],
+            json!({ "key": "N", "label": "[N] No" })
+        );
+        assert_eq!(
+            value[QUESTION_KEY]["options"][0]["preview"],
+            json!("deploy --prod")
+        );
+        assert_eq!(value[QUESTION_KEY]["context"], json!("The diff summary"));
+        let bare = Question::new("q2", "Plain?");
+        let StepEvent::Custom(value) = bare.to_event() else {
+            panic!("custom");
+        };
+        assert!(value[QUESTION_KEY].get("context").is_none());
         assert_eq!(
             Question::from_event(&StepEvent::Custom(json!({"other": 1}))),
             None
@@ -381,5 +474,32 @@ mod tests {
         assert_eq!(Steer::from_value(&value), Some(steer));
         assert_eq!(Answer::from_value(&value), None);
         assert_eq!(Steer::from_value(&json!({ "text": "plain" })), None);
+    }
+
+    #[test]
+    fn an_interrupt_is_neither_an_answer_nor_a_steer() {
+        let plain = Interrupt::new();
+        let Control::Deliver(value) = plain.to_control() else {
+            panic!("deliver");
+        };
+        assert_eq!(value, json!({ INTERRUPT_KEY: {} }));
+        assert_eq!(Interrupt::from_value(&value), Some(plain));
+        assert_eq!(Answer::from_value(&value), None);
+        assert_eq!(Steer::from_value(&value), None);
+
+        let with_text = Interrupt::and_steer("stop and summarize");
+        let Control::Deliver(value) = with_text.to_control() else {
+            panic!("deliver");
+        };
+        assert_eq!(
+            value,
+            json!({ INTERRUPT_KEY: { "steer": "stop and summarize" } })
+        );
+        assert_eq!(Interrupt::from_value(&value), Some(with_text));
+        assert_eq!(Answer::from_value(&value), None);
+        assert_eq!(
+            Interrupt::from_value(&json!({ "$steer": { "text": "x" } })),
+            None
+        );
     }
 }

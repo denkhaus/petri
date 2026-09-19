@@ -733,10 +733,7 @@ mod tests {
                 text:       "Ship it?".into(),
                 options:    options
                     .iter()
-                    .map(|(key, label)| QuestionOption {
-                        key:   (*key).into(),
-                        label: (*label).into(),
-                    })
+                    .map(|(key, label)| QuestionOption::new(*key, *label))
                     .collect(),
                 default:    options.first().map(|(key, _)| (*key).into()),
                 freeform:   false,
@@ -744,6 +741,7 @@ mod tests {
                 kind:       kind.map(Into::into),
                 reference:  None,
                 timeout_ms: None,
+                context:    None,
             },
         }
     }

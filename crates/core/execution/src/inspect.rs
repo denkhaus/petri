@@ -41,6 +41,7 @@ use serde::Serialize;
 use smol_str::SmolStr;
 use store::{Access, RunLogs};
 
+use crate::host::ForkOrigin;
 use crate::interview::{InterviewReceipt, RECEIPT_FILE};
 use crate::state::RunNote;
 use crate::store::load_graph_registry;
@@ -126,6 +127,11 @@ pub struct RunInspection {
     pub locator: String,
     /// The run's identity in its store and on its sandbox providers.
     pub run_key: store::RunKey,
+    /// Where the run was forked from, when it was seeded from another run's
+    /// records: the source key, the position and whether the position's
+    /// firing runs again (`FORK.md`). `null` on a run that started fresh.
+    /// Additive in format version 3.
+    pub forked_from: Option<ForkOrigin>,
     /// True only when `incomplete` is empty: the run recorded its finish and
     /// every execution's log decoded whole and replayed byte-identically.
     pub complete: bool,
@@ -428,12 +434,13 @@ pub async fn inspect_run(logs: &dyn RunLogs) -> Result<RunInspection, InspectErr
             }
             other => InspectError::Store(other),
         })?;
-    let (format_version, run_key) = match records.first().map(|record| &record.body) {
+    let (format_version, run_key, forked_from) = match records.first().map(|record| &record.body) {
         Some(CoordinatorEvent::RunStarted {
             format_version,
             key,
+            forked_from,
             ..
-        }) => (*format_version, key.clone()),
+        }) => (*format_version, key.clone(), forked_from.clone()),
         _ => return Err(InspectError::State(StateError::MissingRunStart)),
     };
     let state = CoordinatorState::replay(&records)?;
@@ -467,6 +474,7 @@ pub async fn inspect_run(logs: &dyn RunLogs) -> Result<RunInspection, InspectErr
         coordinator_format_version: format_version,
         locator: logs.locator(),
         run_key,
+        forked_from,
         complete: incomplete.is_empty(),
         status: state.run_status.map(|status| status.to_string()),
         incomplete,

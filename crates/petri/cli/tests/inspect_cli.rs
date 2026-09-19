@@ -10,6 +10,10 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, fs, io, thread};
 
+use petri::RunOptions;
+use petri::execution::host::{self, ForkOptions, ForkPosition};
+use petri::execution::{Access, open_run_dir};
+use petri::ir::{ExecutionId, FiringId};
 use serde_json::Value;
 use testkit::RunDir;
 
@@ -537,4 +541,97 @@ fn inspect_shows_a_sensitive_answer_as_a_secret_reference_only() {
             "the plaintext is in the run dir"
         );
     }
+}
+
+/// A fork seeded from a run the binary wrote (`host::fork_from`) inspects
+/// as a fork: the document names the source and the position, the summary
+/// says so, and `petri resume` continues it to the end.
+#[tokio::test]
+async fn inspect_names_the_source_of_a_forked_run() {
+    let (dir, run_dir) = finished_run("inspect-cli-fork");
+    let (_, source) = inspect(&run_dir);
+    assert_eq!(source["forked_from"], Value::Null);
+    let source_key = source["run_key"].as_str().expect("the run key").to_owned();
+    let firing = source["executions"][0]["engine"]["history"]
+        .as_array()
+        .expect("history")
+        .iter()
+        .find(|record| record["node"] == "a")
+        .expect("`a` ran")["firing"]
+        .as_u64()
+        .expect("a firing id");
+
+    let fork_dir = dir.path().join("fork");
+    let forked = {
+        let rt = petri::runtime().options(RunOptions::new(&fork_dir));
+        let logs = open_run_dir(&run_dir, Access::Read)
+            .await
+            .expect("the source opens");
+        host::fork_from(
+            &rt,
+            &*logs,
+            ForkPosition {
+                execution: ExecutionId::new(0),
+                firing:    FiringId::new(firing),
+            },
+            ForkOptions::default(),
+        )
+        .await
+        .expect("the fork seeds")
+    };
+
+    // Before it runs: a fork, incomplete, named after its source.
+    let (output, document) = inspect(&fork_dir);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(document["run_key"], Value::from(forked.key.as_str()));
+    assert_eq!(
+        document["forked_from"]["source"],
+        Value::from(source_key.as_str())
+    );
+    assert_eq!(document["forked_from"]["execution"], Value::from(0));
+    assert_eq!(document["forked_from"]["firing"], Value::from(firing));
+    assert_eq!(document["forked_from"]["rerun_last"], Value::Bool(false));
+    let summary = petri()
+        .args(["inspect", "--run-dir"])
+        .arg(&fork_dir)
+        .output()
+        .expect("petri inspects");
+    let text = String::from_utf8_lossy(&summary.stdout);
+    assert!(
+        text.contains(&format!(
+            "forked from: run {source_key} at execution 0 firing {firing}\n"
+        )),
+        "{text}"
+    );
+
+    // `petri resume` continues the fork: `b` runs and the run finishes.
+    let resumed = petri()
+        .args(["resume", "--quiet", "--run-dir"])
+        .arg(&fork_dir)
+        .output()
+        .expect("petri resumes");
+    assert!(resumed.status.success(), "{}", stderr(&resumed));
+    let (output, document) = inspect(&fork_dir);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(document["status"], Value::from("success"));
+    assert_eq!(
+        document["forked_from"]["source"],
+        Value::from(source_key.as_str())
+    );
+    let history = document["executions"][0]["engine"]["history"]
+        .as_array()
+        .expect("history");
+    let nodes: Vec<&str> = history
+        .iter()
+        .filter_map(|record| record["node"].as_str())
+        .collect();
+    assert!(nodes.contains(&"a") && nodes.contains(&"b"), "{nodes:?}");
+    assert_eq!(
+        history
+            .iter()
+            .filter(|record| record["node"] == "a")
+            .count(),
+        1,
+        "the kept stage ran once, in the source"
+    );
 }
