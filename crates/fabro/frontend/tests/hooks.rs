@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
+use attractor_steps::acp::ENVELOPE_KIND;
 use attractor_steps::agent::THREAD_EVENT;
 use attractor_steps::hooks::{REPORT_EVENT, WARNING_EVENT};
 use attractor_steps::pebble::PebbleClient;
@@ -1982,10 +1983,11 @@ async fn a_replacement_service_receives_every_step_driven_phase_once() {
     assert_eq!(pre["report"]["hooks"][0]["name"], "host-guard");
 }
 
-/// The ACP backend asks the same replaced service at its one boundary, the
-/// permission request, and warns about the boundaries it lacks for each tool
-/// hook the service says it has configured, with nothing of the local
-/// service installed. A block still answers with the rejecting option.
+/// The ACP backend asks the same replaced service at its boundaries (the
+/// permission request here; a reported tool call finishing, which the fake
+/// agent never sends), and says what each tool hook the service reports as
+/// configured can see, with nothing of the local service installed. A block
+/// still answers with the rejecting option.
 #[tokio::test]
 async fn a_replacement_service_serves_acp_permission_requests_best_effort() {
     let dir = RunDir::new("hooks-host-acp");
@@ -2028,7 +2030,7 @@ async fn a_replacement_service_serves_acp_permission_requests_best_effort() {
     assert_eq!(
         service.count(HookPoint::AfterToolUse, "a"),
         0,
-        "ACP has no post-tool boundary"
+        "the fake agent reports no tool call finishing, so no post-tool point"
     );
     let pre = customs
         .reports()
@@ -2050,7 +2052,7 @@ async fn a_replacement_service_serves_acp_permission_requests_best_effort() {
         warnings.iter().any(|w| w["backend"] == "acp"
             && w["hook"] == "after"
             && w["event"] == "post_tool_use"
-            && w["boundary"] == "none"),
+            && w["boundary"] == "session/update"),
         "{warnings:?}"
     );
 }
@@ -2485,15 +2487,44 @@ fn with_env(mut graph: Graph, pairs: &[(&str, &str)]) -> Graph {
     graph
 }
 
-/// An ACP agent's permission request is the one boundary a `pre_tool_use`
-/// hook can act on: a block answers with the rejecting option. Post-tool
-/// hooks cannot run; the node warns before the agent starts, naming the
-/// backend, the hook, the event and the missing boundary, and the run
-/// continues.
+/// Petri's scripted agent (`crates/attractor/steps/tests/testdata/
+/// scripted_acp_agent.py`) speaks the tool boundaries the products speak:
+/// a permission request for its write, and `tool_call_update` reports for
+/// every call.
+fn scripted_agent(dir: &RunDir) -> PathBuf {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../attractor/steps/tests/testdata/scripted_acp_agent.py");
+    let script =
+        fs::read_to_string(&source).unwrap_or_else(|e| panic!("{}: {e}", source.display()));
+    let path = dir.path().join("scripted_acp_agent.py");
+    fs::write(&path, script).expect("write the scripted agent");
+    path
+}
+
+/// The permission exchanges the ACP client recorded: the `acp` envelopes
+/// whose method is `session/request_permission`.
+fn permission_exchanges(customs: &Customs) -> Vec<Value> {
+    customs
+        .all()
+        .into_iter()
+        .filter(|(_, v)| {
+            v["kind"] == ENVELOPE_KIND && v["event"]["method"] == "session/request_permission"
+        })
+        .map(|(_, v)| v["event"].clone())
+        .collect()
+}
+
+/// The two tool boundaries ACP offers, mapped: a `pre_tool_use` hook runs
+/// at the permission request and a block answers with the rejecting
+/// option, so the write never happens and the agent reports the call
+/// failed, which runs `post_tool_use_failure`; a call the agent reports
+/// finished runs `post_tool_use` with its output; a call the agent ran
+/// without asking is warned once per hook and tool. The node says before
+/// the agent starts what each hook can see.
 #[tokio::test]
 async fn acp_tool_hooks_are_best_effort_with_explicit_warnings() {
     let dir = RunDir::new("hooks-acp");
-    let agent = fake_agent(&dir);
+    let agent = scripted_agent(&dir);
     let permission = dir.path().join("permission.json");
     let graph = lower(
         &format!(
@@ -2501,25 +2532,31 @@ async fn acp_tool_hooks_are_best_effort_with_explicit_warnings() {
         graph [goal="G", backend="acp", acp.command="python3 {}"]
         start [shape=Mdiamond]
         exit [shape=Msquare]
-        a [prompt="Say hello"]
+        a [prompt="Write the file"]
         start -> a -> exit
     }}"#,
             agent.display()
         ),
         r#"
 [[run.hooks]]
-name = "deny-all"
+name = "deny-writes"
 event = "pre_tool_use"
+matcher = "Write"
 script = "exit 2"
 
 [[run.hooks]]
 name = "after"
 event = "post_tool_use"
-script = "echo after >> post.log"
+script = '''grep -o '"tool_output":"[^"]*"' "$FABRO_HOOK_CONTEXT" >> post.log'''
+
+[[run.hooks]]
+name = "after-failure"
+event = "post_tool_use_failure"
+script = '''grep -o '"error_message":"[^"]*"' "$FABRO_HOOK_CONTEXT" >> failed.log'''
 "#,
     );
     let graph = with_env(graph, &[
-        ("ACP_MODE", "permission"),
+        ("ACP_MODE", "tools"),
         ("ACP_PERMISSION", permission.to_str().expect("utf-8")),
     ]);
     let (report, customs) = run(&dir, graph, None).await;
@@ -2529,12 +2566,27 @@ script = "echo after >> post.log"
         "{:?}",
         report.state.errors()
     );
-    // The permission request was answered with the rejection.
+    // The permission request was answered with the rejection: the write
+    // never happened.
     let answered: Value = serde_json::from_str(&read(&permission)).expect("permission answer");
     assert_eq!(answered["outcome"]["outcome"], "selected");
     assert_eq!(answered["outcome"]["optionId"], "reject", "{answered}");
-    // The pre report is recorded as executed and blocking; the post hook is
-    // recorded as a warning, never as executed.
+    assert!(
+        !workspace(&dir).join("hello.txt").exists(),
+        "the blocked write did not happen"
+    );
+    let exchanges = permission_exchanges(&customs);
+    assert_eq!(exchanges.len(), 1, "{exchanges:?}");
+    assert_eq!(exchanges[0]["outcome"]["optionId"], "reject");
+    assert_eq!(exchanges[0]["tool_call_id"], "call-1");
+    assert!(
+        exchanges[0]["blocked"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "the block's reason rides on the exchange: {}",
+        exchanges[0]
+    );
+    // The pre report is recorded as executed and blocking.
     let pre = customs
         .reports()
         .into_iter()
@@ -2542,30 +2594,108 @@ script = "echo after >> post.log"
         .expect("pre")
         .1;
     assert_eq!(pre["report"]["decision"]["decision"], "block");
-    assert_eq!(pre["report"]["hooks"][0]["name"], "deny-all");
-    assert!(!workspace(&dir).join("post.log").exists());
+    assert_eq!(pre["report"]["hooks"][0]["name"], "deny-writes");
+    // The rejected write's failure ran the failure hook with the agent's
+    // error; the read the agent reported finished ran the post hook with
+    // its output.
+    assert_eq!(
+        read(&workspace(&dir).join("failed.log")).trim(),
+        r#""error_message":"permission denied""#
+    );
+    assert_eq!(
+        read(&workspace(&dir).join("post.log")).trim(),
+        r##""tool_output":"# readme""##
+    );
+    let post_events: Vec<String> = customs
+        .reports()
+        .iter()
+        .filter_map(|(_, e)| e["event"].as_str().map(str::to_owned))
+        .filter(|event| event.starts_with("post_tool_use"))
+        .collect();
+    assert_eq!(post_events, ["post_tool_use_failure", "post_tool_use"]);
+    // What each hook can see, said before the agent started; and the read
+    // that ran past the pre hook, said once.
     let warnings = customs.warnings();
     assert!(
         warnings.iter().any(|w| w["backend"] == "acp"
-            && w["hook"] == "after"
-            && w["event"] == "post_tool_use"
-            && w["boundary"] == "none"),
-        "{warnings:?}"
-    );
-    assert!(
-        warnings.iter().any(|w| w["backend"] == "acp"
-            && w["hook"] == "deny-all"
+            && w["hook"] == "deny-writes"
             && w["event"] == "pre_tool_use"
             && w["boundary"] == "session/request_permission"),
         "{warnings:?}"
     );
-    assert!(
-        customs
-            .reports()
-            .iter()
-            .all(|(_, e)| e["event"] != "post_tool_use"),
-        "no fabricated post-tool activity"
+    for hook in ["after", "after-failure"] {
+        assert!(
+            warnings.iter().any(|w| w["backend"] == "acp"
+                && w["hook"] == hook
+                && w["event"] == "post_tool_use"
+                && w["boundary"] == "session/update"),
+            "{warnings:?}"
+        );
+    }
+    let unasked: Vec<&Value> = warnings
+        .iter()
+        .filter(|w| {
+            w["hook"] == "deny-writes"
+                && w["boundary"] == "session/update"
+                && w["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("`Read README`"))
+        })
+        .collect();
+    assert_eq!(unasked.len(), 1, "{warnings:?}");
+}
+
+/// A `pre_tool_use` hook that proceeds allows the call once, never always:
+/// the next call of that kind asks again, so the hook keeps seeing every
+/// write. Without a `pre_tool_use` hook the client allows always
+/// (`petri-attractor-steps::acp`).
+#[tokio::test]
+async fn a_proceeding_pre_tool_use_hook_allows_once_so_every_call_asks() {
+    let dir = RunDir::new("hooks-acp-allow-once");
+    let agent = scripted_agent(&dir);
+    let graph = lower(
+        &format!(
+            r#"digraph W {{
+        graph [goal="G", backend="acp", acp.command="python3 {}"]
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        a [prompt="Write the file"]
+        start -> a -> exit
+    }}"#,
+            agent.display()
+        ),
+        r#"
+[[run.hooks]]
+name = "watch-writes"
+event = "pre_tool_use"
+script = "exit 0"
+"#,
     );
+    let graph = with_env(graph, &[("ACP_MODE", "tools")]);
+    let (report, customs) = run(&dir, graph, None).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert_eq!(read(&workspace(&dir).join("hello.txt")), "hello from acp\n");
+    let exchanges = permission_exchanges(&customs);
+    assert_eq!(exchanges.len(), 1, "{exchanges:?}");
+    assert_eq!(
+        exchanges[0]["outcome"]["optionId"], "once",
+        "allowed once, so the next write asks the hook again: {}",
+        exchanges[0]
+    );
+    assert!(exchanges[0]["blocked"].is_null());
+    let pre = customs
+        .reports()
+        .into_iter()
+        .find(|(_, e)| e["event"] == "pre_tool_use")
+        .expect("pre")
+        .1;
+    assert_eq!(pre["report"]["decision"]["decision"], "proceed");
+    assert_eq!(pre["report"]["hooks"][0]["name"], "watch-writes");
 }
 
 /// The run-end hooks follow Fabro's `on_run_end`: a failed run fires

@@ -458,7 +458,8 @@ the coordinator registers `attractor_steps::workflow::ChildInvoker`.
   `backend="acp"` starts
   the Agent Client Protocol command from `acp.command` / `acp.config` (node,
   graph, then `PETRI_ACP_COMMAND`). The ACP command owns model selection;
-  model settings are observer metadata. `provider` (or `default_provider`) qualifies the
+  model settings are observer metadata. What a real product needs, and what
+  the client gives it, is under "ACP products" below. `provider` (or `default_provider`) qualifies the
   model selector, and `reasoning_effort` configures the actual model request.
   The node's backend overrides the graph's backend; model stylesheets can also
   select it. Graph ACP configuration applies only to ACP nodes. Setting ACP
@@ -690,15 +691,33 @@ warnings). Tool and run-level reports are `StepEvent::Custom` with
 an enforcement gap is `kind = "attractor.hook.warning"` (`backend`, `hook`,
 `event`, `boundary`, `message`).
 
-Tool hooks on the ACP backend are best effort: the client answers
-`session/request_permission` with the hooks' decision, rejecting the call
-when a `pre_tool_use` hook blocks, and reports `post_tool_use` from the tool
-call updates it observes. A tool call the agent runs without asking (a
-permission mode that never asks, a tool the agent treats as safe) is
-warned once per hook and tool as `attractor.hook.warning`, naming the backend
-(`acp`), the hook, the event and the boundary the agent did not offer.
-Fabro ignores ACP tool hooks silently; the warning is an accepted
-difference.
+Tool hooks on the ACP backend map onto the two tool boundaries the protocol
+offers, and both are best effort because the agent decides what it asks
+and what it reports:
+
+- `pre_tool_use` runs at `session/request_permission`, with the request's
+  tool title as `tool_name`, its `toolCallId` and its `rawInput`. A block
+  answers with the rejecting option (`reject_once`, else `reject_always`),
+  so the effect does not happen for that call and the agent sees the
+  denial. Otherwise the request is allowed: with the `allow_always` option
+  when no `pre_tool_use` hook is configured (nothing needs to see the next
+  call of that kind, as Fabro's client answered), and with `allow_once` when
+  one is, so every later call of that kind asks again and the hook keeps
+  running.
+- `post_tool_use` and `post_tool_use_failure` run when the agent reports a
+  tool call finished: a `tool_call_update` (or `tool_call`) with status
+  `completed` carries the call's text content, else its `rawOutput`, as
+  `tool_output`; status `failed` carries the same as `error_message`. The
+  decisions are ignored, as Fabro ignores them.
+
+A tool call the agent runs without asking (a permission mode that never
+asks, a tool the agent treats as safe) is seen when it is reported running
+or finished, and warned once per hook and tool as `attractor.hook.warning`,
+naming the backend (`acp`), the hook, the event and the boundary
+(`session/update`). Before the first prompt the node says, once per
+configured tool hook, what that hook can see: the permission boundary for
+`pre_tool_use`, the update boundary for the post-tool events. Fabro ignores
+ACP tool hooks silently; the warnings are an accepted difference.
 
 An interrupt on the ACP backend is `session/cancel` without ending the
 process: the agent answers the prompt in flight with stop reason
@@ -707,6 +726,64 @@ session's next `session/prompt` is the interrupt's text, else the next text
 the host delivers. The interrupted turn's partial text is not the node's
 answer. An agent that ignores `session/cancel` keeps the turn running until
 it ends on its own.
+
+### ACP products
+
+The ACP client (`attractor_steps::acp`) speaks ACP 1 over the agent's
+stdio and is complete against what Claude Code and Gemini CLI speak. Claude
+Code has no ACP mode of its own; it speaks the protocol through the
+`claude-code-acp` adapter (the `@zed-industries/claude-code-acp` package),
+so the command is `acp.command="claude-code-acp"`. Gemini CLI speaks it as
+`acp.command="gemini --acp"`. The command is started in the node's scope, a
+host directory or a container, so the product must be installed where the
+scope runs (a container image with the product on `PATH`).
+
+The agent's environment is the scope's, plus:
+
+- every product credential the run's secrets know: `ANTHROPIC_API_KEY`,
+  `GEMINI_API_KEY` and `OPENAI_API_KEY` (`attractor_steps::acp::PRODUCT_CREDENTIALS`),
+  each resolved through the run's secret provider (the standalone runner
+  reads `PETRI_SECRET_<NAME>`; Fabro its vault) and masked in every log; a
+  name the provider does not know is left out. A product in a container
+  gets its key this way without the workflow naming it.
+- the command's own `env` from `acp.config`, on top. A value is a string or
+  a `{"$secret": "NAME"}` reference resolved the same way; a reference the
+  run cannot supply fails the node with class `secret_unavailable` before
+  the agent starts.
+
+The session opens in the scope's workspace (`session/new` with `cwd`). An
+agent that answers `session/new` with `auth_required` (Gemini CLI, until
+it has authenticated) is authenticated with the API-key method it
+advertised at `initialize` (the first marked `_meta.api-key`, else the
+first whose id says `api-key`), then asked again; an agent that advertises
+no such method fails the node with the agent's own error. `session/prompt`
+sends the node's prompt as one text block; the turn's text is the
+`agent_message_chunk` text.
+
+Every notification the agent sends is recorded on the public stream as the
+backend envelope, `StepEvent::Custom` with `kind = "acp"`: `{ kind, node,
+firing, attempt, scope, event }`, where `event` is `{ session_id, seq,
+tool_call_id?, method, update }` for a `session/update` of any variant
+(`agent_message_chunk`, `agent_thought_chunk`, `user_message_chunk`,
+`tool_call`, `tool_call_update`, `plan`, `available_commands_update`,
+`current_mode_update`, `usage_update`, and whatever a product adds),
+`{ session_id, seq, method, params }` for any other notification, and
+`{ session_id, seq, tool_call_id?, method, params, outcome, blocked }` for a
+`session/request_permission` with the answer Petri gave and the blocking
+hook's reason when one blocked. `seq` counts the envelopes of one agent
+process; `tool_call_id` is the update's `toolCallId` when it names one.
+
+Usage comes from the session usage extension (`unstable_session_usage`),
+which Gemini CLI reports and the Claude Code adapter (0.16.2) does not: the
+`usage` a `session/prompt` response carries (`inputTokens`, `outputTokens`,
+`thoughtTokens`, `cachedReadTokens`, `cachedWriteTokens`) is summed over the
+node's turns into `acp.usage.tokens`, and a `usage_update` notification sets
+`acp.context` (`used`, `size`) and, when its `cost` is in USD, the session's
+cumulative cost as `acp.usage.cost` (`usd_micros`, source `provider`).
+
+The live tier `crates/petri/lib/tests/acp_products.rs` runs both products
+on the host and in a container (`#[ignore]`; each cell skips itself without
+the product's binary and credential).
 
 ## Native Pebble
 
@@ -870,8 +947,10 @@ and `pebble.tool_ms`. They sum all settled prompt reports, including repair
 turns, failed prompts, and cancellation. These metrics exclude the model
 calls a tool makes. They include the compaction summary call, which Pebble
 bills to the prompt that compacted; `pebble.compactions` and
-`pebble.compaction_usage` break that share out (below, "Compaction"). ACP
-continues to report `acp.turns`.
+`pebble.compaction_usage` break that share out (below, "Compaction"). An ACP
+node reports `acp.turns`, `acp.usage` (the session usage extension as
+lithos-llm's `Usage`, "ACP products" above) and, once the agent reported
+its context window, `acp.context` (`used`, `size`).
 
 ### Usage
 

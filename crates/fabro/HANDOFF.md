@@ -349,6 +349,12 @@ against.
    readiness suites as the acceptance gate (`mise run test:fabro:blackbox`,
    `mise run test:fabro:differential`), then widen. The ACP backend is
    covered by the `acp` scenario family through a scripted agent on the host
-   and in a container; real ACP client products (Claude Code, Gemini CLI),
-   Daytona and crash-resume across runner versions have their own gates and
-   are not part of the initial readiness claim.
+   and in a container, and by the protocol suites against Petri's scripted
+   agent (`crates/attractor/steps/tests/acp.rs`, the hook mapping in
+   `crates/fabro/frontend/tests/hooks.rs`); the real products (Claude Code
+   through `claude-code-acp`, Gemini CLI through `gemini --acp`) have their
+   own live gate, `crates/petri/lib/tests/acp_products.rs`, which runs with
+   `--ignored`, the product on `PATH` and its credential set
+   (`crates/attractor/FORMAT.md`, "ACP products"). Daytona and crash-resume
+   across runner versions have their own gates and are not part of the
+   initial readiness claim.

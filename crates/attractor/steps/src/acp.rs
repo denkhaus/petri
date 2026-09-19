@@ -1,13 +1,50 @@
 //! A minimal Agent Client Protocol client over a step's process handle.
 //!
-//! The agent is a subprocess in the scope environment speaking ACP 0.11
-//! JSON-RPC over stdio: `initialize`, `session/new`, `session/prompt`, with
-//! `session/update` notifications streaming the agent's text back and
-//! `session/request_permission` requests answered with the most permissive
-//! option, as Fabro's client does. Written against the wire protocol rather
-//! than the `agent-client-protocol` crate: the subset a turn needs is small,
-//! and the transport is Petri's [`ProcessHandle`] rather than a socket the
-//! crate owns.
+//! The agent is a subprocess in the scope environment speaking ACP 1
+//! JSON-RPC over stdio, as Claude Code (through the `claude-code-acp`
+//! adapter) and Gemini CLI (`gemini --acp`) do: `initialize`, `session/new`
+//! (after `authenticate` when the agent asks for it), `session/prompt`, with
+//! `session/update` notifications streaming the agent's text, thoughts, tool
+//! calls, plan and context usage back, and `session/request_permission`
+//! requests answered by the run's tool hooks. Written against the wire
+//! protocol rather than the `agent-client-protocol` crate: the subset a turn
+//! needs is small, and the transport is Petri's [`ProcessHandle`] rather
+//! than a socket the crate owns.
+//!
+//! Every notification the agent sends is recorded on the step's progress
+//! channel as the backend envelope, `kind = "acp"` ([`ENVELOPE_KIND`]), the
+//! way the native backend records Pebble's events: `{ kind, node, firing,
+//! attempt, scope, event }` with `event` carrying `session_id`, `seq`, the
+//! `tool_call_id` when the update names one, and the update itself. A
+//! permission request and the answer Petri gave it are recorded the same
+//! way.
+//!
+//! Tool hooks map onto the two tool boundaries ACP offers. A
+//! `pre_tool_use` hook runs at `session/request_permission`: a block answers
+//! with the rejecting option, so the effect does not happen for that call;
+//! otherwise the request is allowed, "always" when no `pre_tool_use` hook is
+//! configured (nothing needs to see the next call of that kind, as Fabro's
+//! client answered) and "once" when one is, so every later call still asks
+//! and the hook still runs. `post_tool_use` and `post_tool_use_failure`
+//! hooks run when the agent reports a tool call finished (`tool_call_update`
+//! with status `completed` or `failed`), with the output or error the update
+//! carries; their decisions are ignored, as Fabro ignores them. Both are
+//! best effort: the agent decides which calls ask for permission and which
+//! it reports. A call seen running or finished without a permission request
+//! is warned once per hook and tool, and the client says before the first
+//! prompt what each configured hook can and cannot see.
+//!
+//! Usage from the session usage extension (`unstable_session_usage`: the
+//! `usage` a `session/prompt` response carries, and `usage_update`
+//! notifications with the context window and the cumulative cost) folds into
+//! the stage's `acp.usage` metric as lithos-llm's `Usage`, beside
+//! `acp.turns` and the last `acp.context`.
+//!
+//! The agent process starts in the scope (a host directory or a container)
+//! with the scope's environment, the command's own `env` (a value may be a
+//! `{"$secret": NAME}` reference, resolved through the run's secrets), and
+//! every product credential in [`PRODUCT_CREDENTIALS`] the run's secret
+//! provider knows; the session's `cwd` is the scope's workspace.
 //!
 //! A host's interrupt (`Interrupt` under `$interrupt`) is `session/cancel`
 //! without ending the process: the agent answers the prompt in flight with
@@ -16,28 +53,22 @@
 //! the host delivers. An interrupted turn's partial text is not the stage's
 //! answer. Cancellation (a `Cancel` or `Kill` control, a closed channel) is
 //! the same notification followed by stopping the process.
-//!
-//! Tool hooks are best effort here. ACP exposes one tool boundary Petri can
-//! act on: `session/request_permission`, which the agent sends only for
-//! calls it chooses to ask about. A `pre_tool_use` hook runs there, and a
-//! block answers the request with the rejecting option, so the effect does
-//! not happen for that call. Tool calls the agent never asks about, and
-//! every post-tool result, cross only as `session/update` notifications the
-//! agent may or may not send, so `post_tool_use` and `post_tool_use_failure`
-//! hooks cannot run against real results. The client says so, once per
-//! configured hook, on the step's progress channel and in a warning line,
-//! and never records an unenforceable block as enforced.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use execution::hooks::{HookDecision, HookPoint, HookRequest, HookService};
-use executor::{LineStream, ProcessHandle, ProcessSpec, Sig, StdinMode, StdinWriter};
+use executor::{
+    LineStream, Masker, ProcessHandle, ProcessSpec, SECRET_REF_KEY, SecretError, SecretProvider,
+    Sig, StdinMode, StdinWriter,
+};
 use frontend_attractor::hooks::HookEvent;
-use ir::{Attempt, Control, FiringId, LogStream, StepEvent, Value};
+use ir::{Attempt, Control, FiringId, LogStream, ScopeId, StepEvent, Value};
+use lithos_llm::types::{Cost, CostSource, TokenCounts, Usage};
 use runtime::driver::FiringView;
 use serde::Deserialize;
+use serde::de::Error as _;
 use serde_json::json;
 use smol_str::SmolStr;
 use steps::{Answer, Interrupt, ProgressSender, Steer};
@@ -48,8 +79,26 @@ use tokio::time;
 use crate::agent::INTERRUPTED_EVENT;
 use crate::hooks::{ToolPayload, WARNING_EVENT, record_report, warning_event};
 
-/// The backend name in hook warnings.
+/// The backend name in hook warnings and the thread event.
 pub const BACKEND: &str = "acp";
+
+/// The `kind` of the `StepEvent::Custom` payload every ACP notification and
+/// permission exchange is recorded as: `{ kind, node, firing, attempt,
+/// scope, event }`, where `event` is `{ session_id, seq, tool_call_id?,
+/// method, update }` for a `session/update`, `{ session_id, seq, method,
+/// params }` for any other notification, and `{ session_id, seq,
+/// tool_call_id?, method, params, outcome }` for a
+/// `session/request_permission` with the answer Petri gave.
+pub const ENVELOPE_KIND: &str = "acp";
+
+/// The credentials a product reads from its environment. Each one the run's
+/// secret provider knows is put into the agent's environment at launch, so a
+/// product in a container has its key without the workflow naming it; a name
+/// the provider does not know is left out.
+pub const PRODUCT_CREDENTIALS: &[&str] = &["ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY"];
+
+/// The JSON-RPC error code ACP reserves for `auth_required`.
+const AUTH_REQUIRED: i64 = -32000;
 
 /// The hook service bound to one ACP node, and what it has already warned
 /// about.
@@ -88,8 +137,14 @@ impl AcpHooks {
         }
     }
 
-    /// The warnings to emit before the agent starts: what this backend
-    /// cannot enforce for each configured tool hook.
+    /// Whether a `pre_tool_use` hook is configured: the permission policy
+    /// then allows once, never always, so every later call still asks.
+    pub fn has_pre(&self) -> bool {
+        !self.pre.is_empty()
+    }
+
+    /// The warnings to emit before the agent starts: what this backend can
+    /// and cannot see for each configured tool hook.
     pub fn known_gaps(&self) -> Vec<StepEvent> {
         let mut out = Vec::new();
         for hook in &self.pre {
@@ -113,60 +168,82 @@ impl AcpHooks {
                 BACKEND,
                 hook,
                 HookEvent::PostToolUse,
-                "none",
-                "ACP exposes no post-tool result boundary; this hook does not run for this node",
+                "session/update",
+                "the ACP agent decides which tool calls it reports; this hook runs for the calls \
+                 it reports finished (`tool_call_update` with status `completed` or `failed`), \
+                 and a call the agent never reports is not seen",
             ));
         }
         out
     }
 
-    /// Ask the `pre_tool_use` hooks about a permission request.
-    /// `Some(reason)` blocks.
-    async fn pre_tool(&self, params: &Value, logs: &ProgressSender) -> Option<String> {
-        let call = params.get("toolCall").cloned().unwrap_or(Value::Null);
-        let tool_name = call
-            .get("title")
-            .or_else(|| call.get("kind"))
-            .and_then(Value::as_str)
-            .unwrap_or("tool")
-            .to_owned();
-        let payload = ToolPayload {
-            tool_name,
-            tool_call_id: call
-                .get("toolCallId")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            tool_input: call.get("rawInput").cloned(),
-            ..ToolPayload::default()
-        };
+    async fn ask(
+        &self,
+        point: HookPoint,
+        payload: ToolPayload,
+        logs: &ProgressSender,
+    ) -> HookDecision {
         let report = self
             .service
             .run(HookRequest {
-                point:   HookPoint::BeforeToolUse,
-                view:    Some(self.view.clone()),
+                point,
+                view: Some(self.view.clone()),
                 outcome: None,
-                routes:  Vec::new(),
+                routes: Vec::new(),
                 payload: serde_json::to_value(&payload).unwrap_or(Value::Null),
             })
             .await;
-        record_report(
-            logs,
-            &self.node,
-            self.firing,
-            self.attempt,
-            HookEvent::PreToolUse,
-            &report,
-        )
-        .await;
-        match report.decision {
+        let event = match point {
+            HookPoint::BeforeToolUse => HookEvent::PreToolUse,
+            HookPoint::AfterToolUse => HookEvent::PostToolUse,
+            _ => HookEvent::PostToolUseFailure,
+        };
+        record_report(logs, &self.node, self.firing, self.attempt, event, &report).await;
+        report.decision
+    }
+
+    /// Ask the `pre_tool_use` hooks about a permission request.
+    /// `Some(reason)` blocks.
+    async fn pre_tool(&self, call: &ToolCall, logs: &ProgressSender) -> Option<String> {
+        let payload = ToolPayload {
+            tool_name: call.name.clone(),
+            tool_call_id: call.id.clone(),
+            tool_input: call.input.clone(),
+            ..ToolPayload::default()
+        };
+        match self.ask(HookPoint::BeforeToolUse, payload, logs).await {
             HookDecision::Block { reason } => Some(reason),
             _ => None,
         }
     }
 
-    /// A tool call the agent reported without asking permission: the
-    /// configured `pre_tool_use` hooks could not run for it. Warn once per
-    /// hook and tool.
+    /// A tool call the agent reported finished: `post_tool_use` with its
+    /// output, or `post_tool_use_failure` with its error. The decision is
+    /// ignored, as Fabro ignores it.
+    async fn post_tool(&self, call: &ToolCall, finished: &Finished, logs: &ProgressSender) {
+        if self.post.is_empty() {
+            return;
+        }
+        let (point, payload) = match finished {
+            Finished::Completed { output } => (HookPoint::AfterToolUse, ToolPayload {
+                tool_name: call.name.clone(),
+                tool_call_id: call.id.clone(),
+                tool_output: output.clone(),
+                ..ToolPayload::default()
+            }),
+            Finished::Failed { error } => (HookPoint::AfterToolFailure, ToolPayload {
+                tool_name: call.name.clone(),
+                tool_call_id: call.id.clone(),
+                error_message: error.clone(),
+                ..ToolPayload::default()
+            }),
+        };
+        let _ = self.ask(point, payload, logs).await;
+    }
+
+    /// A tool call the agent ran without asking permission: the configured
+    /// `pre_tool_use` hooks could not run for it. Warn once per hook and
+    /// tool.
     async fn unintercepted(&self, tool: &str, logs: &ProgressSender) {
         for hook in &self.pre {
             let key = format!("{hook}:{tool}");
@@ -197,12 +274,38 @@ impl AcpHooks {
     }
 }
 
+/// A value in the agent command's environment: a literal, or a reference
+/// to one of the run's secrets, resolved at launch and never written down.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EnvValue {
+    Literal(String),
+    Secret(String),
+}
+
+impl<'de> Deserialize<'de> for EnvValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        if let Value::String(text) = &value {
+            return Ok(Self::Literal(text.clone()));
+        }
+        if let Value::Object(map) = &value
+            && map.len() == 1
+            && let Some(Value::String(name)) = map.get(SECRET_REF_KEY)
+        {
+            return Ok(Self::Secret(name.clone()));
+        }
+        Err(D::Error::custom(format!(
+            "an env value is a string or {{\"{SECRET_REF_KEY}\": \"NAME\"}}, not {value}"
+        )))
+    }
+}
+
 /// How an agent is launched.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentCommand {
     pub program: String,
     pub args:    Vec<String>,
-    pub env:     BTreeMap<String, String>,
+    pub env:     BTreeMap<String, EnvValue>,
 }
 
 impl AgentCommand {
@@ -242,16 +345,35 @@ impl AgentCommand {
         })
     }
 
-    pub fn spec(&self) -> ProcessSpec {
+    /// The process to start: the command with its environment resolved.
+    /// Every product credential the provider knows comes first, then the
+    /// command's own `env` on top; a `$secret` reference the provider cannot
+    /// supply is an error naming the secret.
+    pub fn spec(&self, secrets: &dyn SecretProvider) -> Result<ProcessSpec, String> {
+        let mut env: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
+        for name in PRODUCT_CREDENTIALS {
+            match secrets.resolve(name) {
+                Ok(secret) => {
+                    env.insert(SmolStr::new(name), secret.expose());
+                }
+                Err(SecretError::Unknown(_)) => {}
+                Err(error) => return Err(format!("resolving secret `{name}`: {error}")),
+            }
+        }
+        for (key, value) in &self.env {
+            let value = match value {
+                EnvValue::Literal(text) => SmolStr::new(text),
+                EnvValue::Secret(name) => secrets
+                    .resolve(name)
+                    .map_err(|error| format!("secret `{name}` for env `{key}`: {error}"))?
+                    .expose(),
+            };
+            env.insert(SmolStr::new(key), value);
+        }
         let args: Vec<&str> = self.args.iter().map(String::as_str).collect();
-        let env: BTreeMap<SmolStr, SmolStr> = self
-            .env
-            .iter()
-            .map(|(k, v)| (SmolStr::new(k), SmolStr::new(v)))
-            .collect();
-        ProcessSpec::new(&self.program, &args)
+        Ok(ProcessSpec::new(&self.program, &args)
             .with_env(env)
-            .with_stdin(StdinMode::Piped)
+            .with_stdin(StdinMode::Piped))
     }
 }
 
@@ -268,7 +390,7 @@ struct StdioConfig {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ConfigEnv {
-    Map(BTreeMap<String, String>),
+    Map(BTreeMap<String, EnvValue>),
     Pairs(Vec<EnvPair>),
 }
 
@@ -276,7 +398,7 @@ enum ConfigEnv {
 #[serde(deny_unknown_fields)]
 struct EnvPair {
     name:  String,
-    value: String,
+    value: EnvValue,
 }
 
 /// Why a turn did not complete.
@@ -287,7 +409,11 @@ pub enum AcpError {
     #[error("the agent sent something that is not JSON-RPC: {0}")]
     Protocol(String),
     #[error("the agent answered `{method}` with an error: {message}")]
-    Rejected { method: String, message: String },
+    Rejected {
+        method:  String,
+        message: String,
+        code:    Option<i64>,
+    },
     #[error("the turn ended with stop reason `{0}`")]
     StopReason(String),
     #[error("cancelled")]
@@ -301,25 +427,85 @@ pub struct Turn {
 }
 
 /// The stage a client serves, for the events it reports in Petri's own
-/// vocabulary.
+/// vocabulary, and the mask set its envelopes pass through.
 #[derive(Clone, Debug)]
 pub struct Stage {
     pub node:    SmolStr,
     pub firing:  FiringId,
     pub attempt: Attempt,
+    pub scope:   ScopeId,
+    pub masker:  Masker,
+}
+
+/// A tool call the agent named, by its id: what the hooks call it, and
+/// whether the agent asked permission for it.
+#[derive(Clone, Debug, Default)]
+struct ToolCall {
+    id:    Option<String>,
+    name:  String,
+    input: Option<Value>,
+    asked: bool,
+}
+
+impl ToolCall {
+    /// The call a `tool_call`, `tool_call_update` or permission request's
+    /// `toolCall` names, over what was remembered for its id.
+    fn from_value(value: &Value, known: Option<&Self>) -> Self {
+        let id = value
+            .get("toolCallId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| known.and_then(|k| k.id.clone()));
+        let name = value
+            .get("title")
+            .or_else(|| value.get("kind"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| known.map(|k| k.name.clone()))
+            .unwrap_or_else(|| "tool".to_owned());
+        let input = value
+            .get("rawInput")
+            .cloned()
+            .or_else(|| known.and_then(|k| k.input.clone()));
+        Self {
+            id,
+            name,
+            input,
+            asked: known.is_some_and(|k| k.asked),
+        }
+    }
+}
+
+/// How a reported tool call ended.
+enum Finished {
+    Completed { output: Option<String> },
+    Failed { error: Option<String> },
 }
 
 /// One live connection to an agent process.
 pub struct Client {
-    handle:     Box<dyn ProcessHandle>,
-    stdin:      StdinWriter,
-    lines:      LineStream,
-    logs:       ProgressSender,
-    stage:      Stage,
-    next_id:    u64,
-    session_id: Option<String>,
-    exited:     bool,
-    hooks:      Option<Arc<AcpHooks>>,
+    handle:       Box<dyn ProcessHandle>,
+    stdin:        StdinWriter,
+    lines:        LineStream,
+    logs:         ProgressSender,
+    stage:        Stage,
+    next_id:      u64,
+    session_id:   Option<String>,
+    exited:       bool,
+    hooks:        Option<Arc<AcpHooks>>,
+    /// The envelope sequence, per connection.
+    seq:          u64,
+    /// The `authMethods` the agent advertised at `initialize`.
+    auth_methods: Vec<Value>,
+    /// The tool calls the agent named, by id.
+    tools:        BTreeMap<String, ToolCall>,
+    /// The tokens the session's turns used, from the session usage
+    /// extension.
+    usage:        Usage,
+    /// The session's cumulative cost, from its last `usage_update`.
+    cost:         Option<Cost>,
+    /// The last context window report: tokens used, window size.
+    context:      Option<(u64, u64)>,
 }
 
 /// What arrived from the agent, sorted by JSON-RPC shape.
@@ -344,13 +530,15 @@ impl Client {
     /// Spawn the agent and take both ends of its stdio.
     pub async fn spawn(
         env: &dyn executor::ExecEnv,
-        command: &AgentCommand,
+        spec: ProcessSpec,
         logs: ProgressSender,
         stage: Stage,
     ) -> Result<Self, AcpError> {
-        let mut handle = env.spawn(command.spec()).await.map_err(|e| {
-            AcpError::ProcessExited(format!(": could not start `{}`: {e}", command.program))
-        })?;
+        let program = spec.program.clone();
+        let mut handle = env
+            .spawn(spec)
+            .await
+            .map_err(|e| AcpError::ProcessExited(format!(": could not start `{program}`: {e}")))?;
         let stdin = handle
             .stdin()
             .ok_or_else(|| AcpError::Protocol("the executor gave the agent no stdin".into()))?;
@@ -367,11 +555,17 @@ impl Client {
             session_id: None,
             exited: false,
             hooks: None,
+            seq: 0,
+            auth_methods: Vec::new(),
+            tools: BTreeMap::new(),
+            usage: Usage::default(),
+            cost: None,
+            context: None,
         })
     }
 
-    /// Bind the tool hooks this node configured. Warns about the boundaries
-    /// this backend lacks before the first prompt.
+    /// Bind the tool hooks this node configured. Warns about what each
+    /// boundary can and cannot see before the first prompt.
     pub async fn with_hooks(&mut self, hooks: Arc<AcpHooks>) {
         for warning in hooks.known_gaps() {
             if let StepEvent::Custom(value) = &warning
@@ -394,6 +588,23 @@ impl Client {
             let _ = self.logs.send(warning).await;
         }
         self.hooks = Some(hooks);
+    }
+
+    /// The stage's ACP metrics: the turns, the usage the session usage
+    /// extension reported, and the last context window report.
+    pub fn metrics(&self, turns: u64) -> BTreeMap<SmolStr, Value> {
+        let usage = Usage {
+            tokens: self.usage.tokens,
+            cost:   self.cost,
+        };
+        let mut metrics = BTreeMap::from([
+            ("acp.turns".into(), Value::from(turns)),
+            ("acp.usage".into(), json!(usage)),
+        ]);
+        if let Some((used, size)) = self.context {
+            metrics.insert("acp.context".into(), json!({ "used": used, "size": size }));
+        }
+        metrics
     }
 
     async fn send(&mut self, message: Value) -> Result<(), AcpError> {
@@ -483,9 +694,37 @@ impl Client {
         }
     }
 
-    /// Answer a permission request with the most permissive option offered,
-    /// as Fabro's client does: `allow_always`, else `allow_once`, else any
-    /// option that is not a rejection.
+    /// Record one ACP exchange on the progress channel as the backend
+    /// envelope. `event` is the exchange's own fields; the session and the
+    /// sequence are added here.
+    async fn record(
+        &mut self,
+        tool_call_id: Option<&str>,
+        mut event: serde_json::Map<String, Value>,
+    ) {
+        self.seq += 1;
+        event.insert("session_id".into(), json!(self.session_id));
+        event.insert("seq".into(), json!(self.seq));
+        if let Some(id) = tool_call_id {
+            event.insert("tool_call_id".into(), json!(id));
+        }
+        let _ = self
+            .logs
+            .send(StepEvent::Custom(json!({
+                "kind": ENVELOPE_KIND,
+                "node": self.stage.node,
+                "firing": self.stage.firing,
+                "attempt": self.stage.attempt,
+                "scope": self.stage.scope,
+                "event": self.stage.masker.mask_value(&Value::Object(event)),
+            })))
+            .await;
+    }
+
+    /// Answer a permission request. A blocking `pre_tool_use` hook answers
+    /// with the rejecting option, so the call does not happen; otherwise the
+    /// call is allowed, always when no `pre_tool_use` hook is configured and
+    /// once when one is, so the next call of that kind still asks.
     async fn answer_permission(&mut self, id: Value, params: &Value) -> Result<(), AcpError> {
         let options = params
             .get("options")
@@ -497,16 +736,22 @@ impl Client {
                 .iter()
                 .find(|o| o.get("kind").and_then(Value::as_str) == Some(kind))
         };
-        // The one boundary ACP exposes: a blocking `pre_tool_use` hook
-        // answers with the rejecting option, so the call does not happen.
-        if let Some(hooks) = self.hooks.clone()
-            && let Some(reason) = hooks.pre_tool(params, &self.logs).await
-        {
-            let rejected = pick("reject_once").or_else(|| pick("reject_always"));
-            let outcome = match rejected.and_then(|o| o.get("optionId")) {
-                Some(option) => json!({ "outcome": "selected", "optionId": option }),
-                None => json!({ "outcome": "cancelled" }),
-            };
+        let named = params.get("toolCall").cloned().unwrap_or(Value::Null);
+        let known = named
+            .get("toolCallId")
+            .and_then(Value::as_str)
+            .and_then(|id| self.tools.get(id));
+        let mut call = ToolCall::from_value(&named, known);
+        call.asked = true;
+        if let Some(id) = &call.id {
+            self.tools.insert(id.clone(), call.clone());
+        }
+        let hooks = self.hooks.clone();
+        let blocked = match &hooks {
+            Some(hooks) => hooks.pre_tool(&call, &self.logs).await,
+            None => None,
+        };
+        let chosen = if let Some(reason) = &blocked {
             let _ = self
                 .logs
                 .send(StepEvent::Log {
@@ -514,24 +759,33 @@ impl Client {
                     line:   format!("pre_tool_use hook blocked a permission request: {reason}"),
                 })
                 .await;
-            return self
-                .send(json!({ "jsonrpc": "2.0", "id": id, "result": { "outcome": outcome } }))
-                .await;
-        }
-        let chosen = pick("allow_always")
-            .or_else(|| pick("allow_once"))
-            .or_else(|| {
+            pick("reject_once").or_else(|| pick("reject_always"))
+        } else {
+            let allow_always = hooks.as_ref().is_none_or(|hooks| !hooks.has_pre());
+            let (first, second) = if allow_always {
+                ("allow_always", "allow_once")
+            } else {
+                ("allow_once", "allow_always")
+            };
+            pick(first).or_else(|| pick(second)).or_else(|| {
                 options.iter().find(|o| {
                     !matches!(
                         o.get("kind").and_then(Value::as_str),
                         Some("reject_once" | "reject_always")
                     )
                 })
-            });
+            })
+        };
         let outcome = match chosen.and_then(|o| o.get("optionId")) {
             Some(option) => json!({ "outcome": "selected", "optionId": option }),
             None => json!({ "outcome": "cancelled" }),
         };
+        let mut event = serde_json::Map::new();
+        event.insert("method".into(), json!("session/request_permission"));
+        event.insert("params".into(), params.clone());
+        event.insert("outcome".into(), outcome.clone());
+        event.insert("blocked".into(), json!(blocked));
+        self.record(call.id.as_deref(), event).await;
         self.send(json!({ "jsonrpc": "2.0", "id": id, "result": { "outcome": outcome } }))
             .await
     }
@@ -551,14 +805,7 @@ impl Client {
                     error,
                 } if got == json!(id) => {
                     if let Some(error) = error {
-                        return Err(AcpError::Rejected {
-                            method:  method.to_string(),
-                            message: error
-                                .get("message")
-                                .and_then(Value::as_str)
-                                .unwrap_or("unknown error")
-                                .to_string(),
-                        });
+                        return Err(rejected(method, &error));
                     }
                     return Ok(result.unwrap_or(Value::Null));
                 }
@@ -575,40 +822,120 @@ impl Client {
 
     async fn on_notification(&mut self, method: &str, params: Value, turn: &mut Turn) {
         if method != "session/update" {
-            let _ = self
-                .logs
-                .send(StepEvent::Custom(
-                    json!({ "acp": { "method": method, "params": params } }),
-                ))
-                .await;
+            let mut event = serde_json::Map::new();
+            event.insert("method".into(), json!(method));
+            event.insert("params".into(), params);
+            self.record(None, event).await;
             return;
         }
         let update = params.get("update").cloned().unwrap_or(Value::Null);
-        let kind = update.get("sessionUpdate").and_then(Value::as_str);
-        if kind == Some("agent_message_chunk")
-            && let Some(text) = update.pointer("/content/text").and_then(Value::as_str)
-            && update.pointer("/content/type").and_then(Value::as_str) == Some("text")
-        {
-            turn.text.push_str(text);
+        let kind = update
+            .get("sessionUpdate")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        match kind {
+            "agent_message_chunk" => {
+                if let Some(text) = update.pointer("/content/text").and_then(Value::as_str)
+                    && update.pointer("/content/type").and_then(Value::as_str) == Some("text")
+                {
+                    turn.text.push_str(text);
+                }
+            }
+            "tool_call" | "tool_call_update" => self.on_tool_call(&update).await,
+            "usage_update" => self.on_usage_update(&update),
+            _ => {}
+        }
+        let tool_call_id = update
+            .get("toolCallId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut event = serde_json::Map::new();
+        event.insert("method".into(), json!(method));
+        event.insert("update".into(), update);
+        self.record(tool_call_id.as_deref(), event).await;
+    }
+
+    /// A `tool_call` or `tool_call_update`: remember the call, warn when it
+    /// runs past every `pre_tool_use` hook, and run the post-tool hooks when
+    /// it finishes.
+    async fn on_tool_call(&mut self, update: &Value) {
+        let Some(id) = update.get("toolCallId").and_then(Value::as_str) else {
             return;
+        };
+        let call = ToolCall::from_value(update, self.tools.get(id));
+        self.tools.insert(id.to_owned(), call.clone());
+        let status = update.get("status").and_then(Value::as_str);
+        let Some(hooks) = self.hooks.clone() else {
+            return;
+        };
+        if !call.asked && matches!(status, Some("in_progress" | "completed" | "failed")) {
+            hooks.unintercepted(&call.name, &self.logs).await;
+            // Said once per call: the next update of this call is not a
+            // second unasked run.
+            if let Some(known) = self.tools.get_mut(id) {
+                known.asked = true;
+            }
         }
-        // A tool call the agent reports without a permission request ran
-        // past every configured pre-tool hook: say so.
-        if kind == Some("tool_call")
-            && let Some(hooks) = self.hooks.clone()
+        let finished = match status {
+            Some("completed") => Finished::Completed {
+                output: tool_output(update),
+            },
+            Some("failed") => Finished::Failed {
+                error: tool_output(update),
+            },
+            _ => return,
+        };
+        hooks.post_tool(&call, &finished, &self.logs).await;
+    }
+
+    /// A `usage_update`: the context window, and the session's cumulative
+    /// cost when it is in US dollars.
+    fn on_usage_update(&mut self, update: &Value) {
+        if let (Some(used), Some(size)) = (
+            update.get("used").and_then(Value::as_u64),
+            update.get("size").and_then(Value::as_u64),
+        ) {
+            self.context = Some((used, size));
+        }
+        if let Some(cost) = update.get("cost")
+            && cost.get("currency").and_then(Value::as_str) == Some("USD")
+            && let Some(amount) = cost.get("amount").and_then(Value::as_f64)
+            && amount.is_finite()
+            && amount >= 0.0
         {
-            let tool = update
-                .get("title")
-                .or_else(|| update.get("kind"))
-                .and_then(Value::as_str)
-                .unwrap_or("tool");
-            hooks.unintercepted(tool, &self.logs).await;
+            // A whole number of micros once rounded, and non-negative: the
+            // conversion saturates on an absurd amount rather than wrapping.
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "rounded and non-negative; saturates on out-of-range values"
+            )]
+            let usd_micros = (amount * 1_000_000.0).round() as u64;
+            self.cost = Some(Cost {
+                usd_micros,
+                source: CostSource::Provider,
+            });
         }
-        // Tool calls, thoughts, plans: observers see them as agent activity.
-        let _ = self
-            .logs
-            .send(StepEvent::Custom(json!({ "acp": update })))
-            .await;
+    }
+
+    /// The `usage` a `session/prompt` response carries, folded into the
+    /// session's usage.
+    fn fold_turn_usage(&mut self, result: &Value) {
+        let Some(usage) = result.get("usage").filter(|u| u.is_object()) else {
+            return;
+        };
+        let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+        let turn = Usage {
+            tokens: TokenCounts {
+                input:       count("inputTokens"),
+                output:      count("outputTokens"),
+                reasoning:   count("thoughtTokens"),
+                cache_read:  count("cachedReadTokens"),
+                cache_write: count("cachedWriteTokens"),
+            },
+            cost:   None,
+        };
+        self.usage = self.usage.saturating_add(turn);
     }
 
     async fn on_request(
@@ -630,7 +957,10 @@ impl Client {
         }
     }
 
-    /// `initialize` then `session/new` in `cwd`.
+    /// `initialize` then `session/new` in `cwd`. An agent that answers
+    /// `session/new` with `auth_required` is authenticated with the API-key
+    /// method it advertised (the key is in its environment), then asked
+    /// again.
     pub async fn open_session(&mut self, cwd: &str) -> Result<(), AcpError> {
         let mut scratch = Turn::default();
         let id = self
@@ -639,11 +969,46 @@ impl Client {
                 "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false } },
             }))
             .await?;
-        self.response(id, "initialize", &mut scratch).await?;
-        let id = self
-            .request("session/new", json!({ "cwd": cwd, "mcpServers": [] }))
-            .await?;
-        let result = self.response(id, "session/new", &mut scratch).await?;
+        let initialized = self.response(id, "initialize", &mut scratch).await?;
+        self.auth_methods = initialized
+            .get("authMethods")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let new_session = json!({ "cwd": cwd, "mcpServers": [] });
+        let id = self.request("session/new", new_session.clone()).await?;
+        let result = match self.response(id, "session/new", &mut scratch).await {
+            Err(AcpError::Rejected {
+                code: Some(AUTH_REQUIRED),
+                message,
+                ..
+            }) => {
+                let Some(method) = api_key_method(&self.auth_methods) else {
+                    return Err(AcpError::Rejected {
+                        method:  "session/new".into(),
+                        message: format!(
+                            "{message} (the agent requires authentication and advertises no \
+                             API-key method)"
+                        ),
+                        code:    Some(AUTH_REQUIRED),
+                    });
+                };
+                let _ = self
+                    .logs
+                    .send(StepEvent::Log {
+                        stream: LogStream::Stderr,
+                        line:   format!("authenticating with the agent's `{method}` method"),
+                    })
+                    .await;
+                let id = self
+                    .request("authenticate", json!({ "methodId": method }))
+                    .await?;
+                self.response(id, "authenticate", &mut scratch).await?;
+                let id = self.request("session/new", new_session).await?;
+                self.response(id, "session/new", &mut scratch).await?
+            }
+            other => other?,
+        };
         let session = result
             .get("sessionId")
             .and_then(Value::as_str)
@@ -687,14 +1052,12 @@ impl Client {
                     message = self.receive() => match message? {
                         Incoming::Response { id: got, result, error } if got == json!(id) => {
                             if let Some(error) = error {
-                                return Err(AcpError::Rejected {
-                                    method: "session/prompt".into(),
-                                    message: error.get("message").and_then(Value::as_str).unwrap_or("unknown error").to_string(),
-                                });
+                                return Err(rejected("session/prompt", &error));
                             }
+                            let result = result.unwrap_or(Value::Null);
+                            self.fold_turn_usage(&result);
                             break result
-                                .as_ref()
-                                .and_then(|r| r.get("stopReason"))
+                                .get("stopReason")
                                 .and_then(Value::as_str)
                                 .unwrap_or("end_turn")
                                 .to_string();
@@ -797,6 +1160,64 @@ impl Client {
     }
 }
 
+/// A JSON-RPC error answer as the typed rejection.
+fn rejected(method: &str, error: &Value) -> AcpError {
+    AcpError::Rejected {
+        method:  method.to_string(),
+        message: error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error")
+            .to_string(),
+        code:    error.get("code").and_then(Value::as_i64),
+    }
+}
+
+/// The API-key authentication method among those the agent advertised: the
+/// first marked `_meta.api-key` (Gemini CLI marks `gemini-api-key` so), else
+/// the first whose id says so.
+fn api_key_method(methods: &[Value]) -> Option<String> {
+    let id_of = |method: &Value| method.get("id").and_then(Value::as_str).map(str::to_owned);
+    methods
+        .iter()
+        .find(|method| method.pointer("/_meta/api-key").is_some())
+        .and_then(id_of)
+        .or_else(|| {
+            methods.iter().find_map(|method| {
+                let id = id_of(method)?;
+                let lower = id.to_ascii_lowercase();
+                (lower.contains("api-key") || lower.contains("api_key") || lower.contains("apikey"))
+                    .then_some(id)
+            })
+        })
+}
+
+/// What a finished tool call carries for the post-tool hooks, as Fabro's
+/// `tool_output`: the text of its content blocks, else `rawOutput` as JSON,
+/// else nothing.
+fn tool_output(update: &Value) -> Option<String> {
+    let text: Vec<&str> = update
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|block| {
+            let content = block.get("content")?;
+            (content.get("type").and_then(Value::as_str) == Some("text"))
+                .then(|| content.get("text").and_then(Value::as_str))
+                .flatten()
+        })
+        .collect();
+    if !text.is_empty() {
+        return Some(text.join("\n"));
+    }
+    match update.get("rawOutput") {
+        Some(Value::String(text)) => Some(text.clone()),
+        Some(Value::Null) | None => None,
+        Some(other) => serde_json::to_string(other).ok(),
+    }
+}
+
 /// The stage's report that a host's interrupt stopped its turn.
 async fn interrupted_event(logs: &ProgressSender, stage: &Stage, session: &str) {
     let _ = logs
@@ -826,6 +1247,8 @@ fn steer_text(value: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use executor::MapSecrets;
+
     use super::*;
 
     #[test]
@@ -847,7 +1270,7 @@ mod tests {
         }))
         .expect("parses");
         assert_eq!(command.args, ["--acp"]);
-        assert_eq!(command.env.get("K").map(String::as_str), Some("v"));
+        assert_eq!(command.env.get("K"), Some(&EnvValue::Literal("v".into())));
         assert!(AgentCommand::from_config(&json!({ "args": [] })).is_err());
         assert!(AgentCommand::from_config(&json!({ "command": ["agent"], "args": [] })).is_err());
         assert!(
@@ -856,5 +1279,109 @@ mod tests {
         assert!(
             AgentCommand::from_config(&json!({ "command": "agent", "unknown": true })).is_err()
         );
+    }
+
+    #[test]
+    fn config_env_values_may_reference_secrets() {
+        let command = AgentCommand::from_config(&json!({
+            "command": "agent",
+            "env": { "KEY": { "$secret": "AGENT_KEY" }, "MODE": "test" },
+        }))
+        .expect("parses");
+        assert_eq!(
+            command.env.get("KEY"),
+            Some(&EnvValue::Secret("AGENT_KEY".into()))
+        );
+        assert!(
+            AgentCommand::from_config(&json!({
+                "command": "agent",
+                "env": { "KEY": { "$secret": "A", "extra": 1 } },
+            }))
+            .is_err()
+        );
+        assert!(
+            AgentCommand::from_config(&json!({ "command": "agent", "env": { "KEY": 1 } })).is_err()
+        );
+    }
+
+    #[test]
+    fn the_spec_resolves_secrets_and_forwards_known_product_credentials() {
+        let secrets = MapSecrets::new(BTreeMap::from([
+            ("AGENT_KEY".into(), "agent-secret-value".into()),
+            ("GEMINI_API_KEY".into(), "gemini-secret-value".into()),
+        ]));
+        let command = AgentCommand::from_config(&json!({
+            "command": "agent",
+            "env": { "KEY": { "$secret": "AGENT_KEY" }, "MODE": "test" },
+        }))
+        .expect("parses");
+        let spec = command.spec(&secrets).expect("resolves");
+        assert_eq!(
+            spec.env.get("KEY").map(SmolStr::as_str),
+            Some("agent-secret-value")
+        );
+        assert_eq!(spec.env.get("MODE").map(SmolStr::as_str), Some("test"));
+        assert_eq!(
+            spec.env.get("GEMINI_API_KEY").map(SmolStr::as_str),
+            Some("gemini-secret-value"),
+            "a product credential the provider knows is forwarded"
+        );
+        assert!(
+            !spec.env.contains_key("ANTHROPIC_API_KEY"),
+            "one it does not know is left out"
+        );
+        assert_eq!(spec.stdin, StdinMode::Piped);
+        // Resolving registered both values for masking.
+        assert_eq!(secrets.masker().mask("agent-secret-value"), "***");
+
+        let missing = AgentCommand::from_config(&json!({
+            "command": "agent",
+            "env": { "KEY": { "$secret": "NOT_THERE" } },
+        }))
+        .expect("parses");
+        let error = missing.spec(&secrets).expect_err("the secret is unknown");
+        assert!(error.contains("NOT_THERE"), "{error}");
+    }
+
+    #[test]
+    fn the_api_key_method_is_the_marked_one_else_the_named_one() {
+        let gemini = json!([
+            { "id": "oauth-personal", "name": "Log in with Google" },
+            { "id": "gemini-api-key", "name": "Gemini API key", "_meta": { "api-key": { "provider": "google" } } },
+            { "id": "vertex-ai", "name": "Vertex AI" },
+        ]);
+        assert_eq!(
+            api_key_method(gemini.as_array().expect("array")).as_deref(),
+            Some("gemini-api-key")
+        );
+        let named = json!([{ "id": "login" }, { "id": "my_api_key" }]);
+        assert_eq!(
+            api_key_method(named.as_array().expect("array")).as_deref(),
+            Some("my_api_key")
+        );
+        let claude = json!([{ "id": "claude-login", "name": "Log in with Claude Code" }]);
+        assert_eq!(api_key_method(claude.as_array().expect("array")), None);
+    }
+
+    #[test]
+    fn tool_output_prefers_text_content_over_raw_output() {
+        let update = json!({
+            "content": [
+                { "type": "content", "content": { "type": "text", "text": "one" } },
+                { "type": "diff", "path": "a", "newText": "b" },
+                { "type": "content", "content": { "type": "text", "text": "two" } },
+            ],
+            "rawOutput": { "ignored": true },
+        });
+        assert_eq!(tool_output(&update).as_deref(), Some("one\ntwo"));
+        assert_eq!(
+            tool_output(&json!({ "rawOutput": "plain" })).as_deref(),
+            Some("plain")
+        );
+        assert_eq!(
+            tool_output(&json!({ "rawOutput": { "a": 1 } })).as_deref(),
+            Some("{\"a\":1}")
+        );
+        assert_eq!(tool_output(&json!({ "status": "completed" })), None);
     }
 }
