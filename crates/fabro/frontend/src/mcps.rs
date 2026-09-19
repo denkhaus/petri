@@ -16,6 +16,13 @@
 //! `{{ secrets.NAME }}` may stand alone as an `env` or `headers` value and
 //! becomes a [`McpValue::Secret`] the step resolves when it launches the
 //! server. `{{ env.* }}` is refused, as Fabro refuses it before launch.
+//!
+//! A reference entry (`[run.agent.mcps.<name>] id = "<catalog id>"`) names
+//! a server of the host's catalog, which a Fabro server keeps outside the
+//! settings files. The host binds the catalog as the [`MCP_CATALOG_VAR`]
+//! variable ([`McpCatalog`]); the entry it names is read with the inline
+//! rules under `<name>`, as Fabro's `resolve_mcp_entries` resolves it. The
+//! standalone runner binds no catalog and refuses the reference.
 
 use std::collections::BTreeMap;
 
@@ -31,8 +38,62 @@ use ir::Value;
 use crate::hooks::{PROJECT_FILE, SETTINGS_HOOKS_VAR};
 use crate::secrets::{InterpolationError, interpolate};
 
+/// The `CompileInputs` variable a host sets to the text of its MCP catalog,
+/// when it has one: a TOML table keyed by catalog id, each entry in the
+/// inline `[run.agent.mcps.<name>]` shape (`type`, `command`, `url`, ...).
+/// A `[run.agent.mcps.<name>] id = "<catalog id>"` entry in any layer then
+/// resolves to that server under `<name>`. Without the variable, a
+/// reference is `unsupported.workflow_toml.run.agent.mcps.reference`.
+pub const MCP_CATALOG_VAR: &str = "fabro.mcp_catalog_toml";
+
+/// The file name the catalog's own diagnostics carry, and the prefix of a
+/// resolved server's `source` (`mcp-catalog:<id>`).
+const CATALOG_SOURCE: &str = "mcp-catalog";
+
+/// The host's MCP catalog, parsed from [`MCP_CATALOG_VAR`].
+#[derive(Debug, Default)]
+pub struct McpCatalog {
+    entries: toml::Table,
+}
+
+impl McpCatalog {
+    /// Parse the catalog text. A text that is not a TOML table, or an entry
+    /// that is not a table, is `fabro.mcps.catalog`; the catalog then holds
+    /// the entries that are tables, so a reference to a bad one is reported
+    /// against the catalog, not as a missing standalone feature.
+    pub fn parse(text: &str, diags: &mut Diagnostics) -> Self {
+        let span = Span::file(CATALOG_SOURCE);
+        let entries: toml::Table = match text.parse() {
+            Ok(entries) => entries,
+            Err(error) => {
+                diags.error(
+                    "fabro.mcps.catalog",
+                    span,
+                    format!("the host's MCP catalog is not valid TOML: {error}"),
+                );
+                return Self::default();
+            }
+        };
+        let (tables, others): (toml::Table, toml::Table) =
+            entries.into_iter().partition(|(_, entry)| entry.is_table());
+        for id in others.keys() {
+            diags.error(
+                "fabro.mcps.catalog",
+                span.clone(),
+                format!("MCP catalog entry `{id}` must be a table of server fields"),
+            );
+        }
+        Self { entries: tables }
+    }
+
+    fn get(&self, id: &str) -> Option<&toml::Table> {
+        self.entries.get(id).and_then(toml::Value::as_table)
+    }
+}
+
 /// Read and merge every layer. `workflow_toml` is the already-read
 /// `(path, text)` of the workflow's own `workflow.toml`, when it exists.
+/// References resolve against the catalog the host bound, when it did.
 pub fn load(
     files: &dyn FileSource,
     inputs: &CompileInputs,
@@ -40,15 +101,20 @@ pub fn load(
     template: &Context,
     diags: &mut Diagnostics,
 ) -> Vec<McpServer> {
+    let catalog = match inputs.vars.get(MCP_CATALOG_VAR) {
+        Some(Value::String(text)) => Some(McpCatalog::parse(text, diags)),
+        _ => None,
+    };
+    let catalog = catalog.as_ref();
     let mut layers = Vec::with_capacity(3);
     if let Some(Value::String(text)) = inputs.vars.get(SETTINGS_HOOKS_VAR) {
-        layers.push(read_layer(text, "settings.toml", template, diags));
+        layers.push(read_layer(text, "settings.toml", template, catalog, diags));
     }
     if let Some(text) = files.read(PROJECT_FILE) {
-        layers.push(read_layer(&text, PROJECT_FILE, template, diags));
+        layers.push(read_layer(&text, PROJECT_FILE, template, catalog, diags));
     }
     if let Some((path, text)) = workflow_toml {
-        layers.push(read_layer(text, path, template, diags));
+        layers.push(read_layer(text, path, template, catalog, diags));
     }
     merge(layers)
 }
@@ -59,11 +125,13 @@ pub type LayerEntry = (String, Option<McpServer>);
 
 /// Read one settings layer's `[run.agent.mcps]` table. `source` names the
 /// file in messages. Every problem is a diagnostic on the file; a file that
-/// names servers and cannot be read is an error, never a silent skip.
+/// names servers and cannot be read is an error, never a silent skip. A
+/// reference entry resolves against `catalog`; without one it is refused.
 pub fn read_layer(
     text: &str,
     source: &str,
     template: &Context,
+    catalog: Option<&McpCatalog>,
     diags: &mut Diagnostics,
 ) -> Vec<LayerEntry> {
     let span = Span::file(source);
@@ -101,6 +169,7 @@ pub fn read_layer(
         source,
         span,
         template,
+        catalog,
         diags,
     };
     let mut names: Vec<&String> = entries.keys().collect();
@@ -140,6 +209,9 @@ struct EntryReader<'a> {
     source:   &'a str,
     span:     Span,
     template: &'a Context,
+    /// The host's catalog, for reference entries; `None` inside the catalog
+    /// itself, whose entries are inline by construction.
+    catalog:  Option<&'a McpCatalog>,
     diags:    &'a mut Diagnostics,
 }
 
@@ -238,15 +310,7 @@ impl EntryReader<'_> {
                 return Some(None);
             }
             let id = table.get("id").and_then(toml::Value::as_str).unwrap_or("");
-            self.unsupported(
-                "workflow_toml.run.agent.mcps.reference",
-                format!(
-                    "`run.agent.mcps.{name}` in `{source}` references the server-managed MCP \
-                     catalog entry `{id}`; the standalone runner has no Fabro server catalog"
-                ),
-                "write the server inline with `type = \"stdio\"`, `\"http\"` or `\"sandbox\"`",
-            );
-            return None;
+            return self.reference(name, id);
         }
         if !enabled {
             return Some(None);
@@ -368,6 +432,58 @@ impl EntryReader<'_> {
             tool_timeout_ms,
             source: source.to_owned(),
         }))
+    }
+
+    /// A reference to the host's catalog: the entry it names, read with the
+    /// inline rules under the reference's `name`, its `source` naming the
+    /// catalog entry. The standalone runner has no catalog and refuses the
+    /// reference; a bound catalog without the id is `fabro.mcps.reference`.
+    #[expect(
+        clippy::option_option,
+        reason = "the same shape as `read_entry`, whose reference branch this is"
+    )]
+    fn reference(&mut self, name: &str, id: &str) -> Option<Option<McpServer>> {
+        let source = self.source;
+        let Some(catalog) = self.catalog else {
+            self.unsupported(
+                "workflow_toml.run.agent.mcps.reference",
+                format!(
+                    "`run.agent.mcps.{name}` in `{source}` references the server-managed MCP \
+                     catalog entry `{id}`; the standalone runner has no Fabro server catalog"
+                ),
+                "write the server inline with `type = \"stdio\"`, `\"http\"` or `\"sandbox\"`",
+            );
+            return None;
+        };
+        let Some(entry) = catalog.get(id) else {
+            self.error(
+                "fabro.mcps.reference",
+                format!(
+                    "`run.agent.mcps.{name}` in `{source}` references the MCP catalog entry \
+                     `{id}`, which the host's catalog does not have"
+                ),
+            );
+            return None;
+        };
+        let catalog_source = format!("{CATALOG_SOURCE}:{id}");
+        if entry.contains_key("id") {
+            self.error(
+                "fabro.mcps.catalog",
+                format!(
+                    "`{catalog_source}` is itself a reference; a catalog entry must be an inline \
+                     server"
+                ),
+            );
+            return None;
+        }
+        let mut reader = EntryReader {
+            source:   &catalog_source,
+            span:     Span::file(&catalog_source),
+            template: self.template,
+            catalog:  None,
+            diags:    &mut *self.diags,
+        };
+        reader.read_entry(name, &toml::Value::Table(entry.clone()))
     }
 
     /// `protocol`: `streamable_http` (the default) or `sse`, Fabro's two
@@ -641,10 +757,75 @@ mod tests {
     }
 
     fn layer(text: &str) -> (Vec<LayerEntry>, Vec<String>) {
+        layer_with(text, None)
+    }
+
+    fn layer_with(text: &str, catalog: Option<&McpCatalog>) -> (Vec<LayerEntry>, Vec<String>) {
         let mut diags = Diagnostics::new();
-        let entries = read_layer(text, "workflow.toml", &context(), &mut diags);
+        let entries = read_layer(text, "workflow.toml", &context(), catalog, &mut diags);
         let codes = diags.iter().map(|d| d.code.to_string()).collect();
         (entries, codes)
+    }
+
+    /// A reference resolves against the host's catalog: the entry is read
+    /// with the inline rules, under the reference's name, its source naming
+    /// the catalog entry; a disabled reference removes the name; an id the
+    /// catalog lacks, or a catalog entry that is not an inline server, is an
+    /// error against the catalog, never the standalone refusal.
+    #[test]
+    fn references_resolve_against_the_hosts_catalog() {
+        let mut diags = Diagnostics::new();
+        let catalog = McpCatalog::parse(
+            "[files-prod]\ntype = \"stdio\"\ncommand = [\"srv\", \"{{ inputs.root }}\"]\n\
+             env = { TOKEN = \"{{ secrets.FILES }}\" }\ntool_timeout = \"2m\"\n\
+             [remote]\ntype = \"http\"\nurl = \"https://mcp.example\"\n\
+             [loop]\nid = \"remote\"\n[broken]\ntype = \"stdio\"\n",
+            &mut diags,
+        );
+        assert!(diags.iter().next().is_none(), "the catalog parses");
+        let (entries, codes) = layer_with(
+            "[run.agent.mcps.notes]\nid = \"files-prod\"\n[run.agent.mcps.off]\nid = \"remote\"\n\
+             enabled = false\n",
+            Some(&catalog),
+        );
+        assert!(codes.is_empty(), "{codes:?}");
+        assert_eq!(entries.len(), 2);
+        let (name, server) = &entries[0];
+        assert_eq!(name, "notes");
+        let server = server.as_ref().expect("resolved");
+        assert_eq!(server.name, "notes", "the reference's name, not the id");
+        assert_eq!(server.source, "mcp-catalog:files-prod");
+        assert_eq!(server.tool_timeout_ms, 120_000);
+        assert_eq!(server.transport, McpTransport::Stdio {
+            command: vec!["srv".into(), "/srv".into()],
+            env:     BTreeMap::from([("TOKEN".to_owned(), McpValue::Secret {
+                name: "FILES".into(),
+            })]),
+        });
+        assert_eq!(entries[1], ("off".to_owned(), None));
+        for (text, code) in [
+            (
+                "[run.agent.mcps.a]\nid = \"nope\"\n",
+                "fabro.mcps.reference",
+            ),
+            ("[run.agent.mcps.a]\nid = \"loop\"\n", "fabro.mcps.catalog"),
+            ("[run.agent.mcps.a]\nid = \"broken\"\n", "fabro.mcps.entry"),
+        ] {
+            let (entries, codes) = layer_with(text, Some(&catalog));
+            assert_eq!(codes, [code], "{text}");
+            assert!(entries.is_empty(), "{text}");
+        }
+        // The catalog's own shape problems are reported once, at parse.
+        let mut diags = Diagnostics::new();
+        let catalog =
+            McpCatalog::parse("bad = 3\n[ok]\ntype = \"http\"\nurl = \"u\"\n", &mut diags);
+        let codes: Vec<String> = diags.iter().map(|d| d.code.to_string()).collect();
+        assert_eq!(codes, ["fabro.mcps.catalog"]);
+        assert!(catalog.get("ok").is_some() && catalog.get("bad").is_none());
+        let mut diags = Diagnostics::new();
+        McpCatalog::parse("[ok\n", &mut diags);
+        let codes: Vec<String> = diags.iter().map(|d| d.code.to_string()).collect();
+        assert_eq!(codes, ["fabro.mcps.catalog"]);
     }
 
     #[test]

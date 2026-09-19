@@ -29,6 +29,15 @@ use super::twins::{Provider, Twin};
 /// How long one `petri run` may take before the harness kills it.
 pub(crate) const RUN_DEADLINE: Duration = Duration::from_secs(120);
 
+/// The `local` environment every case's user settings layer declares, as
+/// the pinned Fabro's harness declares it in its server settings. A
+/// differential cell, and a test that stages a bundle whose
+/// `.fabro/project.toml` selects the Fabro repository's Daytona
+/// environment, selects it with `--environment local`, as every `fabro run`
+/// of the pinned harness does; a case that selects its own environment in
+/// its `workflow.toml` runs in that one.
+pub(crate) const LOCAL_ENVIRONMENT_SETTINGS: &str = "[environments.local]\nprovider = \"local\"\n";
+
 /// One case's private directory tree: workflow, run dir, home, store.
 pub(crate) struct Case {
     pub(crate) root:       PathBuf,
@@ -96,6 +105,10 @@ impl Case {
         for sub in ["home", "store", "cache", "plugins", "workflow"] {
             fs::create_dir_all(root.join(sub)).expect("case subdirectory");
         }
+        let fabro_home = root.join("home").join(".fabro");
+        fs::create_dir_all(&fabro_home).expect("fabro home");
+        fs::write(fabro_home.join("settings.toml"), LOCAL_ENVIRONMENT_SETTINGS)
+            .expect("settings.toml");
         let plugin = env::var_os("PETRI_SANDBOX_HOST_PLUGIN")
             .map(PathBuf::from)
             .expect("PETRI_SANDBOX_HOST_PLUGIN names the host sandbox plugin");

@@ -34,6 +34,13 @@ pub const REPOSITORY_VAR: &str = "petri.repository";
 pub const LAUNCH_MODEL_VAR: &str = "petri.launch_model";
 pub const LAUNCH_PROVIDER_VAR: &str = "petri.launch_provider";
 
+/// The compile variable `petri run --environment` binds: the execution
+/// environment the launch selects, by the id a format's run configuration
+/// declares it under. A format with environments reads it over every file
+/// layer, as `fabro run --environment` overrides the files; a format without
+/// them ignores it. Unset when the launch named none.
+pub const LAUNCH_ENVIRONMENT_VAR: &str = "petri.launch_environment";
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CompileInputs {
     pub inputs:             BTreeMap<SmolStr, Value>,
