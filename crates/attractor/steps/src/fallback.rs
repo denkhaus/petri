@@ -1277,8 +1277,7 @@ mod tests {
 
         [providers.alpha]
         display_name = "Alpha"
-        adapter = "openai"
-        codec = "openai-responses"
+        codecs = ["openai-responses"]
         base_url = "http://127.0.0.1:1"
         default_model = "one"
         auth = { type = "none" }
@@ -1296,8 +1295,7 @@ mod tests {
 
         [providers.beta]
         display_name = "Beta"
-        adapter = "openai"
-        codec = "openai-responses"
+        codecs = ["openai-responses"]
         base_url = "http://127.0.0.1:2"
         default_model = "one"
         auth = { type = "none" }
@@ -1314,8 +1312,7 @@ mod tests {
 
         [providers.gamma]
         display_name = "Gamma"
-        adapter = "openai"
-        codec = "openai-responses"
+        codecs = ["openai-responses"]
         base_url = "http://127.0.0.1:3"
         default_model = "one"
         auth = { type = "none" }

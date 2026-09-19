@@ -32,6 +32,6 @@ execution = { workspace = true }
 runtime = { workspace = true }
 steps = { workspace = true }
 testkit = { workspace = true }
-lithos-llm = { workspace = true, features = ["runtime", "openai"] }
+lithos-llm = { workspace = true, features = ["runtime"] }
 pebble-coding-agent = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["test-util"] }
