@@ -63,7 +63,7 @@ schema_version = 1
 [providers.test]
 display_name = "Test"
 adapter = "test-adapter"
-codec = "test-codec"
+codecs = ["test-codec"]
 base_url = "http://127.0.0.1"
 default_model = "model"
 priority = {test_priority}
@@ -84,7 +84,7 @@ limits = {{ context_tokens = 200000, max_output_tokens = 32000 }}
 [providers.other]
 display_name = "Other"
 adapter = "test-adapter"
-codec = "test-codec"
+codecs = ["test-codec"]
 base_url = "http://127.0.0.2"
 default_model = "big"
 priority = {other_priority}

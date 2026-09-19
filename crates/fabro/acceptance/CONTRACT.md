@@ -616,8 +616,24 @@ names the decision record under `decisions/`; "gap" names the owner.
 
 ## Library pin
 
-Pebble is pinned at `a39f43e26effdf99635eaf343f095c17157c9c93`, which is
-Pebble `main`. That commit is Pebble PR #22 on top of `c91810f`. PR #22
+Pebble is pinned at `67c9f486dd28f15c04e8d590a91e6f5563f7605d`, which is
+Pebble `main`. That commit is Pebble PRs #23 and #24 on top of `a39f43e`.
+PR #23 moves Pebble's lithos-llm pin forward and drops the removed
+`openai`, `anthropic`, `gemini`, and `openai-compatible` features; PR #24
+moves it to `43a42ac` and migrates Pebble's catalogs to the `codecs`
+schema. Neither changes a Pebble type Petri uses, so the pin moves with no
+Petri code change. lithos-llm moves with it to
+`43a42ac28e9d9bcf40a91abc02be4f12ca274ebb`, lithoscomputer/lithos-llm #8,
+#9, #10, and #13 on top of #7: the four adapter features are gone (each meant
+`runtime`); a catalog provider names one `adapter` (default `http`) and a
+`codecs` list (default `["openai-chat"]`), and the loader rejects the old
+`codec` key and the four protocol-named adapter ids; the built-in catalog
+gains the `vercel` and `typesafe` providers, and the client gains
+`evaluate`. Petri's three test catalogs (`fallback.rs`,
+`model_admission.rs`, `check_source.rs`) move to `codecs = [...]`; nothing
+else in Petri named the old fields or features.
+`a39f43e26effdf99635eaf343f095c17157c9c93` is Pebble PR #22 on top of
+`c91810f`. PR #22
 finishes the one-usage-type plan in the stored shapes: `Message::Assistant`'s
 `usage` and `StoredMessage::Assistant`'s `usage` are lithos-llm's `Usage`
 (they were `TokenCounts`), so a turn's cost travels with its counts, and
@@ -767,8 +783,8 @@ fails when any of them disagree. The row names are the keys of a record's
 
 | Pin | Revision | Repository | Role |
 |---|---|---|---|
-| `pebble` | `a39f43e26effdf99635eaf343f095c17157c9c93` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
-| `lithos_llm` | `55add4596b861a0623d00c3a54aa5c147c8d504b` | `lithoscomputer/lithos-llm` (public) | provider transport, request retries, and the `Usage` type every usage takes |
+| `pebble` | `67c9f486dd28f15c04e8d590a91e6f5563f7605d` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
+| `lithos_llm` | `43a42ac28e9d9bcf40a91abc02be4f12ca274ebb` | `lithoscomputer/lithos-llm` (public) | provider transport, request retries, and the `Usage` type every usage takes |
 | `sandbox_driver` | `64c14b89d078a4b34d1555092ad01d41541f7a7d` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `ca45f0e50a6716d716aa2f638ca3cf767e88f613` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
 | `fabro_reference` | `05ebd0fd1beec214b558f4b478e36bd08b507dc7` | `fabro-sh/fabro` (public, `main`) | the reference Fabro the corpus, oracle, bundles, and differential matrix use |

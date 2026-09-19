@@ -46,6 +46,6 @@ tracing = { workspace = true }
 pebble-coding-agent = { workspace = true, features = ["test-util"] }
 # The fallback unit tests resolve chains against a catalog whose providers use
 # the OpenAI adapter; the library itself needs no adapter.
-lithos-llm = { workspace = true, features = ["runtime", "openai"] }
+lithos-llm = { workspace = true, features = ["runtime"] }
 testkit = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
