@@ -207,7 +207,15 @@ async fn run_cell(cell: Cell) {
         .twins
         .first()
         .map_or("openai", |(provider, _)| provider.id());
-    let mut args: Vec<String> = vec!["--provider".into(), launch_provider.into()];
+    // The environment, the same on both engines too: Fabro gets
+    // `--environment local` below, and a bundle whose project file selects
+    // the Fabro repository's Daytona environment runs on the host.
+    let mut args: Vec<String> = vec![
+        "--provider".into(),
+        launch_provider.into(),
+        "--environment".into(),
+        "local".into(),
+    ];
     for (key, value) in &inputs {
         args.push("--input".into());
         args.push(format!("{key}={value}"));

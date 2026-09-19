@@ -26,7 +26,10 @@
 //!   the scope environment, with `{{ secrets.NAME }}` as a `$secret` reference
 //!   resolved at spawn; `resources` are the Daytona runner size. `network`,
 //!   `lifecycle`, `labels`, `cwd` and `image.dockerfile` are platform-only and
-//!   warn.
+//!   warn. Both tables are read from every settings layer and merged key by
+//!   key, the host's settings layer under `.fabro/project.toml` under
+//!   `workflow.toml` ([`EnvironmentLayers`]), so a bundle can name an
+//!   environment the host's catalog declares.
 //! - `[run.prepare]`: setup steps that run as command nodes between `start` and
 //!   its successors, in the selected environment, before any workflow node.
 //!   Each step gets the section's `timeout` (default five minutes) and
@@ -37,7 +40,7 @@
 
 use std::collections::BTreeMap;
 
-use frontend::{Diagnostics, FileSource, Span};
+use frontend::{CompileInputs, Diagnostics, FileSource, LAUNCH_ENVIRONMENT_VAR, Span};
 use frontend_attractor::model::parse_duration;
 use frontend_attractor::template::Context;
 use frontend_attractor::{
@@ -46,6 +49,7 @@ use frontend_attractor::{
 };
 use serde_json::{Value, json};
 
+use crate::hooks::{PROJECT_FILE, SETTINGS_HOOKS_VAR};
 use crate::model_layers::LaunchModel;
 use crate::secrets::{InterpolationError, interpolate};
 use crate::skills;
@@ -114,11 +118,13 @@ impl Settings {
     }
 }
 
-/// Read `workflow.toml` beside `file`. Input defaults land in `template`;
-/// everything else comes back as [`Settings`]. Problems are diagnosed.
+/// Read `workflow.toml` beside `file`, and the environment tables of the
+/// layers below it. Input defaults land in `template`; everything else
+/// comes back as [`Settings`]. Problems are diagnosed.
 pub fn read(
     file: &str,
     files: &dyn FileSource,
+    inputs: &CompileInputs,
     template: &mut Context,
     diags: &mut Diagnostics,
 ) -> Settings {
@@ -128,23 +134,19 @@ pub fn read(
     } else {
         format!("{dir}/workflow.toml")
     };
-    let Some(text) = files.read(&path) else {
-        return Settings::default();
-    };
-    let value: toml::Table = match text.parse() {
-        Ok(value) => value,
-        Err(error) => {
+    let text = files.read(&path);
+    let table: Option<toml::Table> = match text.as_deref().map(str::parse) {
+        None => None,
+        Some(Ok(table)) => Some(table),
+        Some(Err(error)) => {
+            // The hook loader still sees the text: a configured hook in an
+            // unparseable file is an error there, never a silent skip.
             diags.warning(
                 "fabro.workflow_toml",
                 Span::file(&path),
                 format!("`{path}` is not valid TOML and is ignored: {error}"),
             );
-            // The hook loader still sees the text: a configured hook in an
-            // unparseable file is an error there, never a silent skip.
-            return Settings {
-                hooks_text: Some((path, text)),
-                ..Settings::default()
-            };
+            None
         }
     };
     let mut reader = Reader {
@@ -162,10 +164,137 @@ pub fn read(
             ..Settings::default()
         },
     };
-    reader.top_level(&value);
+    if let Some(table) = &table {
+        reader.top_level(table);
+    }
+    // The environment resolves over every layer, so a bundle with no
+    // `workflow.toml` still runs in the environment the host's layer names.
+    let layers = EnvironmentLayers::read(files, inputs, table.as_ref().map(|t| (path.as_str(), t)));
+    reader.environment(&layers);
     let mut settings = reader.settings;
-    settings.hooks_text = Some((path, text));
+    settings.hooks_text = text.map(|text| (path, text));
     settings
+}
+
+/// `[environments.<id>]` and `[run.environment]` from every settings layer,
+/// lowest first: the host's settings layer (`fabro.settings_toml`),
+/// `.fabro/project.toml`, `workflow.toml`. The tables merge key by key,
+/// tables recursively and everything else replaced, as Fabro's `combine`
+/// merges them: a higher layer's `image.docker` wins over a lower one's
+/// while the lower one's `resources` still apply, and `env` keys combine.
+/// Above every layer sits the launch: `petri run --environment`, or the
+/// environment a host's run selected, bound as `petri.launch_environment`,
+/// selects the id as `fabro run --environment` does.
+struct EnvironmentLayers {
+    environments:    toml::Table,
+    run_environment: Option<toml::Table>,
+    /// The id the launch selected, over every layer's `[run.environment]`.
+    launch:          Option<String>,
+    /// The layer each merged key came from, by dotted path
+    /// (`environments.review.image.docker`). A value copied whole records
+    /// its own path, so a lookup takes the longest recorded prefix.
+    sources:         BTreeMap<String, String>,
+}
+
+impl EnvironmentLayers {
+    /// `workflow` is the bundle's own file, already parsed, when it exists.
+    /// A lower layer that is not TOML is skipped here: the model layer's
+    /// reader has warned that the file is ignored.
+    fn read(
+        files: &dyn FileSource,
+        inputs: &CompileInputs,
+        workflow: Option<(&str, &toml::Table)>,
+    ) -> Self {
+        let launch = inputs
+            .vars
+            .get(LAUNCH_ENVIRONMENT_VAR)
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_owned);
+        let mut layers = Self {
+            environments: toml::Table::new(),
+            run_environment: None,
+            launch,
+            sources: BTreeMap::new(),
+        };
+        if let Some(Value::String(text)) = inputs.vars.get(SETTINGS_HOOKS_VAR)
+            && let Ok(table) = text.parse::<toml::Table>()
+        {
+            layers.add("settings.toml", &table);
+        }
+        if let Some(text) = files.read(PROJECT_FILE)
+            && let Ok(table) = text.parse::<toml::Table>()
+        {
+            layers.add(PROJECT_FILE, &table);
+        }
+        if let Some((path, table)) = workflow {
+            layers.add(path, table);
+        }
+        layers
+    }
+
+    fn add(&mut self, source: &str, table: &toml::Table) {
+        if let Some(environments) = table.get("environments").and_then(toml::Value::as_table) {
+            merge_tables(
+                &mut self.environments,
+                environments,
+                "environments",
+                source,
+                &mut self.sources,
+            );
+        }
+        let run_environment = table
+            .get("run")
+            .and_then(toml::Value::as_table)
+            .and_then(|run| run.get("environment"))
+            .and_then(toml::Value::as_table);
+        if let Some(run_environment) = run_environment {
+            let merged = self.run_environment.get_or_insert_with(toml::Table::new);
+            merge_tables(
+                merged,
+                run_environment,
+                "run.environment",
+                source,
+                &mut self.sources,
+            );
+        }
+    }
+
+    /// The layer the value at `path` came from: the longest recorded prefix.
+    fn source_of(&self, path: &str) -> Option<&str> {
+        let mut candidate = path;
+        loop {
+            if let Some(source) = self.sources.get(candidate) {
+                return Some(source);
+            }
+            candidate = &candidate[..candidate.rfind('.')?];
+        }
+    }
+}
+
+/// Merge `upper` into `target`: a table into a table recursively, any other
+/// value replacing what is there. `sources` records the layer of every key
+/// written, and forgets the sub-keys of a value replaced whole.
+fn merge_tables(
+    target: &mut toml::Table,
+    upper: &toml::Table,
+    prefix: &str,
+    source: &str,
+    sources: &mut BTreeMap<String, String>,
+) {
+    for (key, value) in upper {
+        let path = format!("{prefix}.{key}");
+        if let (Some(toml::Value::Table(lower)), toml::Value::Table(upper)) =
+            (target.get_mut(key), value)
+        {
+            merge_tables(lower, upper, &path, source, sources);
+            continue;
+        }
+        target.insert(key.clone(), value.clone());
+        let replaced = format!("{path}.");
+        sources.retain(|recorded, _| recorded != &path && !recorded.starts_with(&replaced));
+        sources.insert(path, source.to_owned());
+    }
 }
 
 struct Reader<'a> {
@@ -190,10 +319,24 @@ impl Reader<'_> {
 
     fn ignored(&mut self, section: &str, why: &str) {
         let path = self.path;
-        self.warn(
+        self.ignored_in(path, section, why);
+    }
+
+    /// [`Self::ignored`] for a section read from `source`, one of the
+    /// settings layers.
+    fn ignored_in(&mut self, source: &str, section: &str, why: &str) {
+        self.diags.warning(
             &format!("ignored.workflow_toml.{section}"),
-            format!("`[{section}]` in `{path}` is ignored: {why}"),
+            Span::file(source),
+            format!("`[{section}]` in `{source}` is ignored: {why}"),
         );
+    }
+
+    /// [`Self::unsupported`] for a setting read from `source`, one of the
+    /// settings layers.
+    fn unsupported_in(&mut self, source: &str, feature: &str, message: String, hint: &str) {
+        self.diags
+            .unsupported(feature, Span::file(source), message, hint);
     }
 
     fn top_level(&mut self, value: &toml::Table) {
@@ -242,13 +385,8 @@ impl Reader<'_> {
         if let Some(workflow) = value.get("workflow").and_then(toml::Value::as_table) {
             self.workflow_table(workflow);
         }
-        let environments = value
-            .get("environments")
-            .and_then(toml::Value::as_table)
-            .cloned()
-            .unwrap_or_default();
         if let Some(run) = value.get("run").and_then(toml::Value::as_table) {
-            self.run_table(run, &environments);
+            self.run_table(run);
         }
     }
 
@@ -272,7 +410,7 @@ impl Reader<'_> {
         }
     }
 
-    fn run_table(&mut self, run: &toml::Table, environments: &toml::Table) {
+    fn run_table(&mut self, run: &toml::Table) {
         // Input defaults first: every other section may render `{{ inputs.* }}`.
         if let Some(inputs) = run.get("inputs").and_then(toml::Value::as_table) {
             for (name, value) in inputs {
@@ -284,12 +422,12 @@ impl Reader<'_> {
             match key.as_str() {
                 // Inputs were read above. `[[run.hooks]]` is read by
                 // `lower::hooks`, with the project and settings layers, from
-                // the text kept on the settings.
-                "inputs" | "hooks" => {}
+                // the text kept on the settings. `[run.environment]` is read
+                // with the other layers' by `Reader::environment`.
+                "inputs" | "hooks" | "environment" => {}
                 "goal" => self.goal(item),
                 "model" => self.model(item),
                 "execution" => self.execution(item),
-                "environment" => self.environment(item, environments),
                 "prepare" => self.prepare(item),
                 "agent" => self.agent(item),
                 "clone" => self.clone_section(item),
@@ -417,11 +555,19 @@ impl Reader<'_> {
     }
 
     /// An environment value: literal text, or exactly `{{ secrets.NAME }}`.
-    fn env_value(&mut self, section: &str, key: &str, value: &toml::Value) -> Option<EnvValue> {
+    /// `source` is the file `section` was read from.
+    fn env_value(
+        &mut self,
+        source: &str,
+        section: &str,
+        key: &str,
+        value: &toml::Value,
+    ) -> Option<EnvValue> {
         let Some(text) = value.as_str() else {
-            self.unsupported(
+            self.unsupported_in(
+                source,
                 "workflow_toml.key",
-                format!("`{section}.env.{key}` in `{}` must be a string", self.path),
+                format!("`{section}.env.{key}` in `{source}` must be a string"),
                 "write the value as a string",
             );
             return None;
@@ -432,35 +578,36 @@ impl Reader<'_> {
                 None => Some(EnvValue::Literal(rendered.text)),
             },
             Err(InterpolationError::SecretNotAllowed { name }) => {
-                self.unsupported(
+                self.unsupported_in(
+                    source,
                     "workflow_toml.secret_position",
                     format!(
-                        "`{section}.env.{key}` in `{}` mixes `{{{{ secrets.{name} }}}}` with other \
-                         text; a secret must be the whole value",
-                        self.path
+                        "`{section}.env.{key}` in `{source}` mixes `{{{{ secrets.{name} }}}}` with \
+                         other text; a secret must be the whole value"
                     ),
                     "write `KEY = \"{{ secrets.NAME }}\"` on its own",
                 );
                 None
             }
             Err(InterpolationError::Unbound { name }) => {
-                self.unsupported(
+                self.unsupported_in(
+                    source,
                     "template.unbound_input",
                     format!(
-                        "`{section}.env.{key}` in `{}` reads `{{{{ {name} }}}}`, which no input binds",
-                        self.path
+                        "`{section}.env.{key}` in `{source}` reads `{{{{ {name} }}}}`, which no \
+                         input binds"
                     ),
                     "pass the input, or add a default under `[run.inputs]`",
                 );
                 None
             }
             Err(InterpolationError::Env { name }) => {
-                self.unsupported(
+                self.unsupported_in(
+                    source,
                     "workflow_toml.env_token",
                     format!(
-                        "`{section}.env.{key}` in `{}` reads `{{{{ env.{name} }}}}`, which Fabro \
-                         parses but never resolves",
-                        self.path
+                        "`{section}.env.{key}` in `{source}` reads `{{{{ env.{name} }}}}`, which \
+                         Fabro parses but never resolves"
                     ),
                     "use `{{ inputs.NAME }}` or `{{ secrets.NAME }}`",
                 );
@@ -643,28 +790,50 @@ impl Reader<'_> {
         // together with the other settings layers.
     }
 
-    /// `[run.environment]` over `[environments.<id>]`, Fabro's `combine`: the
-    /// run's fields win, the named environment fills the rest.
-    fn environment(&mut self, item: &toml::Value, environments: &toml::Table) {
-        let Some(run_env) = item.as_table() else {
-            return;
+    /// `[run.environment]` over `[environments.<id>]`, both merged across
+    /// the layers, Fabro's `combine`: the run's fields win, the named
+    /// environment fills the rest; the launch's selection wins over every
+    /// layer's `id`. Every diagnostic names the layer the setting came from.
+    fn environment(&mut self, layers: &EnvironmentLayers) {
+        let empty = toml::Table::new();
+        let run_env = match (&layers.run_environment, &layers.launch) {
+            (Some(run_env), _) => run_env,
+            (None, Some(_)) => &empty,
+            (None, None) => return,
         };
-        let id = run_env
-            .get("id")
-            .and_then(toml::Value::as_str)
+        let default_source = self.path;
+        let at = |path: &str| layers.source_of(path).unwrap_or(default_source).to_owned();
+        let id = layers
+            .launch
+            .as_deref()
+            .or_else(|| run_env.get("id").and_then(toml::Value::as_str))
             .unwrap_or("default")
             .to_string();
-        let base = environments.get(&id).and_then(toml::Value::as_table);
-        let Some(base) = base else {
-            if run_env.keys().any(|k| k != "id") || id != "default" {
+        let base_table = format!("environments.{id}");
+        let Some(base) = layers.environments.get(&id).and_then(toml::Value::as_table) else {
+            let hint = format!(
+                "add `[environments.{id}]` with a `provider` to `workflow.toml`, \
+                 `.fabro/project.toml` or the settings layer"
+            );
+            if layers.launch.is_some() {
                 self.unsupported(
                     "workflow_toml.run.environment",
                     format!(
-                        "`[run.environment] id = \"{id}\"` in `{}` names no `[environments.{id}]` \
-                         table",
-                        self.path
+                        "the launch selects the environment `{id}` (`--environment {id}`), which \
+                         no `[environments.{id}]` table declares in any settings layer"
                     ),
-                    &format!("add `[environments.{id}]` with a `provider`"),
+                    &hint,
+                );
+            } else if run_env.keys().any(|k| k != "id") || id != "default" {
+                let source = at("run.environment.id");
+                self.unsupported_in(
+                    &source,
+                    "workflow_toml.run.environment",
+                    format!(
+                        "`[run.environment] id = \"{id}\"` in `{source}` names no \
+                         `[environments.{id}]` table in any settings layer"
+                    ),
+                    &hint,
                 );
             }
             return;
@@ -675,18 +844,26 @@ impl Reader<'_> {
             .unwrap_or("")
             .to_string();
         if !matches!(provider.as_str(), "local" | "docker" | "daytona") {
-            self.unsupported(
+            let source = at(&format!("{base_table}.provider"));
+            self.unsupported_in(
+                &source,
                 "workflow_toml.environments.provider",
                 format!(
-                    "`[environments.{id}] provider = \"{provider}\"` in `{}` is not `local`, \
-                     `docker` or `daytona`",
-                    self.path
+                    "`[environments.{id}] provider = \"{provider}\"` in `{source}` is not \
+                     `local`, `docker` or `daytona`"
                 ),
                 "set the provider to `local`, `docker` or `daytona`",
             );
             return;
         }
-        let field = |key: &str| run_env.get(key).or_else(|| base.get(key));
+        // A field, with the table it was read from: the run's own table
+        // over the named environment's.
+        let field = |key: &str| {
+            run_env
+                .get(key)
+                .map(|value| (value, "run.environment"))
+                .or_else(|| base.get(key).map(|value| (value, base_table.as_str())))
+        };
         let mut environment = Environment {
             id:        id.clone(),
             provider:  provider.clone(),
@@ -696,15 +873,18 @@ impl Reader<'_> {
             memory_mb: None,
             disk_mb:   None,
         };
-        if let Some(image) = field("image").and_then(toml::Value::as_table) {
+        if let Some((image, table)) = field("image")
+            && let Some(image) = image.as_table()
+        {
             if let Some(docker) = image.get("docker").and_then(toml::Value::as_str) {
                 if provider == "local" {
-                    self.unsupported(
+                    let source = at(&format!("{table}.image.docker"));
+                    self.unsupported_in(
+                        &source,
                         "workflow_toml.environments.image",
                         format!(
-                            "`[environments.{id}] image.docker` in `{}` names a container image, \
-                             but the `local` provider runs on the host",
-                            self.path
+                            "`[{table}] image.docker` in `{source}` names a container image, but \
+                             the `local` provider runs on the host"
                         ),
                         "use `provider = \"docker\"`, or drop the image",
                     );
@@ -716,7 +896,8 @@ impl Reader<'_> {
                 // Fabro builds the image on its platform. The standalone
                 // runner has no image build; the run uses the selected
                 // backend's default runner image, and says so.
-                self.ignored(
+                self.ignored_in(
+                    &at(&format!("{table}.image.dockerfile")),
                     &format!("environments.{id}.image.dockerfile"),
                     "the standalone runner does not build images; the scope runs on the selected \
                      backend's default runner image (build the image yourself and name it with \
@@ -724,14 +905,16 @@ impl Reader<'_> {
                 );
             }
         }
-        if let Some(cwd) = base.get("cwd") {
-            let _ = cwd;
-            self.ignored(
+        if base.contains_key("cwd") {
+            self.ignored_in(
+                &at(&format!("{base_table}.cwd")),
                 &format!("environments.{id}.cwd"),
                 "the working directory is the sandbox workspace the run was given",
             );
         }
-        if let Some(resources) = field("resources").and_then(toml::Value::as_table) {
+        if let Some((resources, table)) = field("resources")
+            && let Some(resources) = resources.as_table()
+        {
             if provider == "daytona" {
                 environment.cpu_cores = resources
                     .get("cpu")
@@ -740,7 +923,8 @@ impl Reader<'_> {
                 environment.memory_mb = resources.get("memory").and_then(size_mb);
                 environment.disk_mb = resources.get("disk").and_then(size_mb);
             } else {
-                self.ignored(
+                self.ignored_in(
+                    &at(&format!("{table}.resources")),
                     &format!("environments.{id}.resources"),
                     "resource limits apply to a Daytona runner; the host and Docker providers \
                      run unconstrained",
@@ -755,26 +939,31 @@ impl Reader<'_> {
             ),
             ("labels", "sandbox labels are a Fabro platform record"),
         ] {
-            if field(key).is_some() {
-                self.ignored(&format!("environments.{id}.{key}"), why);
+            if let Some((_, table)) = field(key) {
+                self.ignored_in(
+                    &at(&format!("{table}.{key}")),
+                    &format!("environments.{id}.{key}"),
+                    why,
+                );
             }
         }
         // `env`: the named environment's values under the run's, Fabro's
         // sticky map order.
-        let mut merged: Vec<(String, toml::Value, String)> = Vec::new();
+        let mut merged: Vec<(String, toml::Value, &str)> = Vec::new();
         if let Some(env) = base.get("env").and_then(toml::Value::as_table) {
             for (key, value) in env {
-                merged.push((key.clone(), value.clone(), format!("environments.{id}")));
+                merged.push((key.clone(), value.clone(), base_table.as_str()));
             }
         }
         if let Some(env) = run_env.get("env").and_then(toml::Value::as_table) {
             for (key, value) in env {
                 merged.retain(|(k, _, _)| k != key);
-                merged.push((key.clone(), value.clone(), "run.environment".to_string()));
+                merged.push((key.clone(), value.clone(), "run.environment"));
             }
         }
-        for (key, value, section) in merged {
-            if let Some(value) = self.env_value(&section, &key, &value) {
+        for (key, value, table) in merged {
+            let source = at(&format!("{table}.env.{key}"));
+            if let Some(value) = self.env_value(&source, table, &key, &value) {
                 environment.env.insert(key, value);
             }
         }
@@ -875,9 +1064,10 @@ impl Reader<'_> {
             };
             let mut env = BTreeMap::new();
             if let Some(table) = step.get("env").and_then(toml::Value::as_table) {
+                let path = self.path;
                 for (key, value) in table {
                     if let Some(value) =
-                        self.env_value(&format!("run.prepare.steps[{index}]"), key, value)
+                        self.env_value(path, &format!("run.prepare.steps[{index}]"), key, value)
                     {
                         env.insert(key.clone(), value);
                     }

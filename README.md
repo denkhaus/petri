@@ -1197,6 +1197,14 @@ given), so `petri inspect` and a replay see it; `petri replay` takes the same
 options so the graph lowers the same. `petri resume` needs nothing: the
 stored graph already carries the default.
 
+**Environment selection.** `petri run --environment <id>` selects the
+`[environments.<id>]` table the run executes in over what any settings layer's
+`[run.environment]` names, as `fabro run --environment` does; the table may
+come from `workflow.toml`, `.fabro/project.toml` or the user settings layer
+(`$FABRO_HOME/settings.toml`), which is how a bundle whose project file selects
+a Daytona environment still runs on the host. The resolved environment lands
+in the persisted root graph's `fabro.environment` parameter.
+
 **Retention.** `--retain always|on-failure|never` decides what happens to the
 run's workspaces at teardown. The default is the workflow format's: Fabro
 keeps every workspace (its result is the files), other formats keep a failed

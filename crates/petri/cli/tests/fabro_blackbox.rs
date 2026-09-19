@@ -2796,10 +2796,14 @@ async fn the_unchanged_interview_bundle_runs_with_a_launch_provider() {
     .await;
     case.redirect(&twin);
     let script = interview::write(&case.root, "interview", &entries);
+    // `--environment local`, as the pinned Fabro's harness launches every
+    // run: the bundle's `.fabro/project.toml` selects a Daytona environment.
     let finished = case
         .run(&workflow, &[
             "--provider",
             "openai",
+            "--environment",
+            "local",
             "--interview-script",
             script.to_str().expect("utf-8 path"),
         ])
@@ -2836,6 +2840,8 @@ async fn the_unchanged_interview_bundle_runs_with_a_launch_provider() {
             "openai",
             "--model",
             "gpt-5.6-sol",
+            "--environment",
+            "local",
             "--interview-script",
             script.to_str().expect("utf-8 path"),
         ])
@@ -2861,6 +2867,8 @@ async fn the_unchanged_interview_bundle_runs_with_a_launch_provider() {
     let script = interview::write(&case.root, "interview", &entries);
     let finished = case
         .run(&workflow, &[
+            "--environment",
+            "local",
             "--interview-script",
             script.to_str().expect("utf-8 path"),
         ])

@@ -38,6 +38,7 @@ use frontend::{
 pub use frontend_attractor::RunSettings;
 use frontend_attractor::template::Context;
 pub use hooks::{PROJECT_FILE, SETTINGS_HOOKS_VAR};
+pub use mcps::MCP_CATALOG_VAR;
 pub use model_layers::LaunchModel;
 use serde_json::Value;
 use smol_str::SmolStr;
@@ -51,7 +52,7 @@ pub use workflow_toml::{ENVIRONMENT_PARAM, LAUNCH_PARAM, Settings};
 pub fn load(file: &str, text: &str, files: &dyn FileSource, inputs: &CompileInputs) -> Lowered {
     let mut diags = Diagnostics::new();
     let mut template = Context::new(inputs);
-    let mut settings = workflow_toml::read(file, files, &mut template, &mut diags);
+    let mut settings = workflow_toml::read(file, files, inputs, &mut template, &mut diags);
     model_layers::apply(files, inputs, &mut settings.run.model, &mut diags);
     // The launch itself, below every file layer: a node that names no model,
     // in a graph with no default, in a run whose configuration names none,
@@ -109,7 +110,10 @@ pub struct Fabro {
     /// The host's user settings layer (`$FABRO_HOME/settings.toml`), bound
     /// as the `fabro.settings_toml` variable of every load that does not
     /// bind its own.
-    settings_toml: Option<String>,
+    settings_toml:    Option<String>,
+    /// The host's MCP catalog, bound as the `fabro.mcp_catalog_toml`
+    /// variable the same way.
+    mcp_catalog_toml: Option<String>,
 }
 
 impl Fabro {
@@ -119,12 +123,47 @@ impl Fabro {
 
     /// Carry the user settings layer's text into every load. Fabro reads
     /// `~/.fabro/settings.toml` (`$FABRO_HOME` when set) for hooks, MCP
-    /// servers, and `[run.model]` defaults; the host reads the file and
-    /// hands the text here, so lowering stays free of environment reads.
+    /// servers, `[run.model]` defaults and `[environments.*]`; the host
+    /// reads the file and hands the text here, so lowering stays free of
+    /// environment reads. A Fabro server hands its environment catalog
+    /// here too, as `[environments.<id>]` tables.
     #[must_use]
     pub fn with_settings_toml(mut self, text: Option<String>) -> Self {
         self.settings_toml = text;
         self
+    }
+
+    /// Carry the host's MCP catalog into every load: a TOML table keyed by
+    /// catalog id, each entry in the inline `[run.agent.mcps.<name>]`
+    /// shape, which `[run.agent.mcps.<name>] id = "..."` references resolve
+    /// against ([`MCP_CATALOG_VAR`]).
+    #[must_use]
+    pub fn with_mcp_catalog_toml(mut self, text: Option<String>) -> Self {
+        self.mcp_catalog_toml = text;
+        self
+    }
+
+    /// The host's layers, bound as compile variables of a load that does
+    /// not bind them itself.
+    fn bind(&self, inputs: &CompileInputs) -> Option<CompileInputs> {
+        let unbound = [
+            (SETTINGS_HOOKS_VAR, &self.settings_toml),
+            (MCP_CATALOG_VAR, &self.mcp_catalog_toml),
+        ]
+        .into_iter()
+        .filter_map(|(var, text)| Some((var, text.as_deref()?)))
+        .filter(|(var, _)| !inputs.vars.contains_key(*var))
+        .collect::<Vec<_>>();
+        if unbound.is_empty() {
+            return None;
+        }
+        let mut bound = inputs.clone();
+        for (var, text) in unbound {
+            bound
+                .vars
+                .insert(SmolStr::new(var), Value::String(text.to_owned()));
+        }
+        Some(bound)
     }
 }
 
@@ -151,16 +190,9 @@ impl Frontend for Fabro {
         files: &dyn FileSource,
         inputs: &CompileInputs,
     ) -> Lowered {
-        match &self.settings_toml {
-            Some(settings) if !inputs.vars.contains_key(SETTINGS_HOOKS_VAR) => {
-                let mut inputs = inputs.clone();
-                inputs.vars.insert(
-                    SmolStr::new(SETTINGS_HOOKS_VAR),
-                    Value::String(settings.clone()),
-                );
-                load(file, text, files, &inputs)
-            }
-            _ => load(file, text, files, inputs),
+        match self.bind(inputs) {
+            Some(bound) => load(file, text, files, &bound),
+            None => load(file, text, files, inputs),
         }
     }
 

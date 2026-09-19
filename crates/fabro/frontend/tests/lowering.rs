@@ -999,3 +999,247 @@ fn the_launch_model_default_sits_below_every_layer() {
     assert_eq!(graph.params["fabro.launch"]["model"], json!(null));
     assert_eq!(graph.params["fabro.launch"]["provider"], json!(null));
 }
+
+/// `[environments.<id>]` and `[run.environment]` come from every settings
+/// layer: a bundle names an environment only the host's layer declares (a
+/// Fabro server's catalog), a bundle with no `[run.environment]` takes the
+/// host's selection, the bundle's keys win over the project's over the
+/// host's key by key, and every diagnostic names the layer its setting came
+/// from.
+#[test]
+fn environments_come_from_every_layer_and_the_bundle_wins() {
+    let host = "[run.environment]\nid = \"docker-small\"\n\
+                [environments.docker-small]\nprovider = \"docker\"\n\
+                [environments.docker-small.image]\ndocker = \"catalog/runner:1\"\n\
+                [environments.docker-small.env]\nFROM = \"catalog\"\nSHARED = \"catalog\"\n\
+                [environments.docker-small.lifecycle]\npreserve = false\n\
+                [environments.local]\nprovider = \"local\"\n\
+                [environments.local.image]\ndocker = \"catalog/host:1\"\n";
+    let inputs = CompileInputs::new().with_var(SETTINGS_HOOKS_VAR, host);
+    let lower = |files: &dyn frontend::FileSource| {
+        let lowered = load("wf/w.fabro", &dot("start -> exit"), files, &inputs);
+        assert!(
+            !lowered.diagnostics.has_errors(),
+            "{:?}",
+            lowered.diagnostics
+        );
+        let files: Vec<(String, String)> = lowered
+            .diagnostics
+            .iter()
+            .map(|d| (d.code.to_string(), d.span.file.to_string()))
+            .collect();
+        (lowered.graph.expect("lowers"), files)
+    };
+
+    // The bundle names the host's environment and declares none itself.
+    let (graph, diagnostics) = lower(&files(&[(
+        "wf/workflow.toml",
+        "[run.environment]\nid = \"docker-small\"\n",
+    )]));
+    let environment = &graph.params["fabro.environment"];
+    assert_eq!(environment["id"], json!("docker-small"));
+    assert_eq!(environment["provider"], json!("docker"));
+    assert_eq!(environment["image"], json!("catalog/runner:1"));
+    assert_eq!(environment["env"]["FROM"], json!("catalog"));
+    assert_eq!(
+        Fabro::new()
+            .launch_settings(&graph)
+            .sandbox_backend
+            .as_deref(),
+        Some("docker")
+    );
+    assert!(
+        matches!(&graph.scopes[0].runtime.target, ir::RuntimeTarget::Container { image, .. } if image == "catalog/runner:1"),
+        "{:?}",
+        graph.scopes[0].runtime.target
+    );
+    assert_eq!(
+        diagnostics,
+        [(
+            "ignored.workflow_toml.environments.docker-small.lifecycle".to_string(),
+            "settings.toml".to_string()
+        )],
+        "a platform-only key warns against the layer that set it"
+    );
+
+    // A bundle with no `workflow.toml` at all runs in the host's selection.
+    let (graph, _) = lower(&frontend::NoFiles);
+    assert_eq!(
+        graph.params["fabro.environment"]["id"],
+        json!("docker-small")
+    );
+
+    // Key by key: the bundle over the project over the host.
+    let (graph, _) = lower(&files(&[
+        (
+            ".fabro/project.toml",
+            "[environments.docker-small.image]\ndocker = \"project/runner:2\"\n\
+             [environments.docker-small.env]\nSHARED = \"project\"\n",
+        ),
+        (
+            "wf/workflow.toml",
+            "[run.environment]\nid = \"docker-small\"\n\
+             [environments.docker-small.env]\nSHARED = \"bundle\"\nOWN = \"bundle\"\n",
+        ),
+    ]));
+    let environment = &graph.params["fabro.environment"];
+    assert_eq!(environment["image"], json!("project/runner:2"));
+    assert_eq!(
+        environment["env"],
+        json!({ "FROM": "catalog", "SHARED": "bundle", "OWN": "bundle" })
+    );
+    let (graph, _) = lower(&files(&[(
+        "wf/workflow.toml",
+        "[run.environment]\nid = \"docker-small\"\n\
+         [environments.docker-small.image]\ndocker = \"bundle/runner:3\"\n",
+    )]));
+    assert_eq!(
+        graph.params["fabro.environment"]["image"],
+        json!("bundle/runner:3")
+    );
+
+    // Refusals name the layer the offending setting came from.
+    let refused = |files: &dyn frontend::FileSource| {
+        load("wf/w.fabro", &dot("start -> exit"), files, &inputs)
+            .diagnostics
+            .iter()
+            .filter(|d| d.code.starts_with("unsupported."))
+            .map(|d| (d.code.to_string(), d.span.file.to_string()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        refused(&files(&[(
+            "wf/workflow.toml",
+            "[run.environment]\nid = \"nowhere\"\n"
+        )])),
+        [(
+            "unsupported.workflow_toml.run.environment".to_string(),
+            "wf/workflow.toml".to_string()
+        )],
+        "an id no layer declares"
+    );
+    assert_eq!(
+        refused(&files(&[(
+            "wf/workflow.toml",
+            "[run.environment]\nid = \"local\"\n"
+        )])),
+        [(
+            "unsupported.workflow_toml.environments.image".to_string(),
+            "settings.toml".to_string()
+        )],
+        "the host's image on a local environment"
+    );
+}
+
+/// `[run.agent.mcps.<name>] id = "..."` resolves against the MCP catalog
+/// the host binds (`fabro.mcp_catalog_toml`, or
+/// `Fabro::with_mcp_catalog_toml`): the catalog entry lands on the agent node
+/// under the reference's name. Without a catalog the reference stays the
+/// standalone runner's refusal.
+#[test]
+fn mcp_catalog_references_resolve_against_the_hosts_catalog() {
+    let catalog = "[files-prod]\ntype = \"stdio\"\ncommand = [\"srv\", \"--prod\"]\n";
+    let files = files(&[(
+        "wf/workflow.toml",
+        "[run.agent.mcps.notes]\nid = \"files-prod\"\n",
+    )]);
+    let graph_dot = dot(r#"
+        graph [backend="api", default_model="m"]
+        a [prompt="a"]
+        start -> a -> exit
+    "#);
+    let check = |lowered: frontend::Lowered| {
+        assert!(
+            !lowered.diagnostics.has_errors(),
+            "{:?}",
+            lowered.diagnostics
+        );
+        let graph = lowered.graph.expect("graph");
+        let mcps = node(&graph, "a").step.config["mcps"].clone();
+        assert_eq!(mcps.as_array().map(Vec::len), Some(1), "{mcps}");
+        assert_eq!(mcps[0]["name"], json!("notes"));
+        assert_eq!(mcps[0]["source"], json!("mcp-catalog:files-prod"));
+        assert_eq!(mcps[0]["transport"]["command"], json!(["srv", "--prod"]));
+    };
+    check(load(
+        "wf/w.fabro",
+        &graph_dot,
+        &files,
+        &CompileInputs::new().with_var(frontend_fabro::MCP_CATALOG_VAR, catalog),
+    ));
+    check(
+        Fabro::new()
+            .with_mcp_catalog_toml(Some(catalog.to_owned()))
+            .load("wf/w.fabro", &graph_dot, &files, &CompileInputs::new()),
+    );
+    let codes: Vec<String> = load("wf/w.fabro", &graph_dot, &files, &CompileInputs::new())
+        .diagnostics
+        .iter()
+        .map(|d| d.code.to_string())
+        .collect();
+    assert_eq!(codes, [
+        "unsupported.workflow_toml.run.agent.mcps.reference"
+    ]);
+}
+
+/// The launch's environment (`petri run --environment`, the
+/// `petri.launch_environment` variable) selects the id over every layer's
+/// `[run.environment]`, as `fabro run --environment` does: a bundle whose
+/// project file selects one environment runs in the launch's; a bundle with
+/// no `[run.environment]` anywhere runs in it too; an id no layer declares
+/// is refused.
+#[test]
+fn the_launch_environment_wins_over_every_layer() {
+    let host = "[environments.local]\nprovider = \"local\"\n\
+                [environments.big]\nprovider = \"daytona\"\n\
+                [environments.big.resources]\ncpu = 8\n";
+    let files = files(&[(".fabro/project.toml", "[run.environment]\nid = \"big\"\n")]);
+    let launch = |id: &str| {
+        CompileInputs::new()
+            .with_var(SETTINGS_HOOKS_VAR, host)
+            .with_var(frontend::LAUNCH_ENVIRONMENT_VAR, id)
+    };
+    let lowered = load(
+        "wf/w.fabro",
+        &dot("start -> exit"),
+        &files,
+        &launch("local"),
+    );
+    assert!(
+        !lowered.diagnostics.has_errors(),
+        "{:?}",
+        lowered.diagnostics
+    );
+    let graph = lowered.graph.expect("lowers");
+    assert_eq!(graph.params["fabro.environment"]["id"], json!("local"));
+    assert_eq!(
+        Fabro::new()
+            .launch_settings(&graph)
+            .sandbox_backend
+            .as_deref(),
+        Some("host")
+    );
+    // Without the launch, the project's selection stands.
+    let graph = lower_ok_with(
+        &dot("start -> exit"),
+        &files,
+        &CompileInputs::new().with_var(SETTINGS_HOOKS_VAR, host),
+    );
+    assert_eq!(graph.params["fabro.environment"]["id"], json!("big"));
+    assert_eq!(graph.params["fabro.launch"]["cpu_cores"], json!(8));
+    // No `[run.environment]` anywhere: the launch alone selects.
+    let graph = lower_ok_with(&dot("start -> exit"), &frontend::NoFiles, &launch("big"));
+    assert_eq!(graph.params["fabro.environment"]["id"], json!("big"));
+    // An id no layer declares.
+    let codes: Vec<String> = load(
+        "wf/w.fabro",
+        &dot("start -> exit"),
+        &files,
+        &launch("nowhere"),
+    )
+    .diagnostics
+    .iter()
+    .map(|d| d.code.to_string())
+    .collect();
+    assert_eq!(codes, ["unsupported.workflow_toml.run.environment"]);
+}
