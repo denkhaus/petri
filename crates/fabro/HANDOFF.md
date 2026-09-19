@@ -37,9 +37,9 @@ lives in the distribution crate, so a host on the six packages builds its
 The libraries the two repositories share are pinned to one revision each,
 the rows of `crates/fabro/acceptance/CONTRACT.md` "Pinned revisions", which
 `mise run check:pins` holds equal to the manifests and the evidence records.
-Fabro's `main` holds the same three (its pull requests #873 to #875): Pebble
-`a39f43e26effdf99635eaf343f095c17157c9c93`, lithos-llm
-`55add4596b861a0623d00c3a54aa5c147c8d504b`, sandbox-driver
+Fabro's `main` holds the same three (its pull requests #873 to #875 and
+#883): Pebble `67c9f486dd28f15c04e8d590a91e6f5563f7605d`, lithos-llm
+`43a42ac28e9d9bcf40a91abc02be4f12ca274ebb`, sandbox-driver
 `64c14b89d078a4b34d1555092ad01d41541f7a7d`. Each is a descendant of the
 revision Fabro pinned when the integration plan was written (Pebble
 `6996942`, lithos-llm `a1e3fd3`, sandbox-driver `ddb32e1`), so the two
