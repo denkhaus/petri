@@ -249,16 +249,17 @@ pub fn decode_coordinator_records(stored: &[Record]) -> Result<Vec<CoordinatorRe
             });
         }
     }
-    stored
-        .iter()
-        .map(|record| {
-            record.decode().map_err(|source| StoreError::BadRecord {
-                log: LogId::Coordinator,
-                seq: record.seq,
-                source,
-            })
-        })
-        .collect()
+    stored.iter().map(decode_coordinator_record).collect()
+}
+
+/// Decode one stored coordinator record, past the format check the log's
+/// first record carries.
+pub(crate) fn decode_coordinator_record(record: &Record) -> Result<CoordinatorRecord, StoreError> {
+    record.decode().map_err(|source| StoreError::BadRecord {
+        log: LogId::Coordinator,
+        seq: record.seq,
+        source,
+    })
 }
 
 /// Encode a coordinator record as the store keeps it.
