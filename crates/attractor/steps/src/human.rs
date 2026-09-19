@@ -48,9 +48,41 @@ const REVIEW_TARGET_URL_MAX_CHARS: usize = 2048;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct Choice {
-    pub key:   String,
-    pub label: String,
-    pub to:    String,
+    pub key:         String,
+    pub label:       String,
+    pub to:          String,
+    /// What choosing it means (the edge's `human.description`).
+    #[serde(default)]
+    pub description: Option<String>,
+    /// A sample of what it would do (the edge's `human.preview`).
+    #[serde(default)]
+    pub preview:     Option<String>,
+}
+
+impl Choice {
+    /// A choice with a key, a label and a target, and nothing else.
+    fn new(key: impl Into<String>, label: impl Into<String>, to: impl Into<String>) -> Self {
+        Self {
+            key:         key.into(),
+            label:       label.into(),
+            to:          to.into(),
+            description: None,
+            preview:     None,
+        }
+    }
+}
+
+/// The context key naming the stage that ran last, as Fabro writes it.
+const LAST_STAGE_KEY: &str = "last_stage";
+
+/// The text a person reads beside the gate's question: the previous stage's
+/// response (`response.<last_stage>`, trimmed), when there is one, as
+/// Fabro's gate shows it. A reference to an offloaded response is shown as
+/// the reference text, as every other reader of the context sees it.
+fn context_of(kv: &Value) -> Option<String> {
+    let last = kv.get(LAST_STAGE_KEY)?.as_str()?;
+    let response = kv.get(format!("response.{last}"))?.as_str()?.trim();
+    (!response.is_empty()).then(|| response.to_owned())
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,8 +261,10 @@ impl HumanConfig {
             .choices
             .iter()
             .map(|c| QuestionOption {
-                key:   c.key.clone(),
-                label: c.label.clone(),
+                key:         c.key.clone(),
+                label:       c.label.clone(),
+                description: c.description.clone(),
+                preview:     c.preview.clone(),
             })
             .collect();
         question.default = self.choices.first().map(|c| c.key.clone());
@@ -238,6 +272,7 @@ impl HumanConfig {
         question.sensitive = self.sensitive.unwrap_or(false);
         question.kind.clone_from(&self.question_type);
         question.timeout_ms = self.timeout_ms;
+        question.context = context_of(&self.kv);
         question
     }
 
@@ -277,13 +312,7 @@ impl HumanConfig {
             .find(|c| c.to == wanted)
             .or_else(|| self.choices.iter().find(|c| c.key == wanted))
             .cloned()
-            .or_else(|| {
-                Some(Choice {
-                    key:   wanted.to_owned(),
-                    label: wanted.to_owned(),
-                    to:    wanted.to_owned(),
-                })
-            })
+            .or_else(|| Some(Choice::new(wanted, wanted, wanted)))
     }
 
     /// The stage's outcome under the node's failure policies, with the
@@ -621,5 +650,25 @@ mod tests {
         let message = ReviewTargetError::UnsupportedUrlScheme.message("gate");
         assert!(message.contains("must use http or https"), "{message}");
         assert!(!message.contains("javascript"), "{message}");
+    }
+
+    /// The question's context is the last stage's response, trimmed, when
+    /// the context names one and it has text; nothing otherwise.
+    #[test]
+    fn the_context_is_the_last_stages_response() {
+        assert_eq!(
+            context_of(&json!({ "last_stage": "plan", "response.plan": "  Do it. \n" })),
+            Some("Do it.".to_owned())
+        );
+        assert_eq!(
+            context_of(&json!({ "last_stage": "plan", "response.plan": "   " })),
+            None
+        );
+        assert_eq!(context_of(&json!({ "last_stage": "plan" })), None);
+        assert_eq!(context_of(&json!({ "response.plan": "orphan" })), None);
+        assert_eq!(
+            context_of(&json!({ "last_stage": "plan", "response.plan": 7 })),
+            None
+        );
     }
 }

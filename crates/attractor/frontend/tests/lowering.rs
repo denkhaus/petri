@@ -880,6 +880,72 @@ fn human_gates_offer_their_edges_as_choices() {
     assert!(!eval_guard(&graph, t[0].1[1].1, &answer, &[]));
 }
 
+/// A choice edge's `human.description` and `human.preview` ride the choice,
+/// for the host to show beside it; an edge without them has neither key,
+/// and a blank value is the same as none.
+#[test]
+fn human_gate_choices_carry_the_edges_description_and_preview() {
+    let graph = lower_ok(&dot(r#"
+        gate [shape=hexagon, label="Deploy?"]
+        yes [prompt="x"]
+        no [prompt="x"]
+        later [prompt="x"]
+        start -> gate
+        gate -> yes [label="[Y] Yes", "human.description"="Merge and deploy to production", "human.preview"="deploy --prod"]
+        gate -> no [label="[N] No", "human.description"="  "]
+        gate -> later [label="[L] Later"]
+        yes -> exit
+        no -> exit
+        later -> exit
+    "#));
+    let config = &node(&graph, "gate").step.config;
+    assert_eq!(
+        config["choices"],
+        json!([
+            {
+                "key": "Y",
+                "label": "[Y] Yes",
+                "to": "yes",
+                "description": "Merge and deploy to production",
+                "preview": "deploy --prod",
+            },
+            { "key": "N", "label": "[N] No", "to": "no" },
+            { "key": "L", "label": "[L] Later", "to": "later" },
+        ])
+    );
+}
+
+/// What a host that renders a stage reads off `meta` alone: a command
+/// node's `script` as the step runs it, and for every routing arm the
+/// target, the label and the `condition` as written, keyed by the arm's
+/// edge id, which `route.applied` names.
+#[test]
+fn meta_carries_the_script_and_each_edges_condition_text() {
+    let graph = lower_ok(&dot(r#"
+        build [shape=parallelogram, script="make build\nmake test"]
+        ok [prompt="x"]
+        bad [prompt="x"]
+        start -> build
+        build -> ok [condition="  outcome=succeeded "]
+        build -> bad [label="[F] Failed"]
+        ok -> exit
+        bad -> exit
+    "#));
+    let build = node(&graph, "build");
+    assert_eq!(build.meta["script"], json!("make build\nmake test"));
+    assert_eq!(build.meta["script"], build.step.config["script"]);
+    assert!(node(&graph, "ok").meta.get("script").is_none());
+    let edges = build.meta["edges"].as_object().expect("the edge table");
+    assert_eq!(edges.len(), 2);
+    let arms = &build.routing.groups[0].arms;
+    let entry = |i: usize| &edges[&arms[i].id.raw().to_string()];
+    assert_eq!(
+        entry(0),
+        &json!({ "to": "ok", "label": null, "condition": "outcome=succeeded" })
+    );
+    assert_eq!(entry(1), &json!({ "to": "bad", "label": "[F] Failed" }));
+}
+
 #[test]
 fn stylesheets_write_model_properties_that_explicit_attributes_beat() {
     let graph = lower_ok(&dot(r#"

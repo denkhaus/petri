@@ -85,7 +85,7 @@ a warning; the importing workflow's stylesheet governs.
 | `box` agent | `attractor/agent` | prompt, goal, `fidelity` and `default_fidelity`, `thread_id`, `default_thread` and the node's classes, `project_memory`, `backend`, model settings (`model`, `provider`, `reasoning_effort`, `speed`, `max_tokens`), `output_schema`, `output_retries`, `acp`, `mcps` (the run's MCP servers), the workflow's stage list for the preamble |
 | `tab` prompt | `attractor/prompt` | prompt, goal, `fidelity` and the thread attributes (accepted; a prompt node never continues a conversation), `project_memory`, model settings (`model`, `provider`, `reasoning_effort`, `speed`, `max_tokens`), `output_schema`, `output_retries`; API-only: `backend="acp"` on the node is `attractor.prompt_backend`, and the graph's ACP settings never reach it |
 | `parallelogram` command, or any node with `script` | `attractor/command` | script, language, `stdin` (an expression over `kv`), `output_schema`, `env` (`[run.prepare]` step env and the environment's `$secret` values) |
-| `hexagon` human | `attractor/human` | the choices (from the edges), `question_type`, `freeform_target`, `sensitive`, `review_target`, `default_choice` (from `human.default_choice`), `timeout_ms` |
+| `hexagon` human | `attractor/human` | the choices (from the edges, each with the edge's `human.description` and `human.preview` when set), `question_type`, `freeform_target`, `sensitive`, `review_target`, `default_choice` (from `human.default_choice`), `timeout_ms` |
 | `component` parallel | `attractor/fork`: takes the fork snapshot of `kv` (and of the stage records for agent or prompt targets) once per visit, offloads the `for_each` source list and every other value above 4 KiB to the output store, and outputs `{ snapshot, nodes }`; each branch target becomes a synthetic `attractor/branch` delegate (`kind = "parallel.branch"`) that runs a copy of the target in a child invocation from that snapshot; `for_each` marks the delegate `Expansion::ForEach` (below) | fork: `label`, `node`, `kv`, `nodes`, `source`, `inline`; branch: `label`, `node`, `fork`, `index`, `item`, `for_each`, `max_parallel`, `child_digest`, `target_kind`, `kv`, `nodes`, `generation` |
 | `tripleoctagon` fan-in | `attractor/fan_in`, `join: all`; publishes `parallel.results` and `parallel.branch_count`; its output is the ordered branch results | |
 | `tripleoctagon` fan-in with a `prompt` | `attractor/prompt`, `join: all`: the ordered barrier, the same `parallel.results` publication, then one model call over the branch results (`sources`, `branch_results`) | |
@@ -95,7 +95,15 @@ a warning; the importing workflow's stylesheet governs.
 | `circle`, `doublecircle`, other shapes | `attractor/agent`, with an `attractor.unknown_shape` warning | |
 
 Every node's `meta` carries `label`, `shape`, `kind`, `classes`, `span`, and
-`model` / `provider` / `reasoning_effort` when set. Every step config carries
+`model` / `provider` / `reasoning_effort` when set; a command node's `meta`
+also carries `script`, the text the step runs (the same value as its
+config's), and every node with outgoing edges carries `edges`, one entry per
+routing arm keyed by the arm's edge id (the id a `route.applied` record
+names): `{ to, label, condition }`, the target node name, the edge's `label`
+(null without one) and its `condition` as written, trimmed (absent on an
+unconditional edge). A host that shows a stage's script or the condition a
+routing decision matched reads both off `subject.node.meta`
+(`crates/core/execution/EVENTS.md`, "Source metadata"). Every step config carries
 `kv` (the run context at spawn) and `on_failure`; a node whose `on_failure` is
 `succeed` or `partially_succeed` also carries `routes`, its explicit routes
 (condition texts, label keys, unconditional targets) for the promotion check
@@ -391,7 +399,17 @@ the coordinator registers `attractor_steps::workflow::ChildInvoker`.
   reads the last JSON object of the output as the routing directive
   (`outcome`, `preferred_next_label`, `suggested_next_ids`, `context_updates`,
   `failure_reason`). Output above 100 KiB leaves the record for the output
-  store (below); the in-memory cap is 8 MiB.
+  store (below); the in-memory cap is 8 MiB. No output byte is lost
+  silently: a line up to 1 MiB (the executor's line cap,
+  `executor::lines::LINE_CAP`) reaches the step whole, so a long line takes
+  the output to the store whole; a longer line is cut at the cap and ends
+  with ` …[line truncated: N bytes dropped]`; the in-memory cap discards
+  the front of the output behind `… [output truncated]`. Every byte either
+  cap discarded is counted on the attempt's metrics as
+  `output.dropped_bytes`, with `output.truncated_lines` for the lines the
+  line cap cut, both present only when not zero; a capture that ended on
+  silence after the script was gone records `output.incomplete: true`
+  beside its marker, since nobody counted that loss.
 - **`attractor/prompt`** is one model call through the application's `lithos-llm`
   client (the `PebbleClient` capability), with no tools and no coding-agent
   loop: the goal, the preamble of earlier stages at the node's resolved
@@ -465,6 +483,16 @@ the coordinator registers `attractor_steps::workflow::ChildInvoker`.
   the wait was cancelled) fails the gate closed with class `interrupted`. A
   delivered steer (`{"$steer": ...}`) is not an answer: the gate ignores it
   and keeps its question open.
+  - What a host shows beside the question. Each choice carries its edge's
+    `human.description` (what choosing it means) and `human.preview` (a
+    sample of what it would do) as the option's `description` and `preview`;
+    both are Petri extensions to the edge attributes, optional, and a blank
+    value is the same as none. The question's `context` is the previous
+    stage's response (`response.<last_stage>`, trimmed, when `last_stage`
+    names a stage whose response has text), as Fabro's gate shows it; an
+    offloaded response shows as its reference text. A native agent's
+    question carries Pebble's own option descriptions and previews the same
+    way and no context.
   - `timeout` is the answer deadline. An unanswered question expires in the
     step, which reports the expiry on its progress channel first
     (`parsed.expired` on the `step.progress.recorded` event, `timed_out` with the default
@@ -806,6 +834,25 @@ secret masker applies before forwarding. These events use Petri's existing
 log pipeline. A successful node's session is retained in memory for the run
 by thread ("Fidelity and threads"); nothing is checkpointed, so a resumed run
 starts every thread again.
+
+Pebble puts no event on its stream that lists a session's tools, so the
+backend records the list itself, once per session, as `StepEvent::Custom`
+with `kind = "attractor.tools"`: `{ kind, node, firing, attempt, session,
+tools }`, where `tools` is one entry per tool the model was offered, in
+Pebble's order (by name): `{ name, description, source, category }`. `name`
+and `description` are what the model sees; `source` is Pebble's
+`ToolSource` as it reports it (`{"kind": "native"}`, `{"kind":
+"application"}`, `{"kind": "mcp", "server_name", "original_name"}`,
+`{"kind": "skill"}`); `category` is Petri's grouping: `builtin` (Pebble's
+own tools and a skill's), `mcp`, `subagent` (`spawn_agent`, `send_input`,
+`wait`, `close_agent`), `host` (a `HostTools` tool), `question` (the
+question tool). The node's own session is listed once the agent is built,
+from Pebble's snapshot, before the first prompt; each child session is
+listed right after its `SessionStarted` envelope, with the tools Pebble's
+inheritance gives a child, as Petri reads that rule: every built-in, skill
+and MCP tool, a host tool the host marked `allow_in_subagents`, never the
+question tool. A node that continues a retained thread opens a session of
+its own and lists it again under the new node.
 
 The session's question tool (`request_user_input` for GPT-5.6 and GPT-6,
 `AskUserQuestion` for Claude) reaches the same interviewer a human gate does.

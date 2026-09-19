@@ -36,8 +36,27 @@ pub const INTERRUPT_KEY: &str = "$interrupt";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuestionOption {
     /// The shortcut a person types.
-    pub key:   String,
-    pub label: String,
+    pub key:         String,
+    pub label:       String,
+    /// What choosing the option means, when the label is not enough.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// A sample of what the option would do or produce, for a host that
+    /// can show one beside the label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview:     Option<String>,
+}
+
+impl QuestionOption {
+    /// An option with a key and a label, and nothing else.
+    pub fn new(key: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            key:         key.into(),
+            label:       label.into(),
+            description: None,
+            preview:     None,
+        }
+    }
 }
 
 /// Something a person should look at before answering: a review document,
@@ -80,6 +99,11 @@ pub struct Question {
     /// step owns the expiry; a host shows the deadline so a person knows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// What a person should read beside the question before answering: the
+    /// text the asking step chose as the question's context (a human gate
+    /// shows the previous stage's response, as Fabro's gate does).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context:    Option<String>,
 }
 
 impl Question {
@@ -95,6 +119,7 @@ impl Question {
             kind:       None,
             reference:  None,
             timeout_ms: None,
+            context:    None,
         }
     }
 
@@ -320,22 +345,47 @@ mod tests {
         let question = Question {
             id:         "q1".into(),
             text:       "Ship?".into(),
-            options:    vec![QuestionOption {
-                key:   "Y".into(),
-                label: "[Y] Yes".into(),
-            }],
+            options:    vec![
+                QuestionOption {
+                    key:         "Y".into(),
+                    label:       "[Y] Yes".into(),
+                    description: Some("Merge and deploy".into()),
+                    preview:     Some("deploy --prod".into()),
+                },
+                QuestionOption::new("N", "[N] No"),
+            ],
             default:    Some("Y".into()),
             freeform:   false,
             sensitive:  false,
             kind:       Some("yes_no".into()),
             reference:  None,
             timeout_ms: None,
+            context:    Some("The diff summary".into()),
         };
         assert_eq!(
             Question::from_event(&question.to_event()),
             Some(question.clone())
         );
         assert_eq!(question.secret_name(), "answer:q1");
+        // The optional fields are absent from the wire when unset, so a
+        // host reading an older question sees the same shape.
+        let StepEvent::Custom(value) = question.to_event() else {
+            panic!("custom");
+        };
+        assert_eq!(
+            value[QUESTION_KEY]["options"][1],
+            json!({ "key": "N", "label": "[N] No" })
+        );
+        assert_eq!(
+            value[QUESTION_KEY]["options"][0]["preview"],
+            json!("deploy --prod")
+        );
+        assert_eq!(value[QUESTION_KEY]["context"], json!("The diff summary"));
+        let bare = Question::new("q2", "Plain?");
+        let StepEvent::Custom(value) = bare.to_event() else {
+            panic!("custom");
+        };
+        assert!(value[QUESTION_KEY].get("context").is_none());
         assert_eq!(
             Question::from_event(&StepEvent::Custom(json!({"other": 1}))),
             None

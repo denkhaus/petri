@@ -22,9 +22,10 @@
 //! Pebble knows: routes, MCP servers and their calls, tools, usage. The sink
 //! restates none of it as a Petri event; it emits a `StepEvent::Custom` only
 //! for a fact Pebble cannot know (a server never named to it,
-//! [`mcp::UNAVAILABLE_EVENT`]; the skill directories' conventions), and puts
-//! two of Pebble's facts on the node's stderr for the terminal: a fallback
-//! move and a server that did not start.
+//! [`mcp::UNAVAILABLE_EVENT`]; the skill directories' conventions) or puts
+//! on no event of its own (the tools a session has, [`tools::EVENT`], once
+//! per session), and puts two of Pebble's facts on the node's stderr for
+//! the terminal: a fallback move and a server that did not start.
 //!
 //! Text a host delivers to the node (`Control::Deliver`) that is not an
 //! answer to the agent's question is a follow-up: it runs as its own user
@@ -45,11 +46,12 @@
 pub mod environment;
 pub mod mcp;
 pub mod questions;
+pub mod tools;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::error::Error;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use environment::{PebbleEnvironment, ScopePortRoutes, elapsed_ms};
@@ -241,6 +243,9 @@ impl NativeSession {
         // hooks and on the same event stream.
         let host_tools = host_tools::for_node(ctx)
             .map_err(|failure| AgentError::failed(failure.class.as_str(), failure.message))?;
+        // Which host tools a child may inherit, read before the builder
+        // takes them: the tools event names them for each child session.
+        let inheritable_hosts = tools::inheritable_host_tools(&host_tools);
         let cancel = CancellationToken::new();
         let kill = CancellationToken::new();
         let guard = cancel.clone().drop_guard();
@@ -257,6 +262,7 @@ impl NativeSession {
             node:       ctx.node.clone(),
             skills:     skill_labels,
             compaction: compaction_accounting.clone(),
+            tools:      Mutex::new(Vec::new()),
         });
         // The plan's remaining routes, for Pebble to fail over to in order,
         // each with its own controls; an export starts with none of its own.
@@ -372,6 +378,15 @@ impl NativeSession {
             }
         };
         questions.set_session(agent.snapshot().session_id());
+        // The session's tools, once, now that Pebble has registered them
+        // all; the sink keeps the list for the children Pebble builds from
+        // it. A send that fails here means the driver stopped taking this
+        // attempt's progress; the first prompt reports that.
+        let session_tools = tools::of_session(agent.snapshot().tools(), &inheritable_hosts);
+        let _ = events
+            .tools(agent.snapshot().session_id(), &session_tools)
+            .await;
+        events.set_tools(session_tools);
         let mut session = Self {
             compaction: compaction_accounting,
             agent,
@@ -639,11 +654,13 @@ impl Redactor for PetriRedactor {
 /// `(stream_id, seq)` in the nested envelope is the idempotency key.
 ///
 /// Beside the envelope, the sink emits Petri's own events only for what
-/// Pebble cannot know: the conventions behind the skill directories Pebble
-/// reports having searched, a server never named to Pebble because its
-/// secret is unavailable ([`PetriEvents::unavailable`]), and the node and
-/// attempt a completed compaction of the session belongs to
+/// Pebble cannot know or puts on no event: the conventions behind the skill
+/// directories Pebble reports having searched, a server never named to
+/// Pebble because its secret is unavailable ([`PetriEvents::unavailable`]),
+/// the node and attempt a completed compaction of the session belongs to
 /// ([`compaction::EVENT`], folded from Pebble's `CompactionCompleted` as it
+/// is recorded), and the tools a session has ([`tools::EVENT`]: the node's
+/// own session once it is built, each child session as its `SessionStarted`
 /// is recorded). Two of Pebble's facts also go to the node's stderr, for
 /// the terminal: a fallback move and a server that did not start
 /// ([`stderr_line`]).
@@ -658,9 +675,46 @@ struct PetriEvents {
     skills:     skills::Labels,
     /// The session's own compactions, folded as Pebble reports them.
     compaction: Arc<compaction::Accounting>,
+    /// The node's session's tools, set once the agent is built; what each
+    /// child session's list is derived from.
+    tools:      Mutex<Vec<tools::Tool>>,
 }
 
 impl PetriEvents {
+    /// The session's tool list, kept for the children built from it.
+    fn set_tools(&self, list: Vec<tools::Tool>) {
+        *self.tools.lock().unwrap_or_else(PoisonError::into_inner) = list;
+    }
+
+    /// The [`tools::EVENT`] payload for `session`, acknowledged.
+    async fn tools(&self, session: &str, list: &[tools::Tool]) -> Result<(), ProgressError> {
+        self.sender
+            .send_acked(StepEvent::Custom(self.masker.mask_value(&json!({
+                "kind": tools::EVENT,
+                "node": self.node,
+                "firing": self.firing,
+                "attempt": self.attempt,
+                "session": session,
+                "tools": list,
+            }))))
+            .await
+    }
+
+    /// A child session Pebble just started: its tools are the ones it
+    /// inherits from this node's session.
+    async fn child_started(&self, event: &CodingAgentEvent) -> Result<(), EventSinkError> {
+        if event.parent_session_id.is_none()
+            || !matches!(event.event, CodingEvent::SessionStarted { .. })
+        {
+            return Ok(());
+        }
+        let inherited =
+            tools::inherited(&self.tools.lock().unwrap_or_else(PoisonError::into_inner));
+        self.tools(&event.session_id, &inherited)
+            .await
+            .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))
+    }
+
     /// A server Petri never named to Pebble because a secret its entry
     /// needs is unavailable: the line on the node's stderr, then
     /// [`mcp::UNAVAILABLE_EVENT`], both acknowledged.
@@ -746,6 +800,9 @@ impl EventSink for PetriEvents {
                 .await
                 .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))?;
         }
+        // A child's tools, right after the child's own start: the envelope
+        // above is Pebble's record of the session, this is what it can call.
+        self.child_started(event).await?;
         // The directories Pebble searched are Petri's record, with the
         // convention behind each; a skipped file or directory is Pebble's
         // report and the diagnostic is Petri's.
