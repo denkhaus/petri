@@ -26,6 +26,6 @@ pub use process::{
 };
 pub use progress::{Progress, ProgressAck, ProgressError, ProgressSender};
 pub use question::{
-    ANSWER_KEY, ANSWER_SECRET_PREFIX, Answer, EXPIRED_KEY, QUESTION_KEY, Question, QuestionExpired,
-    QuestionOption, QuestionReference, STEER_KEY, Steer,
+    ANSWER_KEY, ANSWER_SECRET_PREFIX, Answer, EXPIRED_KEY, INTERRUPT_KEY, Interrupt, QUESTION_KEY,
+    Question, QuestionExpired, QuestionOption, QuestionReference, STEER_KEY, Steer,
 };

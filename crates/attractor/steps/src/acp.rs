@@ -9,6 +9,14 @@
 //! and the transport is Petri's [`ProcessHandle`] rather than a socket the
 //! crate owns.
 //!
+//! A host's interrupt (`Interrupt` under `$interrupt`) is `session/cancel`
+//! without ending the process: the agent answers the prompt in flight with
+//! stop reason `cancelled`, the client reports [`INTERRUPTED_EVENT`], and the
+//! session's next prompt is the interrupt's `steer` text, else the next text
+//! the host delivers. An interrupted turn's partial text is not the stage's
+//! answer. Cancellation (a `Cancel` or `Kill` control, a closed channel) is
+//! the same notification followed by stopping the process.
+//!
 //! Tool hooks are best effort here. ACP exposes one tool boundary Petri can
 //! act on: `session/request_permission`, which the agent sends only for
 //! calls it chooses to ask about. A `pre_tool_use` hook runs there, and a
@@ -32,11 +40,12 @@ use runtime::driver::FiringView;
 use serde::Deserialize;
 use serde_json::json;
 use smol_str::SmolStr;
-use steps::{Answer, ProgressSender, Steer};
+use steps::{Answer, Interrupt, ProgressSender, Steer};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc;
 use tokio::time;
 
+use crate::agent::INTERRUPTED_EVENT;
 use crate::hooks::{ToolPayload, WARNING_EVENT, record_report, warning_event};
 
 /// The backend name in hook warnings.
@@ -291,12 +300,22 @@ pub struct Turn {
     pub text: String,
 }
 
+/// The stage a client serves, for the events it reports in Petri's own
+/// vocabulary.
+#[derive(Clone, Debug)]
+pub struct Stage {
+    pub node:    SmolStr,
+    pub firing:  FiringId,
+    pub attempt: Attempt,
+}
+
 /// One live connection to an agent process.
 pub struct Client {
     handle:     Box<dyn ProcessHandle>,
     stdin:      StdinWriter,
     lines:      LineStream,
     logs:       ProgressSender,
+    stage:      Stage,
     next_id:    u64,
     session_id: Option<String>,
     exited:     bool,
@@ -327,6 +346,7 @@ impl Client {
         env: &dyn executor::ExecEnv,
         command: &AgentCommand,
         logs: ProgressSender,
+        stage: Stage,
     ) -> Result<Self, AcpError> {
         let mut handle = env.spawn(command.spec()).await.map_err(|e| {
             AcpError::ProcessExited(format!(": could not start `{}`: {e}", command.program))
@@ -342,6 +362,7 @@ impl Client {
             stdin,
             lines,
             logs,
+            stage,
             next_id: 1,
             session_id: None,
             exited: false,
@@ -632,8 +653,10 @@ impl Client {
     }
 
     /// One prompt turn. `control` delivers steering (`Deliver` text is queued
-    /// and sent as a follow-up prompt when the turn ends) and cancellation
-    /// (`session/cancel`, then the process is stopped).
+    /// and sent as a follow-up prompt when the turn ends), an interrupt
+    /// (`session/cancel`; the turn ends with `cancelled` and the session
+    /// continues with its next input) and cancellation (`session/cancel`,
+    /// then the process is stopped).
     pub async fn prompt(
         &mut self,
         text: &str,
@@ -656,6 +679,9 @@ impl Client {
                     }),
                 )
                 .await?;
+            // Whether the host interrupted this prompt: its `cancelled` stop
+            // reason is then the interrupt landing, not a cancellation.
+            let mut interrupted = false;
             let stop_reason = loop {
                 tokio::select! {
                     message = self.receive() => match message? {
@@ -679,7 +705,15 @@ impl Client {
                     },
                     ctl = control.recv() => {
                         if let Some(Control::Deliver(value)) = ctl {
-                            if let Some(text) = steer_text(&value) {
+                            if let Some(interrupt) = Interrupt::from_value(&value) {
+                                if let Some(text) = interrupt.steer {
+                                    pending.push_back(text);
+                                }
+                                if !interrupted {
+                                    interrupted = true;
+                                    self.notify("session/cancel", json!({ "sessionId": session })).await?;
+                                }
+                            } else if let Some(text) = steer_text(&value) {
                                 pending.push_back(text);
                             }
                         } else {
@@ -691,11 +725,45 @@ impl Client {
             };
             match stop_reason.as_str() {
                 "end_turn" | "refusal" => {}
+                "cancelled" if interrupted => {
+                    // The interrupted turn produced no answer; what it said
+                    // so far is not the stage's text.
+                    turn.text.clear();
+                    interrupted_event(&self.logs, &self.stage, &session).await;
+                    if pending.is_empty() {
+                        pending.push_back(self.next_input(control, &session, grace).await?);
+                    }
+                }
                 "cancelled" => return Err(AcpError::Cancelled),
                 other => return Err(AcpError::StopReason(other.to_string())),
             }
         }
         Ok(turn)
+    }
+
+    /// After a plain interrupt: wait for the next text the host delivers,
+    /// which is the session's next prompt. A further interrupt carrying text
+    /// supplies it too; one without has nothing to stop. Anything else on
+    /// the channel cancels.
+    async fn next_input(
+        &mut self,
+        control: &mut mpsc::Receiver<Control>,
+        session: &str,
+        grace: Duration,
+    ) -> Result<String, AcpError> {
+        loop {
+            let Some(Control::Deliver(value)) = control.recv().await else {
+                self.cancel(session, grace).await;
+                return Err(AcpError::Cancelled);
+            };
+            let text = match Interrupt::from_value(&value) {
+                Some(interrupt) => interrupt.steer,
+                None => steer_text(&value),
+            };
+            if let Some(text) = text {
+                return Ok(text);
+            }
+        }
     }
 
     /// `session/cancel`, a grace period for the agent to wind down, then the
@@ -729,7 +797,20 @@ impl Client {
     }
 }
 
-/// The text a delivered steering value carries: a string, or `{ "text": … }`.
+/// The stage's report that a host's interrupt stopped its turn.
+async fn interrupted_event(logs: &ProgressSender, stage: &Stage, session: &str) {
+    let _ = logs
+        .send(StepEvent::Custom(json!({
+            "kind": INTERRUPTED_EVENT,
+            "node": stage.node,
+            "firing": stage.firing,
+            "attempt": stage.attempt,
+            "backend": BACKEND,
+            "session": session,
+        })))
+        .await;
+}
+
 /// The guidance a delivered value carries: a core [`Steer`], or the older
 /// answer-shaped spelling (a bare string, or `text`/`choice` fields).
 fn steer_text(value: &Value) -> Option<String> {

@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use super::AgentConfig;
-use crate::acp::{AcpError, AcpHooks, Client};
+use crate::acp::{AcpError, AcpHooks, Client, Stage};
 use crate::fallback::{ModelFailure, Plan};
 use crate::hooks::step_view;
 use crate::pebble::{NativeSession, Resume};
@@ -101,7 +101,12 @@ impl Session {
                 {
                     tracing::warn!(node = %config.node, "the ACP command owns model selection; model, provider and reasoning_effort are observer metadata");
                 }
-                let mut client = Client::spawn(ctx.env.as_ref(), &command, ctx.logs.clone())
+                let stage = Stage {
+                    node:    ctx.node.clone(),
+                    firing:  ctx.firing,
+                    attempt: ctx.attempt,
+                };
+                let mut client = Client::spawn(ctx.env.as_ref(), &command, ctx.logs.clone(), stage)
                     .await
                     .map_err(|e| AgentError::failed("spawn_failed", e.to_string()))?;
                 // The hook service is asked at the one boundary ACP has (a

@@ -1,12 +1,15 @@
 //! Run controls a host drives while a run is live: pause and unpause at node
-//! admission, steering into an active stage, and cancellation.
+//! admission, steering into an active stage, interrupting an agent's model
+//! turn, and cancellation.
 //!
 //! One [`ControlService`] serves the terminal (`petri run --control <path>`)
 //! and an embedded host alike. It is built from pieces that already exist:
 //! the coordinator's handle (cancellation and delivery), the driver's awaited
-//! [`ExecutionHooks::before_attempt`] admission point (the pause), and an
+//! [`ExecutionHooks::before_attempt`] admission point (the pause), an
 //! [`ExecutionObserver`] that keeps the live firing of each node so a steer
-//! can name a stage instead of a firing.
+//! can name a stage instead of a firing, and the [`LiveTurns`] capability
+//! an agent step marks while one of its model turns runs, so an interrupt
+//! knows whether there is a turn to stop.
 //!
 //! # Pause
 //!
@@ -35,8 +38,22 @@
 //! answer: a human gate ignores it and keeps its question open, and an agent
 //! step queues it as guidance for its session. Control input therefore cannot
 //! consume a pending question's answer.
+//!
+//! # Interrupting
+//!
+//! An interrupt is an [`Interrupt`] payload delivered to a live firing whose
+//! agent stage has a model turn in flight. The stage stops the turn (the
+//! model request and the tool calls it is running), keeps its session, and
+//! continues with its next input: the `steer` text given with the interrupt,
+//! else the next text delivered to the stage. A stage with no turn in flight
+//! (a human gate, a command, an agent between turns) refuses it with
+//! [`ControlError::NoLiveTurn`]; so does a backend that cannot stop a turn,
+//! because it never marks one live. The check reads [`LiveTurns`], which the
+//! host installs as a capability ([`ControlService::turns`]) beside the
+//! service's hooks; without it no turn is ever live and every interrupt is
+//! refused.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use driver::lifecycle::{
@@ -47,7 +64,7 @@ use driver::lifecycle::{
 use engine::{EngineState, Event, EventRecord};
 use ir::FiringId;
 use smol_str::SmolStr;
-use steps::Steer;
+use steps::{Interrupt, Steer};
 use tokio::sync::watch;
 
 use crate::{
@@ -176,14 +193,65 @@ pub enum ControlError {
     NoSuchStage(String),
     #[error("the stage is no longer live")]
     NotLive,
+    /// The stage has no model turn in flight to interrupt: it is not an
+    /// agent, its agent is between turns, or its backend cannot stop one.
+    #[error("the stage has no model turn to interrupt")]
+    NoLiveTurn,
     #[error("the run has finished")]
     Finished,
+}
+
+/// The model turns in flight, by execution and firing: what an interrupt can
+/// reach. An agent step holds a [`LiveTurn`] from [`LiveTurns::begin`] while
+/// a turn runs; the guard's drop ends the mark. Installed on the runtime as a
+/// capability so the step finds it; clones share one set.
+#[derive(Clone, Default)]
+pub struct LiveTurns {
+    turns: Arc<Mutex<BTreeSet<(ExecutionId, FiringId)>>>,
+}
+
+impl LiveTurns {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn set(&self) -> MutexGuard<'_, BTreeSet<(ExecutionId, FiringId)>> {
+        self.turns.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Mark a turn of `firing` live until the guard drops.
+    pub fn begin(&self, execution: ExecutionId, firing: FiringId) -> LiveTurn {
+        self.set().insert((execution, firing));
+        LiveTurn {
+            turns: self.clone(),
+            key:   (execution, firing),
+        }
+    }
+
+    /// Whether `firing` has a turn in flight.
+    pub fn is_live(&self, execution: ExecutionId, firing: FiringId) -> bool {
+        self.set().contains(&(execution, firing))
+    }
+}
+
+/// A turn marked live; dropping it ends the mark.
+#[must_use = "the turn is live only while the guard is held"]
+pub struct LiveTurn {
+    turns: LiveTurns,
+    key:   (ExecutionId, FiringId),
+}
+
+impl Drop for LiveTurn {
+    fn drop(&mut self) {
+        self.turns.set().remove(&self.key);
+    }
 }
 
 struct Inner {
     paused: watch::Sender<bool>,
     handle: Mutex<Option<CoordinatorHandle>>,
     live:   Mutex<Live>,
+    turns:  LiveTurns,
 }
 
 impl Inner {
@@ -193,9 +261,9 @@ impl Inner {
 }
 
 /// The one control service. Construct before the run, install its
-/// [`hooks`](Self::hooks) on the runtime, observe a clone, [`wire`](Self::wire)
-/// the handle once the coordinator exists, then drive it from wherever
-/// controls come from.
+/// [`hooks`](Self::hooks) and its [`turns`](Self::turns) on the runtime,
+/// observe a clone, [`wire`](Self::wire) the handle once the coordinator
+/// exists, then drive it from wherever controls come from.
 #[derive(Clone)]
 pub struct ControlService {
     inner: Arc<Inner>,
@@ -215,8 +283,16 @@ impl ControlService {
                 paused,
                 handle: Mutex::new(None),
                 live: Mutex::new(Live::default()),
+                turns: LiveTurns::new(),
             }),
         }
+    }
+
+    /// The live-turn set the agent step marks, for the runtime's
+    /// capabilities (`Runtime::capability`). Without it installed, no turn
+    /// is ever live and `interrupt` refuses every stage.
+    pub fn turns(&self) -> LiveTurns {
+        self.inner.turns.clone()
     }
 
     /// The execution hooks that enforce pauses at `before_attempt`, over the
@@ -319,6 +395,54 @@ impl ControlService {
         let handle = self.handle()?;
         match handle
             .deliver(execution, firing, Steer::new(text).to_control())
+            .await
+        {
+            driver::DeliverDisposition::Delivered => Ok(()),
+            driver::DeliverDisposition::NotLive => Err(ControlError::NotLive),
+        }
+    }
+
+    /// Stop the named stage's current model turn and keep its session; the
+    /// next text delivered to the stage is its next input.
+    pub async fn interrupt(&self, node: &str) -> Result<(), ControlError> {
+        let stage = self
+            .stage(node)
+            .ok_or_else(|| ControlError::NoSuchStage(node.to_owned()))?;
+        self.interrupt_firing(stage.execution, stage.firing, Interrupt::new())
+            .await
+    }
+
+    /// Stop the named stage's current model turn and make `text` its next
+    /// input, in one control.
+    pub async fn interrupt_and_steer(
+        &self,
+        node: &str,
+        text: impl Into<String>,
+    ) -> Result<(), ControlError> {
+        let stage = self
+            .stage(node)
+            .ok_or_else(|| ControlError::NoSuchStage(node.to_owned()))?;
+        self.interrupt_firing(stage.execution, stage.firing, Interrupt::and_steer(text))
+            .await
+    }
+
+    /// Deliver an interrupt to one firing. Refused with
+    /// [`ControlError::NoLiveTurn`] when the firing has no model turn in
+    /// flight; a turn that ends between the check and the delivery receives
+    /// the control anyway, and the stage treats the steer text, if any, as
+    /// ordinary guidance.
+    pub async fn interrupt_firing(
+        &self,
+        execution: ExecutionId,
+        firing: FiringId,
+        interrupt: Interrupt,
+    ) -> Result<(), ControlError> {
+        let handle = self.handle()?;
+        if !self.inner.turns.is_live(execution, firing) {
+            return Err(ControlError::NoLiveTurn);
+        }
+        match handle
+            .deliver(execution, firing, interrupt.to_control())
             .await
         {
             driver::DeliverDisposition::Delivered => Ok(()),

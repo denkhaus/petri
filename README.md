@@ -144,6 +144,7 @@ crates/petri/cli/tests/fabro_differential.rs black box phase 5: every scenario t
 crates/fabro/acceptance/tests/reference_version.rs  every oracle fixture, scenario reference, decision record, staged bundle and evidence record names the pinned Fabro revision
 crates/petri/lib/tests/interview.rs          the interview dispatcher on the standalone host: parallel gates, sensitive masking, a failing interviewer, cancellation, occurrence across a loop, nested invocation paths, the re-ask, expiry
 crates/petri/lib/tests/controls.rs           readiness item 6: the circuit breaker across restarts and resume, node visit totals across `loop_restart`, the stall watchdog, pause, cancel while paused, steering; the durable pause (a pause survives a dropped coordinator and holds admission on resume until an unpause; a paused resumed run can be cancelled)
+crates/petri/lib/tests/interrupt.rs          the interrupt control: an interrupt with text during a native tool call ends the turn, keeps the session, and the text opens the next turn; a plain interrupt parks the turn until the next steer; a gate with no turn refuses it by name; the ACP backend's `session/cancel` without ending the agent
 crates/core/driver/tests/interview_budget.rs readiness item 6 on a controlled clock: own-stage and sibling waits, overlapping questions, active work after a wait, handler-managed nodes, cancellation during a wait, a fresh budget on redispatch
 crates/petri/lib/tests/embedding.rs          readiness item 7: a Fabro workflow without adapters, then with fake adapters (pause, skip, block, prepared results, route override, fatal and best-effort transitions, a hook service); the timeline reconstructed from public events; slow, failing and recovering consumers
 crates/attractor/steps/tests/steps.rs            Fabro plan §5.2, §6: command, wait, human answered through deliver; Fabro's failure promotion; output references above 100 KiB
@@ -1120,11 +1121,16 @@ answering: a control line (below) never consumes a pending question's answer.
 live, one per appended line: `pause` holds every attempt not yet admitted
 (running work continues, and Ctrl-C still cancels), `unpause` releases them,
 `steer <node> <text>` delivers guidance to the named stage's live firing (an
-agent queues it for its session; a human gate ignores it), and `cancel`
-cancels the run (a second `cancel` reaches the kill tier). Each line's effect
-is reported as `control: ...` on stderr; a line that is not a command or names
-a stage that is not running is reported and skipped. An embedded host drives
-the same `execution::controls::ControlService`.
+agent queues it for its session; a human gate ignores it), `interrupt <node>
+[text]` stops the named agent stage's current model turn and keeps its
+session (the text, else the next `steer`, is the stage's next input; a stage
+with no turn in flight refuses it), and `cancel` cancels the run (a second
+`cancel` reaches the kill tier). Each line's effect is reported as
+`control: ...` on stderr; a line that is not a command, names a stage that is
+not running, or interrupts a stage with no model turn is reported and
+skipped. An embedded host drives the same
+`execution::controls::ControlService`, installing its live-turn set as a
+capability so `interrupt` can find a turn.
 
 The pause is durable. Each `pause` and `unpause` is a coordinator record
 (`RunPaused`, `RunUnpaused`), so `petri inspect` reports `paused` and a resume

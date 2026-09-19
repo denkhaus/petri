@@ -8,6 +8,10 @@
 //! sensitive answer crosses as a `{"$secret": "answer:<id>"}` reference the
 //! answerer registered on the run's secret provider first, so the value is
 //! maskable and never enters the log.
+//!
+//! Two other payloads ride the same control: a [`Steer`], guidance for an
+//! agent's session, and an [`Interrupt`], which stops an agent's current
+//! model turn. Neither is ever read as an answer.
 
 use ir::{Control, StepEvent, Value};
 use serde::{Deserialize, Serialize};
@@ -25,6 +29,9 @@ pub const ANSWER_SECRET_PREFIX: &str = "answer:";
 /// steer is never an answer: a step waiting on a question ignores it, and an
 /// agent step queues it as guidance for its session.
 pub const STEER_KEY: &str = "$steer";
+/// The key an interrupt rides under in a `Control::Deliver` value. Like a
+/// steer, an interrupt is never an answer.
+pub const INTERRUPT_KEY: &str = "$interrupt";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuestionOption {
@@ -164,6 +171,42 @@ impl Steer {
     }
 }
 
+/// A host stops a running agent stage's current model turn: the request in
+/// flight and the tool calls it is running end, the session stays open, and
+/// the stage continues with its next input. `steer` is that input when the
+/// host gives it in the same control; without it the stage waits for the
+/// next delivered text. Not an answer to anything.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Interrupt {
+    /// The stage's next input, when the host names it with the interrupt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steer: Option<String>,
+}
+
+impl Interrupt {
+    /// Stop the turn; the next delivered text is the stage's next input.
+    pub fn new() -> Self {
+        Self { steer: None }
+    }
+
+    /// Stop the turn and make `text` the stage's next input.
+    pub fn and_steer(text: impl Into<String>) -> Self {
+        Self {
+            steer: Some(text.into()),
+        }
+    }
+
+    /// The control a host delivers.
+    pub fn to_control(&self) -> Control {
+        Control::Deliver(json!({ INTERRUPT_KEY: self }))
+    }
+
+    /// The interrupt a delivered value carries, if it is one.
+    pub fn from_value(value: &Value) -> Option<Self> {
+        serde_json::from_value(value.get(INTERRUPT_KEY)?.clone()).ok()
+    }
+}
+
 /// What a host delivers.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Answer {
@@ -251,7 +294,7 @@ impl Answer {
         if let Some(inner) = value.get(ANSWER_KEY) {
             return serde_json::from_value(inner.clone()).ok();
         }
-        if value.get(STEER_KEY).is_some() {
+        if value.get(STEER_KEY).is_some() || value.get(INTERRUPT_KEY).is_some() {
             return None;
         }
         match value {
@@ -381,5 +424,32 @@ mod tests {
         assert_eq!(Steer::from_value(&value), Some(steer));
         assert_eq!(Answer::from_value(&value), None);
         assert_eq!(Steer::from_value(&json!({ "text": "plain" })), None);
+    }
+
+    #[test]
+    fn an_interrupt_is_neither_an_answer_nor_a_steer() {
+        let plain = Interrupt::new();
+        let Control::Deliver(value) = plain.to_control() else {
+            panic!("deliver");
+        };
+        assert_eq!(value, json!({ INTERRUPT_KEY: {} }));
+        assert_eq!(Interrupt::from_value(&value), Some(plain));
+        assert_eq!(Answer::from_value(&value), None);
+        assert_eq!(Steer::from_value(&value), None);
+
+        let with_text = Interrupt::and_steer("stop and summarize");
+        let Control::Deliver(value) = with_text.to_control() else {
+            panic!("deliver");
+        };
+        assert_eq!(
+            value,
+            json!({ INTERRUPT_KEY: { "steer": "stop and summarize" } })
+        );
+        assert_eq!(Interrupt::from_value(&value), Some(with_text));
+        assert_eq!(Answer::from_value(&value), None);
+        assert_eq!(
+            Interrupt::from_value(&json!({ "$steer": { "text": "x" } })),
+            None
+        );
     }
 }

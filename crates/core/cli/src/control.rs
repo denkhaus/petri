@@ -9,11 +9,13 @@
 //! | `pause` | Hold every attempt not yet admitted. Running work continues. |
 //! | `unpause` | Release held and future attempts. |
 //! | `steer <node> <text…>` | Deliver guidance to the named stage's live firing. An agent queues it for its session; a human gate ignores it and keeps its question open. |
+//! | `interrupt <node> [text…]` | Stop the named agent stage's current model turn and keep its session. With text, the text is the stage's next input; without, the next `steer` to the stage is. A stage with no turn in flight refuses it. |
 //! | `cancel` | Cancel the run politely; a second `cancel` reaches the kill tier. |
 //!
 //! Blank lines and lines starting with `#` are ignored. A line that is not a
-//! command, or names a stage that is not running, is reported on stderr and
-//! skipped: control input never fails the run and never answers a question.
+//! command, names a stage that is not running, or interrupts a stage with no
+//! model turn, is reported on stderr and skipped: control input never fails
+//! the run and never answers a question.
 //! Answers travel through the interviewer (`--interactive`,
 //! `--interview-script`), so a control line cannot consume a pending answer.
 //!
@@ -49,7 +51,14 @@ pub enum TailFrom {
 pub enum ControlLine {
     Pause,
     Unpause,
-    Steer { node: String, text: String },
+    Steer {
+        node: String,
+        text: String,
+    },
+    Interrupt {
+        node:  String,
+        steer: Option<String>,
+    },
     Cancel,
 }
 
@@ -81,8 +90,20 @@ impl ControlLine {
                     text: text.to_owned(),
                 }))
             }
+            "interrupt" => {
+                let node = words
+                    .next()
+                    .filter(|node| !node.is_empty())
+                    .ok_or_else(|| "`interrupt` needs a stage name".to_owned())?;
+                let text = words.next().unwrap_or_default().trim();
+                Ok(Some(Self::Interrupt {
+                    node:  node.to_owned(),
+                    steer: (!text.is_empty()).then(|| text.to_owned()),
+                }))
+            }
             other => Err(format!(
-                "`{other}` is not a control; use pause, unpause, steer <node> <text>, or cancel"
+                "`{other}` is not a control; use pause, unpause, steer <node> <text>, interrupt \
+                 <node> [text], or cancel"
             )),
         }
     }
@@ -186,6 +207,10 @@ async fn apply(service: &ControlService, line: &str) {
             Ok(())
         }
         ControlLine::Steer { node, text } => service.steer(node, text.clone()).await,
+        ControlLine::Interrupt { node, steer } => match steer {
+            Some(text) => service.interrupt_and_steer(node, text.clone()).await,
+            None => service.interrupt(node).await,
+        },
         ControlLine::Cancel => service.cancel(),
     };
     match result {
@@ -193,12 +218,19 @@ async fn apply(service: &ControlService, line: &str) {
             ControlLine::Pause => eprintln!("control: paused"),
             ControlLine::Unpause => eprintln!("control: unpaused"),
             ControlLine::Steer { node, .. } => eprintln!("control: steered {node}"),
+            ControlLine::Interrupt { node, steer } => match steer {
+                Some(_) => eprintln!("control: interrupted {node}; the text is its next input"),
+                None => eprintln!("control: interrupted {node}; the next steer is its next input"),
+            },
             ControlLine::Cancel => eprintln!("control: cancel requested"),
         },
         Err(ControlError::NoSuchStage(node)) => {
             eprintln!("control: no stage named `{node}` is running");
         }
         Err(ControlError::NotLive) => eprintln!("control: the stage finished first"),
+        Err(ControlError::NoLiveTurn) => {
+            eprintln!("control: the stage has no model turn to interrupt");
+        }
         Err(ControlError::Finished) => eprintln!("control: the run has finished"),
     }
 }
@@ -222,9 +254,24 @@ mod tests {
                 text: "check the edge cases too".into(),
             }))
         );
+        assert_eq!(
+            ControlLine::parse("interrupt agent"),
+            Ok(Some(ControlLine::Interrupt {
+                node:  "agent".into(),
+                steer: None,
+            }))
+        );
+        assert_eq!(
+            ControlLine::parse("interrupt agent stop and summarize what you have"),
+            Ok(Some(ControlLine::Interrupt {
+                node:  "agent".into(),
+                steer: Some("stop and summarize what you have".into()),
+            }))
+        );
         assert_eq!(ControlLine::parse(""), Ok(None));
         assert_eq!(ControlLine::parse("# note"), Ok(None));
         assert!(ControlLine::parse("steer agent").is_err());
+        assert!(ControlLine::parse("interrupt").is_err());
         assert!(ControlLine::parse("dance").is_err());
     }
 }

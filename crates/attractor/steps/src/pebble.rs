@@ -32,6 +32,15 @@
 //! steering bus, one per node run: text that arrives before the session is
 //! built waits on the bus and reaches the session when it attaches, in the
 //! same mode.
+//!
+//! A host's interrupt (`Interrupt` under `$interrupt`) stops the current
+//! model turn through the same bus: the request in flight and the tool calls
+//! it is running are cancelled, Pebble publishes `RoundInterrupted`, and the
+//! session stays open. With `steer` text the interrupt and the text land in
+//! one step and the text opens the next turn. Without it the prompt parks at
+//! its next turn boundary, and the next text the host delivers is sent as
+//! steering, not as a follow-up, so it is what wakes the prompt. The node
+//! reports the stop as [`INTERRUPTED_EVENT`] beside Pebble's own event.
 
 pub mod environment;
 pub mod mcp;
@@ -54,20 +63,20 @@ use pebble_coding_agent::events::{
     AgentProfileKind, CodingAgentEvent, CodingEvent, EventSink, EventSinkError, PermissionLevel,
 };
 use pebble_coding_agent::extensions::Redactor;
-use pebble_coding_agent::steering::SteeringBus;
+use pebble_coding_agent::steering::{DroppedSteer, SteeringBus};
 use pebble_coding_agent::{
     CodingAgent, CodingAgentBuilder, CodingAgentExport, CodingAgentOptions, CodingInput,
-    MemoryDiscovery, PromptReport, ShutdownReason,
+    MemoryDiscovery, PromptReport, ShutdownReason, SteeringMessage,
 };
 use questions::AgentQuestions;
 use serde_json::json;
 use smol_str::SmolStr;
-use steps::{ProgressError, ProgressSender, Steer, StepCtx};
+use steps::{Interrupt, ProgressError, ProgressSender, Steer, StepCtx};
 use tokio::sync::mpsc;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
-use crate::agent::AgentConfig;
 use crate::agent::backend::AgentError;
+use crate::agent::{AgentConfig, INTERRUPTED_EVENT};
 use crate::compaction::{self, CompactionPolicyHandle};
 use crate::fallback::{self, Disposition, Plan};
 use crate::hooks::tools::ToolHooks;
@@ -342,7 +351,8 @@ impl NativeSession {
         };
         tokio::pin!(build);
         // Text delivered before the session exists waits on the bus, as a
-        // follow-up, and reaches the session when it attaches below.
+        // follow-up, and reaches the session when it attaches below. An
+        // interrupt finds no turn here: only the text it carries is kept.
         let steering = SteeringBus::new();
         let mut closed = false;
         let agent = loop {
@@ -351,7 +361,7 @@ impl NativeSession {
                 control = ctx.control.recv(), if !closed => {
                     match control {
                         Some(Control::Deliver(value)) if !cancel.is_cancelled() => {
-                            if !questions.answer(&value) && let Some(text) = steering_text(&value) { follow_up(&steering, text); }
+                            if !questions.answer(&value) && let Some(text) = delivered_text(&value) { follow_up(&steering, text); }
                         },
                         Some(Control::Kill) => { kill.cancel(); cancel.cancel(); },
                         Some(Control::Cancel) => cancel.cancel(),
@@ -421,12 +431,15 @@ impl NativeSession {
                 .prompt_with_cancellation(CodingInput::text(prompt), &cancel);
             tokio::pin!(prompt);
             let mut closed = false;
+            // A plain interrupt parked the prompt: the next delivered text
+            // is its next input and goes as steering.
+            let mut awaiting_input = false;
             loop {
                 tokio::select! {
                     biased;
                     message = control.recv(), if !closed => match message {
                         Some(Control::Deliver(value)) if !cancel.is_cancelled() => {
-                            if !questions.answer(&value) && let Some(text) = steering_text(&value) { follow_up(&self.steering, text); }
+                            if !questions.answer(&value) { deliver(&self.steering, &mut awaiting_input, &value); }
                         },
                         Some(Control::Kill) => { kill.cancel(); cancel.cancel(); },
                         Some(Control::Cancel) => cancel.cancel(),
@@ -545,16 +558,63 @@ fn steering_text(value: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The text a delivered value carries for the session, whatever the
+/// control: a steer's guidance, or the next input an interrupt names.
+fn delivered_text(value: &Value) -> Option<String> {
+    match Interrupt::from_value(value) {
+        Some(interrupt) => interrupt.steer,
+        None => steering_text(value),
+    }
+}
+
+/// Apply a delivered value that is not an answer while a prompt runs. An
+/// interrupt stops the round through the bus: with text, the text replaces
+/// the round in one step; without, the prompt parks and `awaiting_input` is
+/// set so the next text wakes it as steering. Any other text is a follow-up.
+fn deliver(bus: &SteeringBus<SmolStr>, awaiting_input: &mut bool, value: &Value) {
+    if let Some(interrupt) = Interrupt::from_value(value) {
+        if let Some(text) = interrupt.steer {
+            let message: SteeringMessage = text.into();
+            let done = bus.interrupt_then_steer(&message);
+            *awaiting_input = false;
+            tracing::info!(
+                sessions = done.interrupted.len(),
+                "model turn interrupted; the delivered text opens the next"
+            );
+            report_dropped(&done.dropped);
+        } else {
+            let done = bus.interrupt();
+            *awaiting_input = true;
+            tracing::info!(
+                sessions = done.interrupted.len(),
+                "model turn interrupted; the prompt waits for its next input"
+            );
+        }
+    } else if let Some(text) = steering_text(value) {
+        if *awaiting_input {
+            let delivery = bus.steer(text.into());
+            *awaiting_input = false;
+            report_dropped(&delivery.dropped);
+        } else {
+            follow_up(bus, text);
+        }
+    }
+}
+
 /// Queue delivered text on the node run's bus as a follow-up: on the
 /// attached session, to run as its own turn once the current answer is
 /// reached, or on the bus itself while no session is attached yet. A full
 /// queue evicts its oldest message; the bus reports what it dropped.
 fn follow_up(bus: &SteeringBus<SmolStr>, text: String) {
     let delivery = bus.follow_up(text.into());
-    if !delivery.dropped.is_empty() {
+    report_dropped(&delivery.dropped);
+}
+
+fn report_dropped(dropped: &[DroppedSteer<SmolStr>]) {
+    if !dropped.is_empty() {
         tracing::warn!(
-            dropped = delivery.dropped.len(),
-            "a follow-up queue was full; the oldest follow-up was dropped"
+            dropped = dropped.len(),
+            "a steering queue was full; its oldest message was dropped"
         );
     }
 }
@@ -665,6 +725,24 @@ impl EventSink for PetriEvents {
                     stream: LogStream::Stderr,
                     line:   self.masker.mask(&line),
                 })
+                .await
+                .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))?;
+        }
+        // The node's own turn was stopped by a host's interrupt: Pebble's
+        // fact is the envelope above, this is the node's report of it. A
+        // child session's interrupt is the child's.
+        if matches!(event.event, CodingEvent::RoundInterrupted { .. })
+            && event.parent_session_id.is_none()
+        {
+            self.sender
+                .send_acked(StepEvent::Custom(json!({
+                    "kind": INTERRUPTED_EVENT,
+                    "node": self.node,
+                    "firing": self.firing,
+                    "attempt": self.attempt,
+                    "backend": "api",
+                    "session": event.session_id,
+                })))
                 .await
                 .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))?;
         }
