@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::mem;
 
-use frontend::diag::{Diagnostic, Diagnostics, Lowered};
+use frontend::diag::{Diagnostics, Lowered};
 use frontend::{FileSource, graph_digest};
 use ir::{Graph, GraphBuilder, Value};
 
@@ -280,29 +280,11 @@ impl Lowering<'_, '_> {
         let mut graph = builder.build();
         graph.normalize_loop_heads();
         let report = ir::check(&graph);
-        for error in &report.errors {
-            let span = error
-                .primary_node()
-                .and_then(|node| self.spans.get(&node).cloned())
-                .unwrap_or_else(|| self.wf.span.clone());
-            let mut diagnostic = Diagnostic::error(error.code(), span, error.to_string());
-            if let Some(hint) = error.hint() {
-                diagnostic = diagnostic.with_hint(hint);
-            }
-            self.diags.push(diagnostic);
-        }
-        for warning in &report.warnings {
-            let span = self
-                .spans
-                .get(&warning.primary_node())
-                .cloned()
-                .unwrap_or_else(|| self.wf.span.clone());
-            let mut diagnostic = Diagnostic::warning(warning.code(), span, warning.to_string());
-            if let Some(hint) = warning.hint() {
-                diagnostic = diagnostic.with_hint(hint);
-            }
-            self.diags.push(diagnostic);
-        }
+        self.diags.extend_from_report(
+            &report,
+            |node| self.spans.get(&node).cloned(),
+            &self.wf.span,
+        );
         Lowered::from_parts(graph, self.diags)
     }
 }

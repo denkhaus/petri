@@ -193,29 +193,11 @@ pub fn lower(doc: &Document, diags: Diagnostics) -> Lowered {
     // Normalize, don't relax: `Quorum{1}` on a loop head becomes `Any`.
     graph.normalize_loop_heads();
     let report = ir::check(&graph);
-    for error in &report.errors {
-        let span = error
-            .primary_node()
-            .and_then(|node| ctx.spans.get(&node).cloned())
-            .unwrap_or_else(|| Span::file(doc.file()));
-        let mut d = frontend::Diagnostic::error(error.code(), span, error.to_string());
-        if let Some(hint) = error.hint() {
-            d = d.with_hint(hint);
-        }
-        ctx.diags.push(d);
-    }
-    for warning in &report.warnings {
-        let span = ctx
-            .spans
-            .get(&warning.primary_node())
-            .cloned()
-            .unwrap_or_else(|| Span::file(doc.file()));
-        let mut d = frontend::Diagnostic::warning(warning.code(), span, warning.to_string());
-        if let Some(hint) = warning.hint() {
-            d = d.with_hint(hint);
-        }
-        ctx.diags.push(d);
-    }
+    ctx.diags.extend_from_report(
+        &report,
+        |node| ctx.spans.get(&node).cloned(),
+        &Span::file(doc.file()),
+    );
     Lowered::from_parts(graph, ctx.diags)
 }
 

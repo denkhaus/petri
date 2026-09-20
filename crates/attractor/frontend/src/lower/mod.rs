@@ -6,52 +6,55 @@
 //! and finally the engine's own validation mapped back onto source spans.
 //! Every construct here lowers onto what the core has; nothing invents engine
 //! semantics.
+//!
+//! The context and the pipeline are here; each pass is a sibling file with
+//! its own `impl Ctx` block: `structure` checks the graph, `nodes` lowers
+//! each node's step, `nested` lowers a manager loop's child, `routing` and
+//! `parallel` wire the edges, and `loops` closes with the goal gate, back
+//! edges, joins and budgets.
 
 mod attrs;
 mod compaction;
 pub mod fallbacks;
 mod imports;
 mod lints;
+mod loops;
+mod nested;
+mod nodes;
 mod parallel;
 pub(crate) mod policy;
 mod promotion;
 mod routing;
 mod settings;
 pub mod skills;
+mod structure;
 pub mod subagents;
 mod threads;
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 pub use compaction::{CompactionSettings, DEFAULT_PRESERVE_TURNS, DEFAULT_THRESHOLD_PERCENT};
 use frontend::{CompileInputs, Diagnostic, Diagnostics, FileSource, Lowered, Span};
 pub use imports::IMPORT_ERROR;
-use ir::placeholder::{ADMISSION_HOOKS_BY_STEP, ADMISSION_HOOKS_META, EXPR_PLACEHOLDER_KEY};
-use ir::validate::loop_reachable;
-use ir::{
-    Budget, Completion, Edge, EdgeId, ExprId, GraphBuilder, JoinPolicy, NodeId, Routing, Scope,
-    ScopeId, StepRef,
-};
+use ir::placeholder::EXPR_PLACEHOLDER_KEY;
+use ir::{Completion, ExprId, GraphBuilder, NodeId, Scope, ScopeId, StepRef};
 pub use parallel::{BRANCH_META_KIND, DEFAULT_MAX_PARALLEL};
 pub use policy::MAX_INVOCATIONS;
 pub use promotion::ROUTES_KEY;
 pub use routing::{FailurePolicy, Policy};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 pub use settings::{
     CloneSettings, EnvValue, Environment, ModelDefaults, PREPARE_NODE_PREFIX, PrepareStep,
     RunSettings,
 };
 pub use skills::SkillSettings;
 use smol_str::SmolStr;
+use structure::Structure;
 
-use crate::kinds::{
-    AGENT_KIND, COMMAND_KIND, GOAL_CHECK_NODE, HUMAN_KIND, MAX_OUTPUT_RETRIES, PROMPT_KIND,
-    STAGE_KIND, WAIT_KIND, WORKFLOW_KIND,
-};
-use crate::model::{Attrs, EdgeDecl, NodeDecl, Workflow};
+use crate::model::{Attrs, NodeDecl, Workflow};
 use crate::template::{self, Context, TemplateError};
-use crate::{condition, dot, hooks, labels, model, stylesheet};
+use crate::{hooks, stylesheet};
 
 /// The hard maximum on firings of any node in a loop, and the value Fabro's
 /// "unlimited" lowers to.
@@ -155,16 +158,12 @@ pub fn shape_of(node: &NodeDecl) -> String {
     "box".into()
 }
 
-/// One node, resolved.
-struct Resolved {
-    kind:   Kind,
+/// One declared node: its engine node, its kind and its failure policy.
+#[derive(Clone, Copy)]
+struct NodeRef {
     id:     NodeId,
+    kind:   Kind,
     policy: FailurePolicy,
-}
-
-struct Structure {
-    start: String,
-    exit:  String,
 }
 
 struct Ctx<'a> {
@@ -172,14 +171,14 @@ struct Ctx<'a> {
     diags:            Diagnostics,
     b:                GraphBuilder,
     scope:            ScopeId,
-    /// Fabro node id → engine node.
-    ids:              HashMap<String, NodeId>,
+    /// Every declared node by its Fabro id. A synthetic node (the goal
+    /// check, a collector, a duplicate branch node) has no Fabro id and is
+    /// not here.
+    nodes:            HashMap<String, NodeRef>,
     spans:            HashMap<NodeId, Span>,
-    kinds:            HashMap<String, Kind>,
     /// The directory of the workflow file, for `@file` references.
     base_dir:         String,
     template:         Context,
-    goal:             String,
     /// The graph-wide edge-selection mode.
     random:           bool,
     /// One `info.budget.default` per graph.
@@ -256,12 +255,10 @@ fn lower_nested(
         diags,
         b,
         scope,
-        ids: HashMap::new(),
+        nodes: HashMap::new(),
         spans: HashMap::new(),
-        kinds: HashMap::new(),
         base_dir,
         template,
-        goal: String::new(),
         random: false,
         budget_defaulted: false,
         children: Vec::new(),
@@ -291,32 +288,23 @@ fn lower_nested(
         );
         ctx.environment_scope();
     }
-    ctx.kinds(&workflow, &structure);
-
-    // Pass 1: ids, in declaration order.
-    for node in &workflow.nodes {
-        let id = ctx
-            .b
-            .add_node(&node.id, ctx.scope, StepRef::new("noop", Value::Null));
-        ctx.ids.insert(node.id.clone(), id);
-        ctx.spans.insert(id, node.span.clone());
-    }
+    // Pass 1: one node record each, in declaration order.
+    ctx.declare_nodes(&workflow, &structure);
     // Pass 2: steps and configs.
-    let mut resolved = Vec::with_capacity(workflow.nodes.len());
     for node in &workflow.nodes {
-        resolved.push(ctx.node(node, &workflow));
+        ctx.node(node, &workflow);
     }
     // Pass 3: routing, then the goal gate, then back edges, joins and budgets.
-    let exit = ctx.ids[&structure.exit];
+    let exit = ctx.nodes[&structure.exit].id;
     let goal_check = ctx.goal_check(&workflow, exit);
-    for (node, res) in workflow.nodes.iter().zip(&resolved) {
-        ctx.routing(node, res, &workflow, exit, goal_check);
+    for node in &workflow.nodes {
+        ctx.routing(node, &workflow, exit, goal_check);
     }
-    ctx.parallel(&workflow, &resolved, exit, goal_check);
-    let start = ctx.ids[&structure.start];
+    ctx.parallel(&workflow, exit, goal_check);
+    let start = ctx.nodes[&structure.start].id;
     ctx.b.mark_entry(start);
     ctx.back_edges(start);
-    ctx.joins_and_budgets(&workflow, &resolved, goal_check);
+    ctx.joins_and_budgets(&workflow, goal_check);
 
     if ctx.diags.has_errors() {
         return Lowered::rejected(ctx.diags);
@@ -335,28 +323,7 @@ fn lower_nested(
     graph.params = params;
 
     let report = ir::check(&graph);
-    for error in &report.errors {
-        let span = error
-            .primary_node()
-            .and_then(|node| spans.get(&node).cloned())
-            .unwrap_or_else(|| Span::file(file));
-        let mut d = frontend::Diagnostic::error(error.code(), span, error.to_string());
-        if let Some(hint) = error.hint() {
-            d = d.with_hint(hint);
-        }
-        diags.push(d);
-    }
-    for warning in &report.warnings {
-        let span = spans
-            .get(&warning.primary_node())
-            .cloned()
-            .unwrap_or_else(|| Span::file(file));
-        let mut d = frontend::Diagnostic::warning(warning.code(), span, warning.to_string());
-        if let Some(hint) = warning.hint() {
-            d = d.with_hint(hint);
-        }
-        diags.push(d);
-    }
+    diags.extend_from_report(&report, |node| spans.get(&node).cloned(), &Span::file(file));
     Lowered::with_children(graph, children, diags)
 }
 
@@ -402,12 +369,18 @@ impl Ctx<'_> {
                     .collect(),
             ),
         );
-        params.insert(SmolStr::new("goal"), Value::String(self.goal.clone()));
+        params.insert(SmolStr::new("goal"), Value::String(self.goal().to_owned()));
         params.insert(
             SmolStr::new("attractor.workflow"),
             Value::String(self.workflow_name.clone()),
         );
         params
+    }
+
+    /// The rendered goal; empty until `graph_attrs` renders one, or when
+    /// its template failed.
+    fn goal(&self) -> &str {
+        self.template.goal().unwrap_or_default()
     }
 
     fn unknown_attrs(
@@ -546,19 +519,6 @@ impl Ctx<'_> {
         }
     }
 
-    /// The branch source nodes a prompted fan-in joins, for its prompt and
-    /// its record.
-    fn fan_in_sources(node: &NodeDecl, workflow: &Workflow, config: &mut Value) {
-        let sources: Vec<Value> = workflow
-            .incoming(&node.id)
-            .into_iter()
-            .map(|edge| Value::String(edge.from.clone()))
-            .collect();
-        if let Value::Object(config) = config {
-            config.insert("sources".into(), Value::Array(sources));
-        }
-    }
-
     fn template_error(&mut self, error: &TemplateError, span: &Span, what: &str) {
         match error {
             TemplateError::Unbound { name } if self.lenient_unbound => self.diags.warning(
@@ -657,7 +617,6 @@ impl Ctx<'_> {
             .or_else(|| self.settings.goal.clone())
             .unwrap_or_default();
         if let Some(goal) = self.rendered(&goal, &goal_span, "the graph `goal`") {
-            self.goal.clone_from(&goal);
             self.template.set_goal(goal);
         }
         match attrs.text("selection").as_deref() {
@@ -724,146 +683,9 @@ impl Ctx<'_> {
 
     // ── Structure ──────────────────────────────────────────────────────────
 
-    /// The checks a graph must pass before lowering makes sense.
-    fn structure(&mut self, workflow: &Workflow) -> Option<Structure> {
-        let mut ok = true;
-        for node in &workflow.nodes {
-            if !node.declared {
-                self.diags.error(
-                    "attractor.undeclared_node",
-                    node.span.clone(),
-                    format!("`{}` is named by an edge but never declared", node.id),
-                );
-                ok = false;
-            }
-        }
-        if workflow.node(GOAL_CHECK_NODE).is_some() {
-            self.diags.error(
-                "attractor.reserved_node_id",
-                workflow.node(GOAL_CHECK_NODE)?.span.clone(),
-                format!("`{GOAL_CHECK_NODE}` is reserved for goal-gate lowering"),
-            );
-            ok = false;
-        }
-        let starts: Vec<&NodeDecl> = workflow
-            .nodes
-            .iter()
-            .filter(|node| {
-                shape_of(node) == "Mdiamond"
-                    || node.attrs.text("type").as_deref() == Some("start")
-                    || matches!(node.id.as_str(), "start" | "Start")
-            })
-            .collect();
-        let exits: Vec<&NodeDecl> = workflow
-            .nodes
-            .iter()
-            .filter(|node| {
-                shape_of(node) == "Msquare"
-                    || node.attrs.text("type").as_deref() == Some("exit")
-                    || matches!(node.id.as_str(), "exit" | "Exit" | "end" | "End")
-            })
-            .collect();
-        if starts.is_empty() {
-            self.diags.error(
-                "attractor.no_start",
-                workflow.span.clone(),
-                "the workflow has no start node (`shape=Mdiamond`, `type=start`, or an id of `start`)",
-            );
-            return None;
-        }
-        if starts.len() > 1 {
-            self.diags.error(
-                "attractor.multiple_starts",
-                workflow.span.clone(),
-                format!(
-                    "the workflow has multiple start nodes: {}",
-                    starts
-                        .iter()
-                        .map(|node| node.id.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            );
-            ok = false;
-        }
-        if exits.is_empty() {
-            self.diags.error(
-                "attractor.no_exit",
-                workflow.span.clone(),
-                "the workflow has no exit node (`shape=Msquare`, `type=exit`, or an id of `exit`)",
-            );
-            return None;
-        }
-        if exits.len() > 1 {
-            self.diags.error(
-                "attractor.multiple_exits",
-                workflow.span.clone(),
-                format!(
-                    "the workflow has multiple exit nodes: {}",
-                    exits
-                        .iter()
-                        .map(|node| node.id.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            );
-            ok = false;
-        }
-        let start = starts[0].id.clone();
-        let exit = exits[0].id.clone();
-        for edge in &workflow.edges {
-            if edge.to == start {
-                self.diags.error(
-                    "attractor.start_has_incoming",
-                    edge.span.clone(),
-                    format!(
-                        "`{}` points at the start node, which takes no incoming edges",
-                        edge.from
-                    ),
-                );
-                ok = false;
-            }
-            if edge.from == exit {
-                self.diags.error(
-                    "attractor.exit_has_outgoing",
-                    edge.span.clone(),
-                    "the exit node has an outgoing edge; nothing runs after exit",
-                );
-                ok = false;
-            }
-        }
-        // Reachability from start, over the declared edges.
-        let mut seen: HashSet<&str> = HashSet::from([start.as_str()]);
-        let mut queue = VecDeque::from([start.as_str()]);
-        while let Some(id) = queue.pop_front() {
-            for edge in workflow.outgoing(id) {
-                if seen.insert(&edge.to) {
-                    queue.push_back(&edge.to);
-                }
-            }
-        }
-        for node in &workflow.nodes {
-            if !seen.contains(node.id.as_str()) {
-                self.diags.error(
-                    "attractor.unreachable_node",
-                    node.span.clone(),
-                    format!("`{}` is not reachable from the start node", node.id),
-                );
-                ok = false;
-            }
-        }
-        if !seen.contains(exit.as_str()) {
-            self.diags.error(
-                "attractor.exit_unreachable",
-                workflow.span.clone(),
-                "the exit node is not reachable from the start node",
-            );
-            ok = false;
-        }
-        ok.then_some(Structure { start, exit })
-    }
-
-    fn kinds(&mut self, workflow: &Workflow, structure: &Structure) {
+    /// One record per node, in declaration order: its engine node, its kind
+    /// and its failure policy.
+    fn declare_nodes(&mut self, workflow: &Workflow, structure: &Structure) {
         for node in &workflow.nodes {
             let kind = if node.id == structure.start {
                 Kind::Start
@@ -872,7 +694,13 @@ impl Ctx<'_> {
             } else {
                 self.kind_of(node)
             };
-            self.kinds.insert(node.id.clone(), kind);
+            let policy = FailurePolicy::of(node, workflow, &mut self.diags);
+            let id = self
+                .b
+                .add_node(&node.id, self.scope, StepRef::new("noop", Value::Null));
+            self.spans.insert(id, node.span.clone());
+            self.nodes
+                .insert(node.id.clone(), NodeRef { id, kind, policy });
         }
     }
 
@@ -896,1265 +724,5 @@ impl Ctx<'_> {
             );
             Kind::Agent
         })
-    }
-
-    // ── Nodes ──────────────────────────────────────────────────────────────
-
-    fn node(&mut self, node: &NodeDecl, workflow: &Workflow) -> Resolved {
-        self.unknown_attrs(
-            &node.attrs,
-            attrs::NODE,
-            attrs::NODE_IGNORED,
-            &format!("node `{}`", node.id),
-        );
-        let kind = self.kinds[&node.id];
-        let id = self.ids[&node.id];
-        let shape = shape_of(node);
-        let label = node.attrs.text("label").unwrap_or_else(|| node.id.clone());
-        for key in ["on_failure", "on_retries_exhausted"] {
-            self.check_policy(key, &node.attrs, &node.span);
-        }
-        lints::reserved_keyword_node_id(node, &mut self.diags);
-        lints::inert_attributes(node, kind, &mut self.diags);
-        lints::for_each_requires_parallel(node, kind, &mut self.diags);
-        lints::retry_targets(
-            &node.attrs,
-            &node.span,
-            workflow,
-            &format!("node `{}`", node.id),
-            &mut self.diags,
-        );
-        let policy = FailurePolicy::of(node, workflow, &mut self.diags);
-        let explicit = self.explicit_timeout(node);
-
-        let mut meta = json!({
-            "label": label,
-            "shape": shape,
-            "kind": kind.name(),
-            "classes": node.classes,
-            "span": { "line": node.span.line, "column": node.span.column },
-        });
-        for key in ["model", "provider", "reasoning_effort"] {
-            if let Some(value) = node.attrs.text(key) {
-                meta[key] = Value::String(value);
-            }
-        }
-        if kind == Kind::Start {
-            // The stage step drives `start`'s admission hooks itself, after
-            // `sandbox_ready` and `run_start`, with the sandbox in place: the
-            // driver admits `start` before the scope's environment exists.
-            meta[ADMISSION_HOOKS_META] = Value::String(ADMISSION_HOOKS_BY_STEP.into());
-        }
-        self.b.set_meta(id, meta);
-
-        let (step, timeout) = match kind {
-            Kind::Conditional => (None, STRUCTURAL_TIMEOUT),
-            // `start` and `exit` run the stage step: it records the scope's
-            // environment for sandbox-placed hooks and fires the run-level
-            // hooks (`sandbox_ready`, `run_start`, `run_complete`).
-            Kind::Start | Kind::Exit => {
-                let kv = self.b.exprs().var("kv");
-                let mut config = json!({
-                    "node": node.id,
-                    "kind": kind.name(),
-                    "label": label,
-                    "workflow": self.workflow_name,
-                    "kv": placeholder(kv),
-                });
-                if self.stack.len() == 1 {
-                    config["hooks"] = settings::hooks_param(&self.settings.hooks);
-                    // The checkout and the repository the host bound: the
-                    // root `start` stage checks the repository out into its
-                    // workspace before anything runs there.
-                    if kind == Kind::Start {
-                        config["checkout"] = json!({
-                            "enabled": self.settings.clone.enabled,
-                            "depth": self.settings.clone.depth,
-                            "repository": self.repository,
-                        });
-                    }
-                }
-                // `[run.model.fallbacks]` as written: the `start` stage
-                // checks the table against the catalog before anything
-                // runs, as Fabro's server refuses a bad table at run start.
-                if kind == Kind::Start
-                    && let Some(config) = config.as_object_mut()
-                {
-                    fallbacks::write(&self.settings, config);
-                }
-                (Some(StepRef::new(STAGE_KIND, config)), STRUCTURAL_TIMEOUT)
-            }
-            Kind::FanIn => {
-                if node
-                    .attrs
-                    .text("prompt")
-                    .is_some_and(|prompt| !prompt.trim().is_empty())
-                {
-                    // A prompted fan-in: the ordered barrier, then one model
-                    // call over the branch results.
-                    let mut config = self.agent_config(node, kind, workflow, policy, explicit);
-                    Self::fan_in_sources(node, workflow, &mut config);
-                    (
-                        Some(StepRef::new(PROMPT_KIND, config)),
-                        explicit.unwrap_or(AGENT_TIMEOUT),
-                    )
-                } else {
-                    (None, STRUCTURAL_TIMEOUT)
-                }
-            }
-            Kind::Parallel => (None, explicit.unwrap_or(STRUCTURAL_TIMEOUT)),
-            Kind::Agent => {
-                let mut config = self.agent_config(node, kind, workflow, policy, explicit);
-                if let Some(object) = config.as_object_mut() {
-                    object.insert("compaction".into(), self.settings.compaction.to_json());
-                }
-                (
-                    Some(StepRef::new(AGENT_KIND, config)),
-                    explicit.unwrap_or(AGENT_TIMEOUT),
-                )
-            }
-            Kind::Prompt => {
-                let config = self.agent_config(node, kind, workflow, policy, explicit);
-                (
-                    Some(StepRef::new(PROMPT_KIND, config)),
-                    explicit.unwrap_or(AGENT_TIMEOUT),
-                )
-            }
-            Kind::Command => {
-                let config = self.command_config(node, workflow, policy, explicit);
-                (
-                    Some(StepRef::new(COMMAND_KIND, config)),
-                    explicit.unwrap_or(COMMAND_TIMEOUT),
-                )
-            }
-            Kind::Human => {
-                let config = self.human_config(node, workflow, policy, explicit);
-                (
-                    Some(StepRef::new(HUMAN_KIND, config)),
-                    explicit.unwrap_or(HUMAN_TIMEOUT),
-                )
-            }
-            Kind::Wait => {
-                let duration = node.attrs.duration("duration", &mut self.diags);
-                if duration.is_none() && !node.attrs.contains("duration") {
-                    self.diags.error(
-                        "attractor.wait_requires_duration",
-                        node.span.clone(),
-                        format!("wait node `{}` needs a `duration`", node.id),
-                    );
-                }
-                let duration = duration.unwrap_or_default();
-                let config = json!({ "label": label, "duration_ms": duration_ms(duration) });
-                let timeout = explicit.unwrap_or(duration + STRUCTURAL_TIMEOUT);
-                (Some(StepRef::new(WAIT_KIND, config)), timeout)
-            }
-            Kind::ManagerLoop => {
-                let config = self.workflow_config(node, workflow, policy);
-                (
-                    Some(StepRef::new(WORKFLOW_KIND, config)),
-                    explicit.unwrap_or(AGENT_TIMEOUT),
-                )
-            }
-        };
-        if let Some(step) = step {
-            self.b.node_mut(id).step = step;
-        }
-        self.b.node_mut(id).budget = Budget::new(1, timeout)
-            .with_timeout_policy(policy::timeout_policy(kind, node, workflow));
-        self.b.node_mut(id).retry = routing::retry_policy(node, workflow, &mut self.diags);
-        Resolved { kind, id, policy }
-    }
-
-    /// The node's `timeout`. A bare number is Attractor's spelling (seconds);
-    /// Fabro needs a unit, and reads a unitless value as no timeout at all.
-    fn explicit_timeout(&mut self, node: &NodeDecl) -> Option<Duration> {
-        if let Some(attr) = node.attrs.get("timeout")
-            && attr.value.as_text().trim().parse::<f64>().is_ok()
-        {
-            self.diags.unsupported(
-                "legacy_dialect",
-                attr.span.clone(),
-                format!(
-                    "`timeout={}` is a bare number, the legacy-dialect spelling",
-                    attr.value.as_text()
-                ),
-                "write the unit: `timeout=\"1200s\"`",
-            );
-            return None;
-        }
-        node.attrs.duration("timeout", &mut self.diags)
-    }
-
-    /// The shared part of every step config: label, goal, the run context.
-    fn base_config(
-        &mut self,
-        node: &NodeDecl,
-        workflow: &Workflow,
-        policy: FailurePolicy,
-        timeout: Option<Duration>,
-    ) -> Map<String, Value> {
-        let mut config = Map::new();
-        config.insert(
-            "label".into(),
-            Value::String(node.attrs.text("label").unwrap_or_else(|| node.id.clone())),
-        );
-        config.insert("node".into(), Value::String(node.id.clone()));
-        config.insert("goal".into(), Value::String(self.goal.clone()));
-        let kv = self.b.exprs().var("kv");
-        config.insert("kv".into(), placeholder(kv));
-        Self::policy_config(&mut config, node, workflow, policy);
-        if let Some(ms) = timeout.map(duration_ms) {
-            config.insert("timeout_ms".into(), ms);
-        }
-        config
-    }
-
-    /// The node's failure policies, and the explicit routes when either can
-    /// promote a failure: Fabro promotes only when no explicit route matches,
-    /// and the step decides that with the node's routes in hand.
-    fn policy_config(
-        config: &mut Map<String, Value>,
-        node: &NodeDecl,
-        workflow: &Workflow,
-        policy: FailurePolicy,
-    ) {
-        config.insert(
-            "on_failure".into(),
-            Value::String(policy.on_failure.name().into()),
-        );
-        config.insert(
-            "on_retries_exhausted".into(),
-            Value::String(policy.on_retries_exhausted.name().into()),
-        );
-        if policy.promotes() {
-            config.insert(
-                ROUTES_KEY.into(),
-                promotion::explicit_routes(node, workflow),
-            );
-        }
-    }
-
-    fn agent_config(
-        &mut self,
-        node: &NodeDecl,
-        kind: Kind,
-        workflow: &Workflow,
-        policy: FailurePolicy,
-        timeout: Option<Duration>,
-    ) -> Value {
-        let mut config = self.base_config(node, workflow, policy, timeout);
-        config.insert("kind".into(), Value::String(kind.name().into()));
-        let prompt_span = node.attrs.span_of("prompt", &node.span);
-        let prompt = match node.attrs.text("prompt") {
-            Some(prompt) if !prompt.trim().is_empty() => prompt,
-            _ => {
-                self.diags.warning(
-                    "attractor.prompt_missing",
-                    node.span.clone(),
-                    format!(
-                        "agent node `{}` has no `prompt`; its label is the prompt",
-                        node.id
-                    ),
-                );
-                node.attrs.text("label").unwrap_or_else(|| node.id.clone())
-            }
-        };
-        if let Some(prompt) = self.rendered(
-            &prompt,
-            &prompt_span,
-            &format!("node `{}` `prompt`", node.id),
-        ) {
-            config.insert("prompt".into(), Value::String(prompt));
-        }
-        let is_prompt = kind != Kind::Agent;
-        let backend = node
-            .attrs
-            .text("backend")
-            .or_else(|| workflow.attrs.text("backend"));
-        // Fabro's `backend_valid`: an ACP agent reads no API-only attribute.
-        let acp_backend = !is_prompt && backend.as_deref() == Some("acp");
-        if acp_backend {
-            lints::acp_api_only_attributes(node, &self.styled, &mut self.diags);
-        }
-        if let Some(backend) = backend {
-            if !matches!(backend.as_str(), "acp" | "api") {
-                self.diags.error(
-                    "attractor.bad_backend",
-                    node.attrs.span_of("backend", &node.span),
-                    "agent backend must be acp or api",
-                );
-            }
-            // Fabro's `backend_valid` rule: a prompt node is API-only. The
-            // graph's `backend="acp"` applies to agent nodes only.
-            if is_prompt && backend == "acp" {
-                if node.attrs.contains("backend") {
-                    self.diags.error(
-                        "attractor.prompt_backend",
-                        node.attrs.span_of("backend", &node.span),
-                        "backend=\"acp\" is only valid on agent nodes; prompt nodes are API-only",
-                    );
-                }
-            } else {
-                config.insert("backend".into(), Value::String(backend));
-            }
-        }
-        for key in ["model", "provider", "reasoning_effort"] {
-            if let Some(value) = node.attrs.text(key) {
-                config.insert(key.into(), Value::String(value));
-            }
-        }
-        // The graph's defaults, then the run settings' model defaults.
-        if !config.contains_key("model")
-            && let Some(model) = workflow
-                .attrs
-                .text("default_model")
-                .or_else(|| self.settings.model.name.clone())
-        {
-            config.insert("model".into(), Value::String(model));
-        }
-        if !config.contains_key("provider")
-            && let Some(provider) = workflow
-                .attrs
-                .text("default_provider")
-                .or_else(|| self.settings.model.provider.clone())
-        {
-            config.insert("provider".into(), Value::String(provider));
-        }
-        if !config.contains_key("reasoning_effort")
-            && let Some(effort) = self.settings.model.reasoning_effort.clone()
-        {
-            config.insert("reasoning_effort".into(), Value::String(effort));
-        }
-        fallbacks::write(&self.settings, &mut config);
-        let branch_first = threads::is_branch_first(node, workflow, &self.kinds);
-        let default_speed = self.settings.model.speed.clone();
-        let threads = threads::ThreadAttrs::read(
-            node,
-            workflow,
-            branch_first,
-            default_speed.as_deref(),
-            &mut self.diags,
-        );
-        threads.write(self.b.exprs(), &mut config);
-        if !is_prompt {
-            skills::write(&self.settings.skills, &mut config);
-            subagents::write(&mut config);
-        }
-        config.insert("stages".into(), threads::stages(workflow, &self.kinds));
-        if !is_prompt {
-            config.insert("mcps".into(), settings::mcps_param(&self.settings.mcps));
-        }
-        self.output_schema(node, &mut config);
-        if let Some(retries) = node.attrs.int("output_retries", &mut self.diags) {
-            let retries = retries.max(0);
-            if retries > i64::try_from(MAX_OUTPUT_RETRIES).unwrap_or(i64::MAX) {
-                self.diags.error(
-                    "attractor.output_retries_too_large",
-                    node.attrs.span_of("output_retries", &node.span),
-                    format!("`output_retries={retries}` exceeds the hard maximum of {MAX_OUTPUT_RETRIES}"),
-                );
-            }
-            config.insert(
-                "output_retries".into(),
-                Value::from(retries.min(i64::try_from(MAX_OUTPUT_RETRIES).unwrap_or(i64::MAX))),
-            );
-        }
-        if is_prompt {
-            if node.attrs.text("acp.command").is_some() || node.attrs.text("acp.config").is_some() {
-                self.diags.error(
-                    "attractor.backend_options",
-                    node.span.clone(),
-                    "a prompt node cannot set acp.command or acp.config; prompt nodes are API-only",
-                );
-            }
-        } else if config.get("backend").and_then(Value::as_str) == Some("api") {
-            if node.attrs.text("acp.command").is_some() || node.attrs.text("acp.config").is_some() {
-                self.diags.error(
-                    "attractor.backend_options",
-                    node.span.clone(),
-                    "an API node cannot set acp.command or acp.config",
-                );
-            }
-        } else {
-            self.acp(node, workflow, &mut config, acp_backend);
-        }
-        let nodes = self.b.exprs().var("nodes");
-        config.insert("nodes".into(), placeholder(nodes));
-        Value::Object(config)
-    }
-
-    fn output_schema(&mut self, node: &NodeDecl, config: &mut Map<String, Value>) {
-        let Some(schema) = node.attrs.text("output_schema") else {
-            return;
-        };
-        let span = node.attrs.span_of("output_schema", &node.span);
-        if schema == "routing" {
-            config.insert("output_schema".into(), Value::String("routing".into()));
-            return;
-        }
-        let Some(text) = self.rendered(
-            &schema,
-            &span,
-            &format!("node `{}` `output_schema`", node.id),
-        ) else {
-            return;
-        };
-        match serde_json::from_str::<Value>(&text) {
-            Ok(value @ Value::Object(_)) => {
-                config.insert("output_schema".into(), value);
-            }
-            _ => self.diags.error(
-                "attractor.bad_output_schema",
-                span,
-                format!(
-                    "`output_schema` on `{}` must be `routing` or a JSON Schema object",
-                    node.id
-                ),
-            ),
-        }
-    }
-
-    /// The node's ACP agent, from the node or the graph. `acp_backend` says
-    /// the node runs on `backend="acp"`, where naming no agent is an error.
-    fn acp(
-        &mut self,
-        node: &NodeDecl,
-        workflow: &Workflow,
-        config: &mut Map<String, Value>,
-        acp_backend: bool,
-    ) {
-        let command = node
-            .attrs
-            .text("acp.command")
-            .or_else(|| workflow.attrs.text("acp.command"));
-        let acp_config = node
-            .attrs
-            .text("acp.config")
-            .or_else(|| workflow.attrs.text("acp.config"));
-        match (command, acp_config) {
-            (Some(_), Some(_)) => self.diags.error(
-                "attractor.acp_both",
-                node.attrs.span_of("acp.command", &node.span),
-                format!(
-                    "node `{}` sets both `acp.command` and `acp.config`",
-                    node.id
-                ),
-            ),
-            (Some(command), None) => {
-                config.insert("acp".into(), json!({ "command": command }));
-            }
-            (None, Some(text)) => match serde_json::from_str::<Value>(&text) {
-                Ok(value) => {
-                    config.insert("acp".into(), json!({ "config": value }));
-                }
-                Err(error) => self.diags.error(
-                    "attractor.bad_acp_config",
-                    node.attrs.span_of("acp.config", &node.span),
-                    format!("`acp.config` is not JSON: {error}"),
-                ),
-            },
-            (None, None) if acp_backend => lints::acp_requires_command(node, &mut self.diags),
-            (None, None) => {}
-        }
-    }
-
-    fn command_config(
-        &mut self,
-        node: &NodeDecl,
-        workflow: &Workflow,
-        policy: FailurePolicy,
-        timeout: Option<Duration>,
-    ) -> Value {
-        let mut config = self.base_config(node, workflow, policy, timeout);
-        let language = node
-            .attrs
-            .text("language")
-            .unwrap_or_else(|| "shell".into());
-        if language != "shell" && language != "python" {
-            self.diags.error(
-                "attractor.bad_language",
-                node.attrs.span_of("language", &node.span),
-                format!("`language` must be `shell` or `python`, not `{language}`"),
-            );
-        }
-        config.insert("language".into(), Value::String(language.clone()));
-        match node.attrs.text("script") {
-            Some(script) if !script.trim().is_empty() => {
-                lints::script_absolute_cd(node, &script, &mut self.diags);
-                let script = match template::render_script(&script, &language, &self.template) {
-                    Ok(script) => Some(script),
-                    Err(error) => {
-                        let span = node.attrs.span_of("script", &node.span);
-                        let unrendered = self.lenient_unbound && error.is_unbound();
-                        self.template_error(&error, &span, &format!("node `{}` `script`", node.id));
-                        unrendered.then_some(script)
-                    }
-                };
-                if let Some(script) = script {
-                    // The text the step runs, on the config for the step and
-                    // on `meta` for a host that shows the stage.
-                    config.insert("script".into(), Value::String(script.clone()));
-                    if let Value::Object(meta) = &mut self.b.node_mut(self.ids[&node.id]).meta {
-                        meta.insert("script".into(), Value::String(script));
-                    }
-                }
-            }
-            _ => self.diags.error(
-                "attractor.command_requires_script",
-                node.span.clone(),
-                format!("command node `{}` needs a `script`", node.id),
-            ),
-        }
-        let mut env = Map::new();
-        if let Some(environment) = &self.settings.environment {
-            for (key, value) in &environment.env {
-                if let EnvValue::Secret(_) = value {
-                    env.insert(key.clone(), value.to_json());
-                }
-            }
-        }
-        if let Some(prepare_env) = self.prepare_envs.get(&node.id) {
-            for (key, value) in prepare_env {
-                env.insert(key.clone(), value.to_json());
-            }
-        }
-        if !env.is_empty() {
-            config.insert("env".into(), Value::Object(env));
-        }
-        if let Some(source) = node.attrs.text("stdin_source") {
-            let span = node.attrs.span_of("stdin_source", &node.span);
-            match self.context_source(&source, node, workflow, &span) {
-                Some(expr) => {
-                    config.insert("stdin".into(), placeholder(expr));
-                }
-                None => self.diags.error(
-                    "attractor.bad_stdin_source",
-                    span,
-                    format!("`stdin_source` must name a context key such as `context.output`, not `{source}`"),
-                ),
-            }
-        }
-        self.output_schema(node, &mut config);
-        Value::Object(config)
-    }
-
-    /// `context.K` as an expression. `context.parallel.results` reads the
-    /// nearest upstream fan-in's output, where the branch results live under
-    /// the engine (they ride tokens, never `kv`).
-    fn context_source(
-        &mut self,
-        source: &str,
-        node: &NodeDecl,
-        workflow: &Workflow,
-        span: &Span,
-    ) -> Option<ExprId> {
-        let key = source.strip_prefix("context.").unwrap_or(source).trim();
-        if key.is_empty() {
-            return None;
-        }
-        if key == "parallel.results" && !self.upstream_fan_in(&node.id, workflow) {
-            self.diags.warning(
-                "attractor.parallel_results_without_fan_in",
-                span.clone(),
-                format!(
-                    "`{}` reads `context.parallel.results` but no fan-in node precedes it",
-                    node.id
-                ),
-            );
-        }
-        if key.starts_with("internal.") {
-            self.diags.warning(
-                "attractor.internal_context",
-                span.clone(),
-                format!("`{key}` is Fabro-internal run state, which Petri does not populate; it reads as null"),
-            );
-        }
-        let kv = self.b.exprs().var("kv");
-        let name = self.b.exprs().lit(key);
-        Some(self.b.exprs().call("get", vec![kv, name]))
-    }
-
-    /// Whether a fan-in, or a parallel node whose fan-in publishes the
-    /// results, precedes `id`.
-    fn upstream_fan_in(&self, id: &str, workflow: &Workflow) -> bool {
-        let mut seen: HashSet<&str> = HashSet::from([id]);
-        let mut queue: VecDeque<&str> = VecDeque::from([id]);
-        while let Some(current) = queue.pop_front() {
-            for edge in workflow.incoming(current) {
-                if matches!(
-                    self.kinds.get(&edge.from),
-                    Some(Kind::FanIn | Kind::Parallel)
-                ) {
-                    return true;
-                }
-                if seen.insert(&edge.from) {
-                    queue.push_back(&edge.from);
-                }
-            }
-        }
-        false
-    }
-
-    fn human_config(
-        &mut self,
-        node: &NodeDecl,
-        workflow: &Workflow,
-        policy: FailurePolicy,
-        timeout: Option<Duration>,
-    ) -> Value {
-        let mut config = self.base_config(node, workflow, policy, timeout);
-        let mut choices = Vec::new();
-        let mut freeform_target = None;
-        for edge in workflow.outgoing(&node.id) {
-            if edge
-                .attrs
-                .bool("freeform", &mut self.diags)
-                .unwrap_or(false)
-            {
-                if freeform_target.is_some() {
-                    self.diags.error(
-                        "attractor.freeform_edge_count",
-                        edge.span.clone(),
-                        format!(
-                            "human gate `{}` has more than one `freeform=true` edge",
-                            node.id
-                        ),
-                    );
-                }
-                freeform_target = Some(edge.to.clone());
-                continue;
-            }
-            let label = edge
-                .attrs
-                .text("label")
-                .filter(|l| !l.is_empty())
-                .unwrap_or_else(|| edge.to.clone());
-            let mut choice = json!({
-                "key": labels::accelerator_key(&label),
-                "label": label,
-                "to": edge.to,
-            });
-            // What a host shows beside the choice, when the edge says.
-            for (attr, field) in [
-                ("human.description", "description"),
-                ("human.preview", "preview"),
-            ] {
-                if let Some(text) = edge.attrs.text(attr).filter(|t| !t.trim().is_empty()) {
-                    choice[field] = Value::String(text);
-                }
-            }
-            choices.push(choice);
-        }
-        if choices.is_empty() && freeform_target.is_none() {
-            self.diags.error(
-                "attractor.human_without_edges",
-                node.span.clone(),
-                format!(
-                    "human gate `{}` has no outgoing edges to offer as choices",
-                    node.id
-                ),
-            );
-        }
-        if let Some(kind) = node.attrs.text("question_type") {
-            if !attrs::QUESTION_TYPES.contains(&kind.as_str()) {
-                self.diags.error(
-                    "attractor.bad_question_type",
-                    node.attrs.span_of("question_type", &node.span),
-                    format!(
-                        "`question_type` must be one of {}",
-                        attrs::QUESTION_TYPES.join(", ")
-                    ),
-                );
-            }
-            config.insert("question_type".into(), Value::String(kind));
-        }
-        if let Some(sensitive) = node.attrs.bool("sensitive", &mut self.diags) {
-            config.insert("sensitive".into(), Value::Bool(sensitive));
-        }
-        if let Some(review) = node.attrs.bool("review_target", &mut self.diags) {
-            config.insert("review_target".into(), Value::Bool(review));
-        }
-        if let Some(default) = node.attrs.text("human.default_choice") {
-            if !choices.iter().any(|choice| {
-                choice["key"] == Value::String(default.clone())
-                    || choice["to"] == Value::String(default.clone())
-            }) {
-                self.diags.error(
-                    "attractor.bad_default_choice",
-                    node.attrs.span_of("human.default_choice", &node.span),
-                    format!(
-                        "`human.default_choice=\"{default}\"` names none of the gate's \
-                         choices or targets"
-                    ),
-                );
-            }
-            config.insert("default_choice".into(), Value::String(default));
-        }
-        config.insert("choices".into(), Value::Array(choices));
-        if let Some(target) = freeform_target {
-            config.insert("freeform_target".into(), Value::String(target));
-        }
-        Value::Object(config)
-    }
-
-    fn workflow_config(
-        &mut self,
-        node: &NodeDecl,
-        workflow: &Workflow,
-        policy: FailurePolicy,
-    ) -> Value {
-        let mut config = Map::new();
-        config.insert(
-            "label".into(),
-            Value::String(node.attrs.text("label").unwrap_or_else(|| node.id.clone())),
-        );
-        config.insert("node".into(), Value::String(node.id.clone()));
-        Self::policy_config(&mut config, node, workflow, policy);
-        let kv = self.b.exprs().var("kv");
-        config.insert("kv".into(), placeholder(kv));
-        // Fabro's normalization: missing, non-integer or negative is 1000;
-        // zero is 1. A value Fabro would silently discard is named here.
-        let cycles = match node.attrs.get("manager.max_cycles") {
-            None => 1000,
-            Some(attr) => match &attr.value {
-                model::AttrValue::Int(n) if *n >= 0 => (*n).max(1),
-                model::AttrValue::Str(s) if s.trim().parse::<i64>().is_ok_and(|n| n >= 0) => {
-                    s.trim().parse::<i64>().unwrap_or(1000).max(1)
-                }
-                other => {
-                    self.diags.warning(
-                        "attractor.manager.max_cycles",
-                        attr.span.clone(),
-                        format!(
-                            "`manager.max_cycles={}` is not a non-negative integer; Fabro reads \
-                             it as 1000",
-                            other.as_text()
-                        ),
-                    );
-                    1000
-                }
-            },
-        };
-        config.insert("max_cycles".into(), Value::from(cycles));
-        if let Some(interval) = node
-            .attrs
-            .duration("manager.poll_interval", &mut self.diags)
-        {
-            config.insert("poll_interval_ms".into(), duration_ms(interval));
-        }
-        if let Some(stop) = node.attrs.text("manager.stop_condition") {
-            let span = node.attrs.span_of("manager.stop_condition", &node.span);
-            let mut table = ir::ExprTable::new();
-            if condition::lower(&stop, &mut table, &span, &mut self.diags, false).is_some() {
-                config.insert("stop_condition".into(), Value::String(stop));
-            }
-        }
-        let source = node.attrs.text("stack.child_workflow");
-        let inline = node.attrs.text("stack.child_dot_source");
-        let child = match (source, inline) {
-            (Some(path), _) => {
-                config.insert("child_workflow".into(), Value::String(path.clone()));
-                let span = node.attrs.span_of("stack.child_workflow", &node.span);
-                self.child_from_file(&path, &span, &node.id)
-            }
-            (None, Some(source)) => {
-                config.insert("child_dot_source".into(), Value::String(source.clone()));
-                let span = node.attrs.span_of("stack.child_dot_source", &node.span);
-                let name = format!(
-                    "{}#{}",
-                    self.stack.last().map_or("", String::as_str),
-                    node.id
-                );
-                self.child_from_text(&name, &source, &span)
-            }
-            (None, None) => {
-                self.diags.error(
-                    "attractor.manager_loop_without_child",
-                    node.span.clone(),
-                    format!(
-                        "manager loop `{}` needs `stack.child_workflow` or `stack.child_dot_source`",
-                        node.id
-                    ),
-                );
-                None
-            }
-        };
-        if let Some(digest) = child {
-            config.insert("child_digest".into(), Value::String(digest));
-        }
-        Value::Object(config)
-    }
-
-    /// Where a `stack.child_workflow` path reads from: as written against the
-    /// repository root, with Fabro's bundle prefix `fabro/` standing for
-    /// `.fabro/`, or beside the workflow file.
-    fn child_from_file(&mut self, path: &str, span: &Span, node: &str) -> Option<String> {
-        let mut candidates = vec![path.to_string()];
-        if let Some(rest) = path.strip_prefix("fabro/") {
-            candidates.push(format!(".fabro/{rest}"));
-        }
-        if !self.base_dir.is_empty() {
-            candidates.push(format!("{}/{path}", self.base_dir));
-        }
-        let found = candidates.iter().find_map(|candidate| {
-            self.files
-                .read(candidate)
-                .map(|text| (candidate.clone(), text))
-        });
-        let Some((resolved, text)) = found else {
-            self.diags.error(
-                "attractor.child_workflow_not_found",
-                span.clone(),
-                format!(
-                    "manager loop `{node}` names `{path}`, which cannot be read ({} tried)",
-                    candidates.join(", ")
-                ),
-            );
-            return None;
-        };
-        self.child_from_text(&resolved, &text, span)
-    }
-
-    /// Lower a child workflow now, so `petri check` validates it and the run
-    /// registers it before the root starts. Its digest names it.
-    fn child_from_text(&mut self, name: &str, text: &str, span: &Span) -> Option<String> {
-        if self.stack.iter().any(|f| f == name) {
-            self.diags.error(
-                "attractor.workflow_cycle",
-                span.clone(),
-                format!(
-                    "workflow call cycle: {} -> `{name}`",
-                    self.stack.join(" -> ")
-                ),
-            );
-            return None;
-        }
-        if self.stack.len() > MAX_CALL_DEPTH {
-            self.diags.error(
-                "attractor.workflow_depth",
-                span.clone(),
-                format!("nested workflows nest more than {MAX_CALL_DEPTH} deep at `{name}`"),
-            );
-            return None;
-        }
-        let dot = match dot::parse(name, text) {
-            Ok(dot) => dot,
-            Err(diagnostic) => {
-                self.diags.push(diagnostic);
-                return None;
-            }
-        };
-        let workflow = model::build(&dot);
-        let to_map = |map: &BTreeMap<String, Value>| {
-            map.iter()
-                .map(|(k, v)| (SmolStr::new(k), v.clone()))
-                .collect()
-        };
-        let inputs = CompileInputs {
-            inputs:             to_map(self.template.inputs()),
-            vars:               to_map(self.template.vars()),
-            unbound_is_warning: self.lenient_unbound,
-        };
-        let lowered = lower_nested(
-            workflow,
-            name,
-            self.files,
-            &inputs,
-            Diagnostics::new(),
-            self.stack.clone(),
-            RunSettings {
-                model: self.settings.model.clone(),
-                mcps: self.settings.mcps.clone(),
-                ..RunSettings::default()
-            },
-        );
-        for diagnostic in lowered.diagnostics.iter() {
-            self.diags.push(diagnostic.clone());
-        }
-        let graph = lowered.graph?;
-        let digest = frontend::graph_digest(&graph);
-        self.children.extend(lowered.children);
-        self.children.push(graph);
-        Some(digest)
-    }
-
-    // ── Goal gates ─────────────────────────────────────────────────────────
-
-    /// The `goal_check` node in front of `exit`, when any node is a goal
-    /// gate: every gate must have a success-like record, or the run jumps
-    /// back to the gate's retry target — the first that exists of the node's
-    /// `retry_target`, its `fallback_retry_target`, the graph's, and the
-    /// graph's fallback — and a gate with no target ends the run failed.
-    fn goal_check(&mut self, workflow: &Workflow, exit: NodeId) -> Option<NodeId> {
-        let mut gates: Vec<&NodeDecl> = Vec::new();
-        for node in &workflow.nodes {
-            if node
-                .attrs
-                .bool("goal_gate", &mut self.diags)
-                .unwrap_or(false)
-            {
-                gates.push(node);
-            }
-        }
-        if gates.is_empty() {
-            return None;
-        }
-        gates.sort_by(|a, b| a.id.cmp(&b.id));
-        let exit_span = self.spans[&exit].clone();
-        let check = self.b.add_node(
-            GOAL_CHECK_NODE,
-            self.scope,
-            StepRef::new("noop", Value::Null),
-        );
-        self.spans.insert(check, exit_span.clone());
-        self.b.set_meta(
-            check,
-            json!({
-                "label": "Goal check",
-                "shape": "diamond",
-                "kind": "goal_check",
-                "classes": [],
-                "synthetic": true,
-            }),
-        );
-
-        let mut arms = Vec::new();
-        let mut all_ok: Option<ExprId> = None;
-        for gate in &gates {
-            let ok = {
-                let record = self.b.exprs().path("nodes", &[&gate.id, "success_like"]);
-                let falsy = self.b.exprs().lit(false);
-                self.b.exprs().call("default", vec![record, falsy])
-            };
-            all_ok = Some(match all_ok {
-                None => ok,
-                Some(acc) => self.b.exprs().binary(ir::BinOp::And, acc, ok),
-            });
-            let failing = self.b.exprs().unary(ir::UnOp::Not, ok);
-            let target = [
-                gate.attrs.text("retry_target"),
-                gate.attrs.text("fallback_retry_target"),
-                workflow.attrs.text("retry_target"),
-                workflow.attrs.text("fallback_retry_target"),
-            ]
-            .into_iter()
-            .flatten()
-            .find(|t| self.ids.contains_key(t));
-            match target {
-                Some(target) => {
-                    let id = self.b.next_edge_id();
-                    let mut edge = Edge::when(id, self.ids[&target], failing);
-                    edge.back = true;
-                    edge.label = Some(SmolStr::new(format!("goal_gate:{}", gate.id)));
-                    arms.push(edge);
-                }
-                None => self.diags.warning(
-                    "attractor.goal_gate_without_target",
-                    gate.span.clone(),
-                    format!(
-                        "goal gate `{}` has no retry target that exists; when it fails the run ends failed",
-                        gate.id
-                    ),
-                ),
-            }
-        }
-        let all_ok = all_ok.expect("at least one gate");
-        let id = self.b.next_edge_id();
-        arms.push(Edge::when(id, exit, all_ok));
-        self.b.node_mut(check).routing = Routing::select(arms);
-        Some(check)
-    }
-
-    // ── Routing ────────────────────────────────────────────────────────────
-
-    fn routing(
-        &mut self,
-        node: &NodeDecl,
-        res: &Resolved,
-        workflow: &Workflow,
-        exit: NodeId,
-        goal_check: Option<NodeId>,
-    ) {
-        if matches!(res.kind, Kind::Exit | Kind::Parallel) {
-            // The exit routes nowhere; a parallel node's edges are its fan-out.
-            return;
-        }
-        let edges = workflow.outgoing(&node.id);
-        if edges.is_empty() {
-            return;
-        }
-        lints::all_conditional_edges(node, &edges, &mut self.diags);
-        let random = match node.attrs.text("selection").as_deref() {
-            None => self.random,
-            Some("random") => true,
-            Some("deterministic") => false,
-            Some(other) => {
-                self.diags.error(
-                    "attractor.bad_selection",
-                    node.attrs.span_of("selection", &node.span),
-                    format!("`selection` must be `deterministic` or `random`, not `{other}`"),
-                );
-                false
-            }
-        };
-        // A `start` that fails (a blocking `run_start` hook) ends the run, as
-        // Fabro's blocked run does; it never routes on.
-        let policy = if res.kind == Kind::Start {
-            FailurePolicy {
-                on_failure:           Policy::Exit,
-                on_retries_exhausted: Policy::Exit,
-            }
-        } else {
-            res.policy
-        };
-        let mut lowered = Vec::with_capacity(edges.len());
-        for edge in &edges {
-            let Some(mut to) = self.ids.get(&edge.to).copied() else {
-                continue;
-            };
-            if let Some(check) = goal_check
-                && to == exit
-            {
-                to = check;
-            }
-            self.unknown_attrs(
-                &edge.attrs,
-                attrs::EDGE,
-                &[],
-                &format!("edge `{} -> {}`", edge.from, edge.to),
-            );
-            let cond = self.edge_condition(edge, policy);
-            let condition_text = edge
-                .attrs
-                .text("condition")
-                .map(|text| text.trim().to_owned())
-                .filter(|text| !text.is_empty());
-            let weight = edge.attrs.int("weight", &mut self.diags).unwrap_or(0);
-            let label = edge.attrs.text("label").filter(|l| !l.is_empty());
-            let restart = edge
-                .attrs
-                .bool("loop_restart", &mut self.diags)
-                .unwrap_or(false);
-            let graph_full = workflow.attrs.text("default_fidelity").as_deref() == Some("full");
-            let map = threads::edge_payload(
-                self.b.exprs(),
-                edge,
-                &self.kinds,
-                graph_full,
-                &mut self.diags,
-            );
-            lowered.push(routing::OutEdge {
-                to,
-                target: edge.to.clone(),
-                condition: cond,
-                condition_text,
-                label_key: label.as_deref().map(labels::routing_key),
-                label,
-                weight,
-                restart,
-                map,
-            });
-        }
-        if lowered.is_empty() {
-            return;
-        }
-        if random && lowered.iter().any(|e| e.condition.is_some()) {
-            self.diags.error(
-                "attractor.random_with_conditions",
-                node.span.clone(),
-                format!(
-                    "`{}` uses `selection=\"random\"` and has conditional edges; Fabro forbids the combination",
-                    node.id
-                ),
-            );
-        }
-        let group = routing::group(
-            &mut self.b,
-            &lowered,
-            policy,
-            res.kind == Kind::Human,
-            random,
-        );
-        // The edge table hooks and hosts read: arm id to target node id,
-        // label and the condition as written, so an `edge_selected` hook
-        // names Fabro nodes, never engine ids, and a host shows the
-        // condition the `route.applied` edge matched.
-        let mut edges = Map::new();
-        for (arm, out) in group.arms.iter().zip(&lowered) {
-            let mut entry = json!({ "to": out.target, "label": out.label });
-            if let Some(condition) = &out.condition_text {
-                entry["condition"] = Value::String(condition.clone());
-            }
-            edges.insert(arm.id.raw().to_string(), entry);
-        }
-        let meta = &mut self.b.node_mut(res.id).meta;
-        if let Value::Object(map) = meta {
-            map.insert("edges".into(), Value::Object(edges));
-        }
-        self.b.node_mut(res.id).routing = Routing::groups(vec![group]);
-    }
-
-    fn edge_condition(&mut self, edge: &EdgeDecl, policy: FailurePolicy) -> Option<ExprId> {
-        let text = edge.attrs.text("condition")?;
-        if text.trim().is_empty() {
-            return None;
-        }
-        let span = edge.attrs.span_of("condition", &edge.span);
-        condition::lower(
-            &text,
-            self.b.exprs(),
-            &span,
-            &mut self.diags,
-            policy.succeeds(),
-        )
-    }
-
-    // ── Back edges, joins, budgets ─────────────────────────────────────────
-
-    /// A depth-first search from `start` over the lowered edges marks every
-    /// cycle-closing edge `back`.
-    fn back_edges(&mut self, start: NodeId) {
-        #[derive(Clone, Copy, PartialEq, Eq)]
-        enum Color {
-            White,
-            Gray,
-            Black,
-        }
-        struct Frame {
-            node:  NodeId,
-            next:  usize,
-            edges: Vec<(EdgeId, NodeId)>,
-        }
-        let count = self.b.graph().nodes.len();
-        let mut color = vec![Color::White; count];
-        let mut back: HashSet<EdgeId> = HashSet::new();
-        let successors = |graph: &ir::Graph, node: NodeId| -> Vec<(EdgeId, NodeId)> {
-            graph
-                .node(node)
-                .map(|n| n.routing.edges().map(|e| (e.id, e.to)).collect())
-                .unwrap_or_default()
-        };
-        let mut stack = vec![Frame {
-            node:  start,
-            next:  0,
-            edges: successors(self.b.graph(), start),
-        }];
-        color[start.index()] = Color::Gray;
-        while let Some(frame) = stack.last_mut() {
-            if frame.next >= frame.edges.len() {
-                color[frame.node.index()] = Color::Black;
-                stack.pop();
-                continue;
-            }
-            let (edge, to) = frame.edges[frame.next];
-            frame.next += 1;
-            match color[to.index()] {
-                Color::Gray => {
-                    back.insert(edge);
-                }
-                Color::White => {
-                    color[to.index()] = Color::Gray;
-                    stack.push(Frame {
-                        node:  to,
-                        next:  0,
-                        edges: successors(self.b.graph(), to),
-                    });
-                }
-                Color::Black => {}
-            }
-        }
-        for node in &mut self.b.graph_mut().body.nodes {
-            for group in &mut node.routing.groups {
-                for arm in &mut group.arms {
-                    if back.contains(&arm.id) {
-                        arm.back = true;
-                    }
-                }
-            }
-        }
-    }
-
-    fn joins_and_budgets(
-        &mut self,
-        workflow: &Workflow,
-        resolved: &[Resolved],
-        goal_check: Option<NodeId>,
-    ) {
-        let looped = loop_reachable(&self.b.graph().body);
-        let global = workflow
-            .attrs
-            .int("max_node_visits", &mut self.diags)
-            .filter(|n| *n > 0);
-        if let Some(limit) = global
-            && limit > i64::from(MAX_FIRINGS)
-        {
-            self.diags.error(
-                "attractor.max_visits_too_large",
-                workflow.attrs.span_of("max_node_visits", &workflow.span),
-                format!("`max_node_visits={limit}` exceeds the hard maximum of {MAX_FIRINGS}"),
-            );
-        }
-        for (node, res) in workflow.nodes.iter().zip(resolved) {
-            let join = if res.kind == Kind::FanIn {
-                JoinPolicy::All
-            } else {
-                JoinPolicy::Any
-            };
-            self.b.set_join(res.id, join);
-            let visits = node
-                .attrs
-                .int("max_visits", &mut self.diags)
-                .filter(|n| *n > 0);
-            if let Some(limit) = visits
-                && limit > i64::from(MAX_FIRINGS)
-            {
-                self.diags.error(
-                    "attractor.max_visits_too_large",
-                    node.attrs.span_of("max_visits", &node.span),
-                    format!("`max_visits={limit}` exceeds the hard maximum of {MAX_FIRINGS}"),
-                );
-            }
-            if !looped.contains(&res.id) {
-                continue;
-            }
-            let explicit = [visits, global]
-                .into_iter()
-                .flatten()
-                .filter_map(|n| u32::try_from(n).ok())
-                .min();
-            let max_firings = explicit.map_or(MAX_FIRINGS, |n| n.min(MAX_FIRINGS));
-            if explicit.is_none() && !self.budget_defaulted {
-                self.budget_defaulted = true;
-                self.diags.warning(
-                    "info.budget.default",
-                    node.span.clone(),
-                    format!(
-                        "`{}` is in a loop with no `max_visits`; Fabro's unlimited visits lower to \
-                         the hard maximum of {MAX_FIRINGS} firings",
-                        node.id
-                    ),
-                );
-            }
-            let budget = self
-                .b
-                .graph()
-                .node(res.id)
-                .map_or_else(|| Budget::new(1, STRUCTURAL_TIMEOUT), |n| n.budget);
-            self.b.set_budget(res.id, Budget {
-                max_firings,
-                ..budget
-            });
-        }
-        // The synthetic goal check, when it exists, loops too.
-        if let Some(check) = goal_check {
-            self.b.set_join(check, JoinPolicy::Any);
-            if looped.contains(&check) {
-                let limit = global
-                    .and_then(|n| u32::try_from(n).ok())
-                    .map_or(MAX_FIRINGS, |n| n.min(MAX_FIRINGS));
-                self.b
-                    .set_budget(check, Budget::new(limit, STRUCTURAL_TIMEOUT));
-            }
-        }
     }
 }

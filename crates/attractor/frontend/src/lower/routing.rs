@@ -6,13 +6,16 @@ use std::time::Duration;
 use frontend::Diagnostics;
 use ir::{
     Backoff, BinOp, Candidate, Edge, EdgeTransition, ExprId, GraphBuilder, Guard, NodeId,
-    PickPolicy, RetryOn, RetryPolicy, RoutingGroup, SelectionPolicy, Tier, UnOp,
+    PickPolicy, RetryOn, RetryPolicy, Routing, RoutingGroup, SelectionPolicy, Tier, UnOp,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
 use smol_str::SmolStr;
 
+use super::{Ctx, Kind, attrs, lints, threads};
 use crate::kinds::RETRY_REQUESTED_CLASS;
-use crate::model::{Attrs, NodeDecl, Workflow};
+use crate::model::{Attrs, EdgeDecl, NodeDecl, Workflow};
+use crate::{condition, labels};
 
 /// One of Fabro's failure policies.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -397,4 +400,150 @@ pub(super) fn retry_policy(
     RetryPolicy::attempts(attempts)
         .with_backoff(backoff)
         .with_retry_on(RetryOn::classes(&[RETRY_REQUESTED_CLASS]))
+}
+
+impl Ctx<'_> {
+    /// The node's routing group: its outgoing edges in Fabro's four tiers,
+    /// and the edge table on its meta.
+    pub(super) fn routing(
+        &mut self,
+        node: &NodeDecl,
+        workflow: &Workflow,
+        exit: NodeId,
+        goal_check: Option<NodeId>,
+    ) {
+        let res = self.nodes[&node.id];
+        if matches!(res.kind, Kind::Exit | Kind::Parallel) {
+            // The exit routes nowhere; a parallel node's edges are its fan-out.
+            return;
+        }
+        let edges = workflow.outgoing(&node.id);
+        if edges.is_empty() {
+            return;
+        }
+        lints::all_conditional_edges(node, &edges, &mut self.diags);
+        let random = match node.attrs.text("selection").as_deref() {
+            None => self.random,
+            Some("random") => true,
+            Some("deterministic") => false,
+            Some(other) => {
+                self.diags.error(
+                    "attractor.bad_selection",
+                    node.attrs.span_of("selection", &node.span),
+                    format!("`selection` must be `deterministic` or `random`, not `{other}`"),
+                );
+                false
+            }
+        };
+        // A `start` that fails (a blocking `run_start` hook) ends the run, as
+        // Fabro's blocked run does; it never routes on.
+        let policy = if res.kind == Kind::Start {
+            FailurePolicy {
+                on_failure:           Policy::Exit,
+                on_retries_exhausted: Policy::Exit,
+            }
+        } else {
+            res.policy
+        };
+        let mut lowered = Vec::with_capacity(edges.len());
+        for edge in &edges {
+            let Some(mut to) = self.nodes.get(&edge.to).map(|n| n.id) else {
+                continue;
+            };
+            if let Some(check) = goal_check
+                && to == exit
+            {
+                to = check;
+            }
+            self.unknown_attrs(
+                &edge.attrs,
+                attrs::EDGE,
+                &[],
+                &format!("edge `{} -> {}`", edge.from, edge.to),
+            );
+            let cond = self.edge_condition(edge, policy);
+            let condition_text = edge
+                .attrs
+                .text("condition")
+                .map(|text| text.trim().to_owned())
+                .filter(|text| !text.is_empty());
+            let weight = edge.attrs.int("weight", &mut self.diags).unwrap_or(0);
+            let label = edge.attrs.text("label").filter(|l| !l.is_empty());
+            let restart = edge
+                .attrs
+                .bool("loop_restart", &mut self.diags)
+                .unwrap_or(false);
+            let graph_full = workflow.attrs.text("default_fidelity").as_deref() == Some("full");
+            let map = threads::edge_payload(
+                self.b.exprs(),
+                edge,
+                &self.nodes,
+                graph_full,
+                &mut self.diags,
+            );
+            lowered.push(OutEdge {
+                to,
+                target: edge.to.clone(),
+                condition: cond,
+                condition_text,
+                label_key: label.as_deref().map(labels::routing_key),
+                label,
+                weight,
+                restart,
+                map,
+            });
+        }
+        if lowered.is_empty() {
+            return;
+        }
+        if random && lowered.iter().any(|e| e.condition.is_some()) {
+            self.diags.error(
+                "attractor.random_with_conditions",
+                node.span.clone(),
+                format!(
+                    "`{}` uses `selection=\"random\"` and has conditional edges; Fabro forbids the combination",
+                    node.id
+                ),
+            );
+        }
+        let group = group(
+            &mut self.b,
+            &lowered,
+            policy,
+            res.kind == Kind::Human,
+            random,
+        );
+        // The edge table hooks and hosts read: arm id to target node id,
+        // label and the condition as written, so an `edge_selected` hook
+        // names Fabro nodes, never engine ids, and a host shows the
+        // condition the `route.applied` edge matched.
+        let mut edges = Map::new();
+        for (arm, out) in group.arms.iter().zip(&lowered) {
+            let mut entry = json!({ "to": out.target, "label": out.label });
+            if let Some(condition) = &out.condition_text {
+                entry["condition"] = Value::String(condition.clone());
+            }
+            edges.insert(arm.id.raw().to_string(), entry);
+        }
+        let meta = &mut self.b.node_mut(res.id).meta;
+        if let Value::Object(map) = meta {
+            map.insert("edges".into(), Value::Object(edges));
+        }
+        self.b.node_mut(res.id).routing = Routing::groups(vec![group]);
+    }
+
+    fn edge_condition(&mut self, edge: &EdgeDecl, policy: FailurePolicy) -> Option<ExprId> {
+        let text = edge.attrs.text("condition")?;
+        if text.trim().is_empty() {
+            return None;
+        }
+        let span = edge.attrs.span_of("condition", &edge.span);
+        condition::lower(
+            &text,
+            self.b.exprs(),
+            &span,
+            &mut self.diags,
+            policy.succeeds(),
+        )
+    }
 }

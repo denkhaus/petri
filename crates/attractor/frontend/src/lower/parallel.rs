@@ -43,7 +43,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
-use frontend::Span;
+use frontend::{Diagnostic, Span};
 use ir::placeholder::{BRANCH_ROLE_META, EXPR_PLACEHOLDER_KEY, placeholder_item};
 use ir::{
     BinOp, Budget, Edge, ExpandTarget, Expr, ExprId, ExprOrValue, ExprTable, GraphBuilder,
@@ -52,7 +52,7 @@ use ir::{
 use serde_json::{Map, Value, json};
 use smol_str::SmolStr;
 
-use super::{Ctx, Kind, MAX_FOR_EACH_ITEMS, Resolved, attrs, placeholder, threads};
+use super::{Ctx, Kind, MAX_FOR_EACH_ITEMS, NodeRef, attrs, placeholder, threads};
 use crate::kinds::{
     AGENT_KIND, BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_NODES_KEY, FAN_IN_KIND, FORK_KIND,
     FORK_NODES_FIELD, FORK_OCCURRENCE_FIELD, FORK_SNAPSHOT_FIELD, PROMPT_KIND,
@@ -82,11 +82,11 @@ impl Ctx<'_> {
     pub(super) fn parallel(
         &mut self,
         workflow: &Workflow,
-        resolved: &[Resolved],
         exit: NodeId,
         goal_check: Option<NodeId>,
     ) {
-        for (node, res) in workflow.nodes.iter().zip(resolved) {
+        for node in &workflow.nodes {
+            let res = self.nodes[&node.id];
             if res.kind == Kind::FanIn {
                 self.fan_in_step(node, res.id);
             }
@@ -94,7 +94,7 @@ impl Ctx<'_> {
         let mut pending: Vec<&NodeDecl> = workflow
             .nodes
             .iter()
-            .filter(|node| self.kinds.get(&node.id) == Some(&Kind::Parallel))
+            .filter(|node| self.nodes.get(&node.id).map(|n| n.kind) == Some(Kind::Parallel))
             .collect();
         let mut done: HashSet<String> = HashSet::new();
         // Each lowered parallel node's join, so an outer fork whose branch is
@@ -106,7 +106,8 @@ impl Ctx<'_> {
         while !pending.is_empty() {
             let ready = pending.iter().position(|node| {
                 workflow.outgoing(&node.id).iter().all(|edge| {
-                    self.kinds.get(&edge.to) != Some(&Kind::Parallel) || done.contains(&edge.to)
+                    self.nodes.get(&edge.to).map(|n| n.kind) != Some(Kind::Parallel)
+                        || done.contains(&edge.to)
                 })
             });
             let Some(position) = ready else {
@@ -377,8 +378,8 @@ impl Ctx<'_> {
                 }
             }
         }
-        let join_id = self.ids.get(&join).copied()?;
-        if self.kinds.get(&join) == Some(&Kind::FanIn) {
+        let join_id = self.nodes.get(&join).map(|n| n.id)?;
+        if self.nodes.get(&join).map(|n| n.kind) == Some(Kind::FanIn) {
             // The join reports `parallel_complete` for this fork.
             if let Value::Object(config) = &mut self.b.node_mut(join_id).step.config {
                 config.insert("fork".into(), Value::String(fork.id.clone()));
@@ -453,7 +454,7 @@ impl Ctx<'_> {
     ) -> Option<(String, BTreeSet<String>)> {
         let mut ok = true;
         for edge in edges {
-            let kind = self.kinds.get(&edge.to).copied();
+            let kind = self.nodes.get(&edge.to).map(|n| n.kind);
             if matches!(kind, None | Some(Kind::Start | Kind::Exit | Kind::FanIn)) {
                 self.diags.error(
                     "attractor.parallel.bad_branch_target",
@@ -472,13 +473,13 @@ impl Ctx<'_> {
         }
         let (collector, join) =
             self.branch_collector(fork, edges, workflow, exit, goal_check, joins)?;
-        let fork_id = self.ids[&fork.id];
+        let fork_id = self.nodes[&fork.id].id;
         // A nested fork's branch graphs read their `for_each` lists from the
         // context by expression, which cannot see through a reference: those
         // keys stay inline in this fork's snapshot.
         let mut inline: BTreeSet<String> = BTreeSet::new();
         for edge in edges {
-            if self.kinds.get(&edge.to) != Some(&Kind::Parallel) {
+            if self.nodes.get(&edge.to).map(|n| n.kind) != Some(Kind::Parallel) {
                 continue;
             }
             inline.extend(workflow.node(&edge.to).and_then(for_each_key));
@@ -486,15 +487,16 @@ impl Ctx<'_> {
                 inline.extend(nested.iter().cloned());
             }
         }
-        let with_nodes = edges.iter().any(|edge| self.kinds[&edge.to].is_llm());
+        let with_nodes = edges.iter().any(|edge| self.nodes[&edge.to].kind.is_llm());
         // Every child graph first: a branch node is rewritten into its branch
         // step only after every branch copied its target as lowered, so a
         // duplicate target's child copies the stage and not a branch step.
         let mut prepared = Vec::with_capacity(edges.len());
         for (index, edge) in edges.iter().enumerate() {
             let index = u32::try_from(index).unwrap_or(u32::MAX);
-            let target = self.ids[&edge.to];
-            let kind = self.kinds[&edge.to];
+            let NodeRef {
+                id: target, kind, ..
+            } = self.nodes[&edge.to];
             let region = self.branch_region(&edge.to, target, kind);
             let Some(child) = self.branch_child(&edge.to, &region, Some((fork_id, index))) else {
                 continue;
@@ -581,8 +583,9 @@ impl Ctx<'_> {
             return None;
         }
         let template = edges[0];
-        let target = self.ids.get(&template.to).copied()?;
-        let kind = self.kinds[&template.to];
+        let NodeRef {
+            id: target, kind, ..
+        } = *self.nodes.get(&template.to)?;
         if !kind.is_llm() {
             self.diags.error(
                 "attractor.for_each.target",
@@ -608,7 +611,7 @@ impl Ctx<'_> {
         let (collector, join) =
             self.branch_collector(fork, edges, workflow, exit, goal_check, joins)?;
         let child = self.branch_child(&template.to, &[target], None)?;
-        let fork_id = self.ids[&fork.id];
+        let fork_id = self.nodes[&fork.id].id;
 
         // The expansion reads the item array from the context itself, so
         // the fork's output (the snapshot every clone receives as its input
@@ -917,20 +920,14 @@ impl Ctx<'_> {
         graph.params = self.params();
         let report = ir::check(&graph);
         let span = self
-            .ids
+            .nodes
             .get(target_name)
-            .and_then(|id| self.spans.get(id).cloned())
+            .and_then(|declared| self.spans.get(&declared.id).cloned())
             .unwrap_or_else(|| Span::file(target_name));
         for error in &report.errors {
-            let mut d = frontend::Diagnostic::error(
-                error.code(),
-                span.clone(),
-                format!("branch `{target_name}`: {error}"),
-            );
-            if let Some(hint) = error.hint() {
-                d = d.with_hint(hint);
-            }
-            self.diags.push(d);
+            let mut diagnostic = Diagnostic::validation_error(error, span.clone());
+            diagnostic.message = format!("branch `{target_name}`: {}", diagnostic.message);
+            self.diags.push(diagnostic);
         }
         if !report.errors.is_empty() {
             return None;
