@@ -285,14 +285,14 @@ impl NativeSession {
         let provider = questions.clone();
         let tool_hooks = hook_service.map(|handle| {
             let view = hooks::step_view(ctx, "agent", &config.label, &config.kv);
-            Arc::new(ToolHooks::new(
+            let binding = hooks::ToolHookBinding::new(
                 handle.0.clone(),
                 view,
-                ctx.logs.clone(),
                 ctx.node.clone(),
                 ctx.firing,
                 ctx.attempt,
-            ))
+            );
+            Arc::new(ToolHooks::new(binding, ctx.logs.clone()))
         });
         let mcps = config.mcps.clone();
         let secrets = ctx.secrets.clone();

@@ -10,76 +10,26 @@
 //! middleware was bound with, so a retained session rebinds a new instance
 //! for each node that continues it.
 
-use std::sync::Arc;
-
-use execution::hooks::{HookDecision, HookPoint, HookRequest, HookService};
+use execution::hooks::{HookDecision, HookPoint};
 use frontend_attractor::hooks::HookEvent;
 use ir::{Attempt, FiringId, StepEvent, Value};
 use pebble_agent::{
     ToolCallNext, ToolCallRequest, ToolErrorKind, ToolMiddleware, ToolOutcome, ToolSystemError,
 };
-use runtime::driver::FiringView;
 use serde_json::json;
-use smol_str::SmolStr;
 use steps::ProgressSender;
 
-use super::{ToolPayload, record_report};
+use super::{ToolHookBinding, ToolPayload};
 
 /// The middleware, bound to one node's firing.
 pub struct ToolHooks {
-    service: Arc<dyn HookService>,
-    view:    Arc<FiringView>,
+    binding: ToolHookBinding,
     logs:    ProgressSender,
-    node:    SmolStr,
-    firing:  FiringId,
-    attempt: Attempt,
 }
 
 impl ToolHooks {
-    pub fn new(
-        service: Arc<dyn HookService>,
-        view: Arc<FiringView>,
-        logs: ProgressSender,
-        node: SmolStr,
-        firing: FiringId,
-        attempt: Attempt,
-    ) -> Self {
-        Self {
-            service,
-            view,
-            logs,
-            node,
-            firing,
-            attempt,
-        }
-    }
-
-    async fn ask(&self, point: HookPoint, payload: ToolPayload) -> HookDecision {
-        let report = self
-            .service
-            .run(HookRequest {
-                point,
-                view: Some(self.view.clone()),
-                outcome: None,
-                routes: Vec::new(),
-                payload: serde_json::to_value(&payload).unwrap_or(Value::Null),
-            })
-            .await;
-        let event = match point {
-            HookPoint::BeforeToolUse => HookEvent::PreToolUse,
-            HookPoint::AfterToolUse => HookEvent::PostToolUse,
-            _ => HookEvent::PostToolUseFailure,
-        };
-        record_report(
-            &self.logs,
-            &self.node,
-            self.firing,
-            self.attempt,
-            event,
-            &report,
-        )
-        .await;
-        report.decision
+    pub(crate) fn new(binding: ToolHookBinding, logs: ProgressSender) -> Self {
+        Self { binding, logs }
     }
 }
 
@@ -110,12 +60,17 @@ impl ToolMiddleware for ToolHooks {
         let tool_call_id = request.call().id.clone();
         let tool_input = request.call().input.to_value().ok();
         let decision = self
-            .ask(HookPoint::BeforeToolUse, ToolPayload {
-                tool_name: tool_name.clone(),
-                tool_call_id: Some(tool_call_id.clone()),
-                tool_input,
-                ..ToolPayload::default()
-            })
+            .binding
+            .ask(
+                HookPoint::BeforeToolUse,
+                ToolPayload {
+                    tool_name: tool_name.clone(),
+                    tool_call_id: Some(tool_call_id.clone()),
+                    tool_input,
+                    ..ToolPayload::default()
+                },
+                &self.logs,
+            )
             .await;
         if let HookDecision::Block { reason } = decision {
             // The next layer is never called: the effect cannot happen.
@@ -142,7 +97,7 @@ impl ToolMiddleware for ToolHooks {
             }),
         };
         // Post-tool decisions are ignored, as Fabro ignores them.
-        let _ = self.ask(point, payload).await;
+        let _ = self.binding.ask(point, payload, &self.logs).await;
         Ok(outcome)
     }
 }
