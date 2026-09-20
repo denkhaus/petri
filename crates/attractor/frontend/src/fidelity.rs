@@ -70,15 +70,16 @@ impl Fidelity {
     }
 
     /// Fabro's resolution: the incoming edge, then the node, then the graph
-    /// default, then `compact`.
-    pub fn resolve(edge: Option<Self>, node: Option<Self>, graph: Option<Self>) -> Self {
-        edge.or(node).or(graph).unwrap_or_default()
-    }
-
-    /// The mode a parallel branch's first node runs at: the fork edge, then
-    /// the branch node, each degraded; `None` inherits the fork's preamble.
-    pub fn resolve_branch(edge: Option<Self>, node: Option<Self>) -> Option<Self> {
-        edge.or(node).map(Self::degraded)
+    /// default, then `compact`, with the source the winner came from.
+    pub fn resolve(edge: Option<Self>, node: Option<Self>, graph: Option<Self>) -> (Self, Source) {
+        [
+            (edge, Source::Edge),
+            (node, Source::Node),
+            (graph, Source::Graph),
+        ]
+        .into_iter()
+        .find_map(|(mode, source)| mode.map(|mode| (mode, source)))
+        .unwrap_or((Self::Compact, Source::Default))
     }
 }
 
@@ -105,17 +106,64 @@ impl FromStr for Fidelity {
     }
 }
 
+/// Where a resolved mode or thread came from, as the thread event names
+/// it: the precedence of [`Fidelity::resolve`], the two ways an explicit
+/// `full` degrades, and the thread fallbacks of [`resolve_thread`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Source {
+    /// The incoming edge's attribute.
+    Edge,
+    /// The node's own attribute.
+    Node,
+    /// The graph default.
+    Graph,
+    /// Nothing was set: the built-in `compact`.
+    Default,
+    /// A parallel branch's first node degraded an explicit `full`.
+    Branch,
+    /// A resumed node whose conversation is gone degraded an explicit
+    /// `full`.
+    Resume,
+    /// The node's first class named the thread.
+    Class,
+    /// The previous node's id named the thread.
+    Previous,
+}
+
+impl Source {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Edge => "edge",
+            Self::Node => "node",
+            Self::Graph => "graph",
+            Self::Default => "default",
+            Self::Branch => "branch",
+            Self::Resume => "resume",
+            Self::Class => "class",
+            Self::Previous => "previous",
+        }
+    }
+}
+
 /// Fabro's thread resolution: the incoming edge's `thread_id`, then the
 /// node's, then the graph's `default_thread`, then the node's first class,
-/// then the previous node's id.
+/// then the previous node's id, with the source the winner came from.
 pub fn resolve_thread<'a>(
     edge: Option<&'a str>,
     node: Option<&'a str>,
     graph: Option<&'a str>,
     first_class: Option<&'a str>,
     previous: Option<&'a str>,
-) -> Option<&'a str> {
-    edge.or(node).or(graph).or(first_class).or(previous)
+) -> Option<(&'a str, Source)> {
+    [
+        (edge, Source::Edge),
+        (node, Source::Node),
+        (graph, Source::Graph),
+        (first_class, Source::Class),
+        (previous, Source::Previous),
+    ]
+    .into_iter()
+    .find_map(|(thread, source)| thread.map(|thread| (thread, source)))
 }
 
 #[cfg(test)]
@@ -140,45 +188,35 @@ mod tests {
                 Some(Fidelity::Full),
                 Some(Fidelity::SummaryLow)
             ),
-            Fidelity::Truncate
+            (Fidelity::Truncate, Source::Edge)
         );
         assert_eq!(
             Fidelity::resolve(None, Some(Fidelity::Full), Some(Fidelity::SummaryLow)),
-            Fidelity::Full
+            (Fidelity::Full, Source::Node)
         );
         assert_eq!(
             Fidelity::resolve(None, None, Some(Fidelity::SummaryLow)),
-            Fidelity::SummaryLow
-        );
-        assert_eq!(Fidelity::resolve(None, None, None), Fidelity::Compact);
-    }
-
-    #[test]
-    fn a_branch_degrades_full_and_inherits_when_unset() {
-        assert_eq!(
-            Fidelity::resolve_branch(Some(Fidelity::Full), None),
-            Some(Fidelity::SummaryHigh)
+            (Fidelity::SummaryLow, Source::Graph)
         );
         assert_eq!(
-            Fidelity::resolve_branch(None, Some(Fidelity::SummaryLow)),
-            Some(Fidelity::SummaryLow)
+            Fidelity::resolve(None, None, None),
+            (Fidelity::Compact, Source::Default)
         );
-        assert_eq!(Fidelity::resolve_branch(None, None), None);
     }
 
     #[test]
     fn threads_fall_through_to_the_class_and_the_previous_node() {
         assert_eq!(
             resolve_thread(Some("e"), Some("n"), Some("g"), Some("c"), Some("p")),
-            Some("e")
+            Some(("e", Source::Edge))
         );
         assert_eq!(
             resolve_thread(None, None, None, Some("impl"), Some("plan")),
-            Some("impl")
+            Some(("impl", Source::Class))
         );
         assert_eq!(
             resolve_thread(None, None, None, None, Some("plan")),
-            Some("plan")
+            Some(("plan", Source::Previous))
         );
         assert_eq!(resolve_thread(None, None, None, None, None), None);
     }

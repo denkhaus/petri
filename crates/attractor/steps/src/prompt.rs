@@ -32,6 +32,7 @@
 //! the duration.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use frontend_attractor::Policy;
@@ -57,7 +58,6 @@ use crate::outcome::{ExplicitRoutes, Stage};
 use crate::parallel::{BRANCH_COUNT_KEY, RESULTS_KEY, parallel_complete, strip_placeholders};
 use crate::pebble::environment::PebbleEnvironment;
 use crate::pebble::{PebbleClient, profile_of};
-use crate::preamble;
 use crate::stage::{self, RunInfo};
 
 pub const KIND: StepKindId = PROMPT_KIND;
@@ -233,7 +233,7 @@ impl PromptConfig {
         };
         let mut body = String::new();
         if !self.sources.is_empty() {
-            body.push_str(&preamble::branch_results(&self.sources, results));
+            body.push_str(&branch_results(&self.sources, results));
         }
         body.push_str(&self.prompt);
         if let Some(item) = self.item_data.as_deref().filter(|item| !item.is_empty()) {
@@ -626,4 +626,44 @@ fn metrics(started: Instant, turns: u64, usage: &Usage) -> Metrics {
         .collect(),
         ..Metrics::default()
     }
+}
+
+/// The branch results a prompted fan-in joins, one section per branch in
+/// branch order: the source node, its status, and its result. A result that
+/// still holds an output reference is named as such; the step hydrates
+/// references before rendering when the store is available.
+fn branch_results(sources: &[String], results: &Value) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "Parallel branch results ({} branches: {}):",
+        sources.len(),
+        sources.join(", ")
+    );
+    match results.as_array() {
+        Some(items) if !items.is_empty() => {
+            for (position, item) in items.iter().enumerate() {
+                let id = item.get("id").and_then(Value::as_str).unwrap_or("?");
+                let status = item.get("status").and_then(Value::as_str).unwrap_or("?");
+                let index = item
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(position as u64);
+                let _ = writeln!(out, "\n### Branch {index}: {id} ({status})");
+                let body = item
+                    .get("context_updates")
+                    .or_else(|| item.get("output"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                if blobs::holds_ref(&body) {
+                    out.push_str("(result stored as an output reference)\n");
+                }
+                out.push_str(&serde_json::to_string_pretty(&body).unwrap_or_default());
+                out.push('\n');
+            }
+        }
+        _ => out.push_str("(no branch results)\n"),
+    }
+    out.push('\n');
+    out
 }

@@ -14,11 +14,11 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-pub use frontend_attractor::fidelity::{Fidelity, resolve_thread};
+use frontend_attractor::fidelity::resolve_thread;
+pub use frontend_attractor::fidelity::{Fidelity, Source};
 use frontend_attractor::kinds::GOAL_CHECK_NODE;
 use ir::Value;
 use serde::Deserialize;
-use serde_json::Map;
 
 use crate::outcome::fabro_outcome;
 
@@ -75,9 +75,9 @@ pub struct ThreadConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Resolved {
     pub fidelity:        Fidelity,
-    pub fidelity_source: &'static str,
+    pub fidelity_source: Source,
     pub thread:          Option<String>,
-    pub thread_source:   Option<&'static str>,
+    pub thread_source:   Option<Source>,
 }
 
 /// Fabro's resolution for a node entered along `incoming`. `branch` says the
@@ -91,48 +91,36 @@ pub fn resolve(
     degrade: bool,
 ) -> Resolved {
     let parse = |text: &Option<String>| text.as_deref().and_then(|t| t.parse::<Fidelity>().ok());
-    let edge = parse(&incoming.fidelity);
-    let node = parse(&config.fidelity);
-    let graph = parse(&config.default_fidelity);
-    let (mut fidelity, source) = match (edge, node, graph) {
-        (Some(mode), _, _) => (mode, "edge"),
-        (None, Some(mode), _) => (mode, "node"),
-        (None, None, Some(mode)) => (mode, "graph"),
-        (None, None, None) => (Fidelity::Compact, "default"),
-    };
-    let mut fidelity_source = source;
+    let (mut fidelity, mut fidelity_source) = Fidelity::resolve(
+        parse(&incoming.fidelity),
+        parse(&config.fidelity),
+        parse(&config.default_fidelity),
+    );
     if branch || degrade {
         let degraded = fidelity.degraded();
         if degraded != fidelity {
             fidelity = degraded;
-            fidelity_source = if branch { "branch" } else { "resume" };
+            fidelity_source = if branch {
+                Source::Branch
+            } else {
+                Source::Resume
+            };
         }
     }
-    let (thread, thread_source) = if branch {
-        (None, None)
+    let thread = if branch {
+        None
     } else {
-        let candidates = [
-            (incoming.thread_id.as_deref(), "edge"),
-            (config.thread_id.as_deref(), "node"),
-            (config.default_thread.as_deref(), "graph"),
-            (config.classes.first().map(String::as_str), "class"),
-            (incoming.from.as_deref(), "previous"),
-        ];
-        let found = resolve_thread(
-            candidates[0].0,
-            candidates[1].0,
-            candidates[2].0,
-            candidates[3].0,
-            candidates[4].0,
-        );
-        let source = found.and_then(|thread| {
-            candidates
-                .iter()
-                .find(|(candidate, _)| *candidate == Some(thread))
-                .map(|(_, source)| *source)
-        });
-        (found.map(str::to_owned), source)
+        resolve_thread(
+            incoming.thread_id.as_deref(),
+            config.thread_id.as_deref(),
+            config.default_thread.as_deref(),
+            config.classes.first().map(String::as_str),
+            incoming.from.as_deref(),
+        )
     };
+    let (thread, thread_source) = thread
+        .map(|(thread, source)| (thread.to_owned(), source))
+        .unzip();
     Resolved {
         fidelity,
         fidelity_source,
@@ -177,6 +165,19 @@ struct Completed<'a> {
     text:     Option<String>,
     /// The context keys this stage's output already rendered.
     rendered: Vec<String>,
+}
+
+/// How much of a completed stage a preamble shows under its heading.
+#[derive(Clone, Copy, Debug)]
+enum Detail {
+    /// Fabro's compact details, by the stage's kind: a command's script and
+    /// output, an LLM stage's model. `compact` and `summary:medium`.
+    Compact,
+    /// The handler, the script and the model. `summary:low`.
+    Low,
+    /// Everything the record carries: the handler, script, output, model,
+    /// response, notes and failure reason. `summary:high`.
+    High,
 }
 
 impl Preamble<'_> {
@@ -236,7 +237,7 @@ impl Preamble<'_> {
             parts.push("\n## Completed stages".to_owned());
             for stage in &completed {
                 parts.push(format!("- **{}**: {}", stage.id, stage.status));
-                parts.extend(compact_details(stage, "  "));
+                parts.extend(stage.details(Detail::Compact, "  "));
             }
         }
         parts.extend(self.context_list(&completed));
@@ -263,41 +264,7 @@ impl Preamble<'_> {
         for stage in &completed {
             parts.push(format!("\n## Stage: {}", stage.id));
             parts.push(format!("- Status: {}", stage.status));
-            if let Some(kind) = stage.kind {
-                parts.push(format!("- Handler: {kind}"));
-            }
-            if let Some(script) = stage.script {
-                parts.push(format!("- Script: `{script}`"));
-            }
-            if let Some(output) = &stage.output {
-                if output.trim().is_empty() {
-                    parts.push("- Output: (empty)".to_owned());
-                } else {
-                    parts.push("- Output:".to_owned());
-                    parts.push("  ```".to_owned());
-                    parts.push(tail_lines(
-                        output.trim(),
-                        SUMMARY_HIGH_OUTPUT_MAX_LINES,
-                        "  ",
-                    ));
-                    parts.push("  ```".to_owned());
-                }
-            }
-            if let Some(model) = &stage.model {
-                parts.push(format!("- Model: {model}"));
-            }
-            if let Some(text) = &stage.text {
-                parts.push("- Response:".to_owned());
-                for line in bounded(text).lines() {
-                    parts.push(format!("  > {line}"));
-                }
-            }
-            if let Some(notes) = &stage.notes {
-                parts.push(format!("- Notes: {notes}"));
-            }
-            if let Some(reason) = &stage.reason {
-                parts.push(format!("- Failure reason: {reason}"));
-            }
+            parts.extend(stage.details(Detail::High, ""));
         }
         let rows = self.context_rows(&completed);
         if !rows.is_empty() {
@@ -322,8 +289,8 @@ impl Preamble<'_> {
         let mut parts = self.summary_header(&completed, SUMMARY_MEDIUM_STAGES);
         let start = completed.len().saturating_sub(SUMMARY_MEDIUM_STAGES);
         for stage in &completed[start..] {
-            parts.push(stage_line(stage));
-            parts.extend(compact_details(stage, "  "));
+            parts.push(stage.line());
+            parts.extend(stage.details(Detail::Compact, "  "));
         }
         parts.extend(self.context_list(&completed));
         parts.push(String::new());
@@ -335,16 +302,8 @@ impl Preamble<'_> {
         let mut parts = self.summary_header(&completed, SUMMARY_LOW_STAGES);
         let start = completed.len().saturating_sub(SUMMARY_LOW_STAGES);
         for stage in &completed[start..] {
-            parts.push(stage_line(stage));
-            if let Some(kind) = stage.kind {
-                parts.push(format!("  - Handler: {kind}"));
-            }
-            if let Some(script) = stage.script {
-                parts.push(format!("  - Script: `{script}`"));
-            }
-            if let Some(model) = &stage.model {
-                parts.push(format!("  - Model: {model}"));
-            }
+            parts.push(stage.line());
+            parts.extend(stage.details(Detail::Low, "  "));
         }
         parts.push(String::new());
         parts.join("\n")
@@ -465,49 +424,91 @@ fn completed_stage<'a>(
     })
 }
 
-/// Fabro's compact per-stage details: a command's script and output, an LLM
-/// stage's model.
-fn compact_details(stage: &Completed<'_>, indent: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    match stage.kind {
-        Some("command") => {
-            if let Some(script) = stage.script {
-                parts.push(format!("{indent}- Script: `{script}`"));
-            }
-            if let Some(output) = &stage.output {
-                if output.trim().is_empty() {
-                    parts.push(format!("{indent}- Output: (empty)"));
-                } else {
-                    parts.push(format!("{indent}- Output:"));
-                    parts.push(format!("{indent}  ```"));
-                    parts.push(tail_lines(
-                        output.trim(),
-                        COMPACT_OUTPUT_MAX_LINES,
-                        &format!("{indent}  "),
-                    ));
-                    parts.push(format!("{indent}  ```"));
-                }
-            }
+impl Completed<'_> {
+    /// The stage's summary line: its id and status, with the notes and the
+    /// failure reason when it has them.
+    fn line(&self) -> String {
+        let mut line = format!("- {}: {}", self.id, self.status);
+        if let Some(notes) = &self.notes {
+            let _ = write!(line, " ({notes})");
         }
-        Some("agent" | "prompt") => {
-            if let Some(model) = &stage.model {
-                parts.push(format!("{indent}- Model: {model}"));
-            }
+        if let Some(reason) = &self.reason {
+            let _ = write!(line, " [reason: {reason}]");
         }
-        _ => {}
+        line
     }
-    parts
-}
 
-fn stage_line(stage: &Completed<'_>) -> String {
-    let mut line = format!("- {}: {}", stage.id, stage.status);
-    if let Some(notes) = &stage.notes {
-        let _ = write!(line, " ({notes})");
+    /// The bullet lines under the stage's heading, each prefixed with
+    /// `indent`.
+    fn details(&self, detail: Detail, indent: &str) -> Vec<String> {
+        let handler = self.kind.map(|kind| format!("{indent}- Handler: {kind}"));
+        let script = self
+            .script
+            .map(|script| format!("{indent}- Script: `{script}`"));
+        let model = self
+            .model
+            .as_deref()
+            .map(|model| format!("{indent}- Model: {model}"));
+        let mut parts = Vec::new();
+        match detail {
+            Detail::Compact => match self.kind {
+                Some("command") => {
+                    parts.extend(script);
+                    parts.extend(self.output_block(COMPACT_OUTPUT_MAX_LINES, indent));
+                }
+                Some("agent" | "prompt") => parts.extend(model),
+                _ => {}
+            },
+            Detail::Low => {
+                parts.extend(handler);
+                parts.extend(script);
+                parts.extend(model);
+            }
+            Detail::High => {
+                parts.extend(handler);
+                parts.extend(script);
+                parts.extend(self.output_block(SUMMARY_HIGH_OUTPUT_MAX_LINES, indent));
+                parts.extend(model);
+                if let Some(text) = &self.text {
+                    parts.push(format!("{indent}- Response:"));
+                    parts.extend(
+                        bounded(text)
+                            .lines()
+                            .map(|line| format!("{indent}  > {line}")),
+                    );
+                }
+                parts.extend(
+                    self.notes
+                        .as_deref()
+                        .map(|notes| format!("{indent}- Notes: {notes}")),
+                );
+                parts.extend(
+                    self.reason
+                        .as_deref()
+                        .map(|reason| format!("{indent}- Failure reason: {reason}")),
+                );
+            }
+        }
+        parts
     }
-    if let Some(reason) = &stage.reason {
-        let _ = write!(line, " [reason: {reason}]");
+
+    /// The command's output as a fenced block of its last `max_lines`
+    /// lines, or `(empty)`; nothing for a stage that produced none.
+    fn output_block(&self, max_lines: usize, indent: &str) -> Vec<String> {
+        let Some(output) = self.output.as_deref() else {
+            return Vec::new();
+        };
+        let output = output.trim();
+        if output.is_empty() {
+            return vec![format!("{indent}- Output: (empty)")];
+        }
+        vec![
+            format!("{indent}- Output:"),
+            format!("{indent}  ```"),
+            tail_lines(output, max_lines, &format!("{indent}  ")),
+            format!("{indent}  ```"),
+        ]
     }
-    line
 }
 
 /// The last `max` lines of `text`, each prefixed with `indent`, with an
@@ -600,14 +601,9 @@ pub fn stages(value: &Value) -> Vec<StageInfo> {
     serde_json::from_value(value.clone()).unwrap_or_default()
 }
 
-/// An empty kv, for callers with no context.
-pub fn empty_kv() -> Value {
-    Value::Object(Map::new())
-}
-
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Map, json};
 
     use super::*;
 
@@ -655,22 +651,17 @@ mod tests {
             compact,
             "Goal: Add a /health endpoint\n\n## Completed stages\n- **plan**: succeeded\n  - Model: claude\n- **test**: failed\n  - Script: `cargo test`\n  - Output:\n    ```\n    line 1\n    line 2\n    ```\n\n## Context\n- tests_passed: false\n"
         );
-        let high = p.render(Fidelity::SummaryHigh);
-        assert!(
-            high.contains("Pipeline progress: 2 of 2 stages completed"),
-            "{high}"
+        assert_eq!(
+            p.render(Fidelity::SummaryHigh),
+            "Goal: Add a /health endpoint\nRun ID: run-1\nPipeline progress: 2 of 2 stages completed\n\n## Stage: plan\n- Status: succeeded\n- Handler: agent\n- Model: claude\n- Response:\n  > Plan it.\n\n## Stage: test\n- Status: failed\n- Handler: command\n- Script: `cargo test`\n- Output:\n  ```\n  line 1\n  line 2\n  ```\n- Failure reason: exit 1\n\n## Current context\n| Key | Value |\n|-----|-------|\n| tests_passed | false |\n"
         );
-        assert!(high.contains("## Stage: plan\n- Status: succeeded\n- Handler: agent\n- Model: claude\n- Response:\n  > Plan it."), "{high}");
-        assert!(high.contains("- Failure reason: exit 1"), "{high}");
-        assert!(high.contains("| tests_passed | false |"), "{high}");
-        let low = p.render(Fidelity::SummaryLow);
-        assert!(low.starts_with("Goal: Add a /health endpoint\nRun ID: run-1\nCompleted 2 stage(s) so far.\n\nRecent stages:\n- plan: succeeded\n  - Handler: agent\n  - Model: claude\n- test: failed [reason: exit 1]\n  - Handler: command\n  - Script: `cargo test`\n"), "{low}");
-        assert!(!low.contains("## Context"));
-        let medium = p.render(Fidelity::SummaryMedium);
-        assert!(medium.contains("Recent stages:\n- plan: succeeded\n  - Model: claude\n- test: failed [reason: exit 1]\n  - Script: `cargo test`"), "{medium}");
-        assert!(
-            medium.contains("## Context\n- tests_passed: false"),
-            "{medium}"
+        assert_eq!(
+            p.render(Fidelity::SummaryLow),
+            "Goal: Add a /health endpoint\nRun ID: run-1\nCompleted 2 stage(s) so far.\n\nRecent stages:\n- plan: succeeded\n  - Handler: agent\n  - Model: claude\n- test: failed [reason: exit 1]\n  - Handler: command\n  - Script: `cargo test`\n"
+        );
+        assert_eq!(
+            p.render(Fidelity::SummaryMedium),
+            "Goal: Add a /health endpoint\nRun ID: run-1\nCompleted 2 stage(s) so far.\n\nRecent stages:\n- plan: succeeded\n  - Model: claude\n- test: failed [reason: exit 1]\n  - Script: `cargo test`\n  - Output:\n    ```\n    line 1\n    line 2\n    ```\n\n## Context\n- tests_passed: false\n"
         );
         assert_eq!(p.prompt(Fidelity::Full, "Do it."), "Do it.");
         assert!(
@@ -729,21 +720,24 @@ mod tests {
             thread_id: None,
         };
         let r = resolve(&config, &incoming, false, false);
-        assert_eq!((r.fidelity, r.fidelity_source), (Fidelity::Full, "node"));
+        assert_eq!(
+            (r.fidelity, r.fidelity_source),
+            (Fidelity::Full, Source::Node)
+        );
         assert_eq!(
             (r.thread.as_deref(), r.thread_source),
-            (Some("impl"), Some("class"))
+            (Some("impl"), Some(Source::Class))
         );
         let r = resolve(&config, &incoming, true, false);
         assert_eq!(
             (r.fidelity, r.fidelity_source),
-            (Fidelity::SummaryHigh, "branch")
+            (Fidelity::SummaryHigh, Source::Branch)
         );
-        assert_eq!(r.thread, None);
+        assert_eq!((r.thread, r.thread_source), (None, None));
         let r = resolve(&config, &incoming, false, true);
         assert_eq!(
             (r.fidelity, r.fidelity_source),
-            (Fidelity::SummaryHigh, "resume")
+            (Fidelity::SummaryHigh, Source::Resume)
         );
         let edge = Incoming {
             from:      Some("plan".into()),
@@ -753,11 +747,11 @@ mod tests {
         let r = resolve(&config, &edge, false, false);
         assert_eq!(
             (r.fidelity, r.fidelity_source),
-            (Fidelity::Truncate, "edge")
+            (Fidelity::Truncate, Source::Edge)
         );
         assert_eq!(
             (r.thread.as_deref(), r.thread_source),
-            (Some("side"), Some("edge"))
+            (Some("side"), Some(Source::Edge))
         );
         let bare = resolve(
             &ThreadConfig::default(),
@@ -767,11 +761,11 @@ mod tests {
         );
         assert_eq!(
             (bare.fidelity, bare.fidelity_source),
-            (Fidelity::Compact, "default")
+            (Fidelity::Compact, Source::Default)
         );
         assert_eq!(
             (bare.thread.as_deref(), bare.thread_source),
-            (Some("a"), Some("previous"))
+            (Some("a"), Some(Source::Previous))
         );
         assert_eq!(Incoming::from_value(&json!(null)), Incoming::default());
     }
