@@ -45,7 +45,9 @@ use crate::blobs::{self, OutputStore};
 use crate::compaction;
 use crate::contract::{Contract, Parsed, repair_message, validate};
 use crate::fallback::{self, FrozenPlan, Plan, Route, StageRequest};
-use crate::fidelity::{self, Fidelity, Incoming, Preamble, Resolved, StageInfo, ThreadConfig};
+use crate::fidelity::{
+    self, Fidelity, Incoming, Preamble, Resolved, Source, StageInfo, ThreadConfig,
+};
 use crate::outcome::{ExplicitRoutes, Stage};
 use crate::pebble::{PebbleClient, Resume};
 use crate::sessions::{Retained, SessionService};
@@ -382,9 +384,9 @@ impl Step for AgentStep {
                 "firing": ctx.firing,
                 "attempt": ctx.attempt,
                 "fidelity": resolved.fidelity.as_str(),
-                "fidelity_source": resolved.fidelity_source,
+                "fidelity_source": resolved.fidelity_source.as_str(),
                 "thread": resolved.thread,
-                "thread_source": resolved.thread_source,
+                "thread_source": resolved.thread_source.map(Source::as_str),
                 "reused": reused,
                 "backend": match config.backend { AgentBackend::Api => "api", AgentBackend::Acp => "acp" },
             })))

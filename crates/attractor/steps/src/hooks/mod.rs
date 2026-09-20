@@ -185,6 +185,99 @@ pub struct ToolPayload {
     pub error_message: Option<String>,
 }
 
+/// A step's binding to the hook service at the tool boundary: the service,
+/// the firing view it reads, and the node, firing and attempt every report
+/// and warning is attributed to. Both agent backends ask through one: the
+/// native agent's tool middleware ([`tools::ToolHooks`]) and the ACP client.
+pub(crate) struct ToolHookBinding {
+    service: Arc<dyn HookService>,
+    view:    Arc<FiringView>,
+    node:    SmolStr,
+    firing:  ir::FiringId,
+    attempt: ir::Attempt,
+}
+
+impl ToolHookBinding {
+    pub(crate) fn new(
+        service: Arc<dyn HookService>,
+        view: Arc<FiringView>,
+        node: SmolStr,
+        firing: ir::FiringId,
+        attempt: ir::Attempt,
+    ) -> Self {
+        Self {
+            service,
+            view,
+            node,
+            firing,
+            attempt,
+        }
+    }
+
+    /// Ask the service at one tool point and record what it reported; the
+    /// decision is the caller's to apply.
+    pub(crate) async fn ask(
+        &self,
+        point: HookPoint,
+        payload: ToolPayload,
+        logs: &steps::ProgressSender,
+    ) -> HookDecision {
+        let report = self
+            .service
+            .run(HookRequest {
+                point,
+                view: Some(self.view.clone()),
+                outcome: None,
+                routes: Vec::new(),
+                payload: serde_json::to_value(&payload).unwrap_or(Value::Null),
+            })
+            .await;
+        record_report(
+            logs,
+            &self.node,
+            self.firing,
+            self.attempt,
+            tool_event(point),
+            &report,
+        )
+        .await;
+        report.decision
+    }
+
+    /// The [`WARNING_EVENT`] that says this node's backend could not enforce
+    /// `hook` at `boundary`.
+    pub(crate) fn warning(
+        &self,
+        backend: &str,
+        hook: &str,
+        event: HookEvent,
+        boundary: &str,
+        message: &str,
+    ) -> ir::StepEvent {
+        warning_event(
+            &self.node,
+            self.firing,
+            self.attempt,
+            backend,
+            hook,
+            event,
+            boundary,
+            message,
+        )
+    }
+}
+
+/// The Fabro event a report from the tool boundary is recorded under.
+fn tool_event(point: HookPoint) -> HookEvent {
+    match point {
+        HookPoint::BeforeToolUse => HookEvent::PreToolUse,
+        HookPoint::AfterToolUse => HookEvent::PostToolUse,
+        // `AfterToolFailure`: nothing else is a tool boundary, so a binding
+        // never asks another point.
+        _ => HookEvent::PostToolUseFailure,
+    }
+}
+
 /// One configured hook with its compiled matcher.
 struct Configured {
     definition: HookDefinition,

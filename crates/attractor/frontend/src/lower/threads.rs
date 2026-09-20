@@ -14,7 +14,7 @@ use frontend::{Diagnostic, Diagnostics, Span};
 use ir::{ExprId, ExprTable, Value};
 use serde_json::{Map, json};
 
-use super::{Kind, attrs, placeholder};
+use super::{Kind, NodeRef, attrs, placeholder};
 use crate::fidelity::Fidelity;
 use crate::model::{Attrs, EdgeDecl, NodeDecl, Workflow};
 
@@ -250,15 +250,15 @@ pub(super) fn check_fork_edge(edge: &EdgeDecl, diags: &mut Diagnostics) {
 pub(super) fn edge_payload(
     exprs: &mut ExprTable,
     edge: &EdgeDecl,
-    kinds: &HashMap<String, Kind>,
+    nodes: &HashMap<String, NodeRef>,
     graph_fidelity_full: bool,
     diags: &mut Diagnostics,
 ) -> Option<ExprId> {
-    let target = kinds.get(&edge.to)?;
-    if !target.is_llm() {
+    let target = nodes.get(&edge.to)?;
+    if !target.kind.is_llm() {
         return None;
     }
-    if kinds.get(&edge.from) == Some(&Kind::Parallel) {
+    if nodes.get(&edge.from).map(|n| n.kind) == Some(Kind::Parallel) {
         // A fork edge is the parallel lowering's; `check_fork_edge` diagnoses it.
         return None;
     }
@@ -290,17 +290,17 @@ pub(super) fn edge_payload(
 pub(super) fn is_branch_first(
     node: &NodeDecl,
     workflow: &Workflow,
-    kinds: &HashMap<String, Kind>,
+    nodes: &HashMap<String, NodeRef>,
 ) -> bool {
     workflow
         .incoming(&node.id)
         .iter()
-        .any(|edge| kinds.get(&edge.from) == Some(&Kind::Parallel))
+        .any(|edge| nodes.get(&edge.from).map(|n| n.kind) == Some(Kind::Parallel))
 }
 
 /// A stage description for the preamble: every node's kind, and for a
 /// command its script, keyed by Fabro node id, in declaration order.
-pub(super) fn stages(workflow: &Workflow, kinds: &HashMap<String, Kind>) -> Value {
+pub(super) fn stages(workflow: &Workflow, nodes: &HashMap<String, NodeRef>) -> Value {
     Value::Array(
         workflow
             .nodes
@@ -308,8 +308,8 @@ pub(super) fn stages(workflow: &Workflow, kinds: &HashMap<String, Kind>) -> Valu
             .map(|node| {
                 let mut stage = Map::new();
                 stage.insert("id".into(), json!(node.id));
-                if let Some(kind) = kinds.get(&node.id) {
-                    stage.insert("kind".into(), json!(kind.name()));
+                if let Some(declared) = nodes.get(&node.id) {
+                    stage.insert("kind".into(), json!(declared.kind.name()));
                 }
                 if let Some(script) = node.attrs.text("script") {
                     stage.insert("script".into(), json!(script));

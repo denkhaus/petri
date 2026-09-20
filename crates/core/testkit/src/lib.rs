@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use std::{env, fs, process};
+use std::{env, fs, process, thread};
 
 use driver::ExecutionReport;
 use executor::Retention;
@@ -385,17 +385,34 @@ pub async fn wait_for_run_dir_release(run_dir: &Path, limit: Duration) {
 /// The run id every sandbox of the run under `run_dir` is labelled with:
 /// the run key the coordinator recorded in `run.json`, or, for a driver
 /// with no coordinator, the id its router derives from the directory.
+///
+/// The store creates `run.json` before it fills it and truncates it before
+/// every rewrite, so a reader that polls while a run starts or ends can see
+/// the file empty or cut short. Such a read is retried briefly; only a file
+/// that stays unreadable is an error.
 pub fn recorded_run_id(run_dir: &Path) -> String {
-    if let Ok(bytes) = fs::read(run_dir.join(store::RUN_FILE)) {
-        let run: serde_json::Value = serde_json::from_slice(&bytes).expect("run.json is JSON");
-        return run["key"]
-            .as_str()
-            .expect("run.json names the run key")
-            .to_owned();
+    let path = run_dir.join(store::RUN_FILE);
+    let mut attempts = 0;
+    loop {
+        let Ok(bytes) = fs::read(&path) else {
+            return executor_sandbox::RunIdentity::for_run_dir(run_dir.to_path_buf())
+                .run_id()
+                .to_owned();
+        };
+        match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(run) => {
+                return run["key"]
+                    .as_str()
+                    .expect("run.json names the run key")
+                    .to_owned();
+            }
+            Err(error) => {
+                assert!(attempts < 20, "run.json is JSON: {error}");
+                attempts += 1;
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
     }
-    executor_sandbox::RunIdentity::for_run_dir(run_dir.to_path_buf())
-        .run_id()
-        .to_owned()
 }
 
 /// The name of the container sandbox for `lease` of the run under

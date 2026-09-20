@@ -17,7 +17,7 @@ use tokio::time::timeout;
 use super::AgentConfig;
 use crate::acp::{AcpError, AcpHooks, Client, Stage};
 use crate::fallback::{ModelFailure, Plan};
-use crate::hooks::step_view;
+use crate::hooks::{ToolHookBinding, step_view};
 use crate::pebble::{NativeSession, Resume};
 
 /// How an agent node runs. The native API agent is the default, as Fabro's
@@ -125,12 +125,15 @@ impl Session {
                     let service = &handle.0;
                     let mut post = service.configured_hooks(HookPoint::AfterToolUse);
                     post.extend(service.configured_hooks(HookPoint::AfterToolFailure));
-                    let hooks = AcpHooks::new(
+                    let binding = ToolHookBinding::new(
                         service.clone(),
                         step_view(ctx, "agent", &config.label, &config.kv),
                         ctx.node.clone(),
                         ctx.firing,
                         ctx.attempt,
+                    );
+                    let hooks = AcpHooks::new(
+                        binding,
                         service.configured_hooks(HookPoint::BeforeToolUse),
                         post,
                     );

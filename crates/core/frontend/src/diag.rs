@@ -95,6 +95,26 @@ impl Diagnostic {
         self
     }
 
+    /// An error of the engine's own validation ([`ir::check`]) at `span`,
+    /// with the hint the check gives.
+    pub fn validation_error(error: &ir::ValidationError, span: Span) -> Self {
+        let diagnostic = Self::error(error.code(), span, error.to_string());
+        match error.hint() {
+            Some(hint) => diagnostic.with_hint(hint),
+            None => diagnostic,
+        }
+    }
+
+    /// A warning of the engine's own validation at `span`, with the hint
+    /// the check gives.
+    pub fn validation_warning(warning: &ir::ValidationWarning, span: Span) -> Self {
+        let diagnostic = Self::warning(warning.code(), span, warning.to_string());
+        match warning.hint() {
+            Some(hint) => diagnostic.with_hint(hint),
+            None => diagnostic,
+        }
+    }
+
     pub fn is_error(&self) -> bool {
         self.severity == Severity::Error
     }
@@ -187,6 +207,28 @@ impl Diagnostics {
 
     pub fn extend(&mut self, other: Self) {
         self.items.extend(other.items);
+    }
+
+    /// Every error and warning of an engine validation report, each at the
+    /// span `span_of` gives its primary node, or `fallback` when the report
+    /// names no node or the node has no span.
+    pub fn extend_from_report(
+        &mut self,
+        report: &ir::ValidationReport,
+        span_of: impl Fn(ir::NodeId) -> Option<Span>,
+        fallback: &Span,
+    ) {
+        for error in &report.errors {
+            let span = error
+                .primary_node()
+                .and_then(&span_of)
+                .unwrap_or_else(|| fallback.clone());
+            self.push(Diagnostic::validation_error(error, span));
+        }
+        for warning in &report.warnings {
+            let span = span_of(warning.primary_node()).unwrap_or_else(|| fallback.clone());
+            self.push(Diagnostic::validation_warning(warning, span));
+        }
     }
 }
 

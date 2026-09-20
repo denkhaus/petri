@@ -445,6 +445,144 @@ fn snapshot_of(kv: &Value) -> BTreeMap<SmolStr, Value> {
     }
 }
 
+/// A branch at its end: what its envelope and its completed event say, and
+/// what the engine is told.
+struct Close {
+    disposition: BranchDisposition,
+    /// The envelope's Fabro status.
+    status:      StageOutcome,
+    /// The envelope's `context_updates`.
+    updates:     Map<String, Value>,
+    /// The failure the engine is told about when the branch failed: the
+    /// child's own, or why it could not start.
+    failure:     Option<FailureInfo>,
+}
+
+impl Settled {
+    /// Close the branch. The child's own result decides: a child that
+    /// finished before the stop reached it completed, whatever the parent
+    /// was told. A cancelled or killed branch is `failed` with no changes,
+    /// as Fabro's `failed_branch_result` reports it.
+    fn close(self, snapshot: &BTreeMap<SmolStr, Value>) -> Close {
+        match self {
+            Self::Killed => Close::without_changes(BranchDisposition::Killed),
+            Self::Result(result) if result.status == RunStatus::Cancelled => {
+                Close::without_changes(BranchDisposition::Cancelled)
+            }
+            Self::Result(result) => Close {
+                disposition: BranchDisposition::Completed,
+                status:      branch_status(&result),
+                updates:     branch_updates(&result.updates, snapshot, &result.context),
+                failure:     result.failure,
+            },
+        }
+    }
+}
+
+impl Close {
+    /// A branch that ended `failed` with no changes and no failure of its
+    /// own.
+    fn without_changes(disposition: BranchDisposition) -> Self {
+        Self {
+            disposition,
+            status: StageOutcome::Failed,
+            updates: Map::new(),
+            failure: None,
+        }
+    }
+
+    /// The child could not be declared, so nothing ever ran.
+    fn failed_to_start(reason: String) -> Self {
+        Self {
+            failure: Some(FailureInfo::new(reason).with_class(INVOCATION_CLASS)),
+            ..Self::without_changes(BranchDisposition::FailedToStart)
+        }
+    }
+
+    /// The engine's view of the close: a cancelled or killed branch is
+    /// cancelled whatever its envelope says; otherwise the Fabro status maps
+    /// to the engine's, a failure carrying the branch's own reason when it
+    /// has one.
+    fn engine_status(&self, node: &str) -> Status {
+        match (self.disposition, self.status) {
+            (BranchDisposition::Cancelled | BranchDisposition::Killed, _) => Status::Cancelled,
+            (_, StageOutcome::Succeeded) => Status::Success,
+            (_, StageOutcome::PartiallySucceeded) => Status::partial_clean(),
+            (_, StageOutcome::Skipped) => Status::Skipped,
+            (_, StageOutcome::Failed) => Status::Failure(
+                self.failure
+                    .clone()
+                    .unwrap_or_else(|| FailureInfo::new(format!("branch `{node}` failed"))),
+            ),
+        }
+    }
+
+    /// The step's outcome: the branch envelope as the output, under the
+    /// engine status.
+    fn into_outcome(self, node: &str, index: u64, item_label: Option<&str>) -> Outcome {
+        let status = self.engine_status(node);
+        Outcome::new(
+            status,
+            envelope(node, index, item_label, self.status, self.updates),
+        )
+    }
+}
+
+/// The events a branch reports: [`BRANCH_STARTED_EVENT`] when its child's
+/// engine starts and [`BRANCH_COMPLETED_EVENT`] when it reached its end.
+/// Every payload carries the branch's identity, `{ fork, occurrence, branch,
+/// index, item_label }`; the duration is read from the step's clock.
+struct BranchReport {
+    identity:   Value,
+    started_at: Instant,
+}
+
+impl BranchReport {
+    fn new(config: &BranchConfig, item_label: Option<&str>, started_at: Instant) -> Self {
+        let identity = json!({
+            "fork": config.fork,
+            FORK_OCCURRENCE_FIELD: { "fork": config.fork, "firing": config.fork_firing },
+            "branch": config.node,
+            "index": config.index,
+            "item_label": item_label,
+        });
+        Self {
+            identity,
+            started_at,
+        }
+    }
+
+    /// Milliseconds since the step began.
+    fn elapsed_ms(&self) -> u64 {
+        u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// The identity under `kind`, naming the child invocation when there is
+    /// one.
+    fn payload(&self, kind: &str, invocation: Option<u64>) -> Value {
+        let mut payload = self.identity.clone();
+        payload["kind"] = json!(kind);
+        payload["invocation"] = json!(invocation);
+        payload
+    }
+
+    /// The child's engine started.
+    fn started(&self, invocation: u64) -> StepEvent {
+        StepEvent::Custom(self.payload(BRANCH_STARTED_EVENT, Some(invocation)))
+    }
+
+    /// The branch reached its end; `started` says whether the child's engine
+    /// ever started.
+    fn completed(&self, invocation: Option<u64>, close: &Close, started: bool) -> StepEvent {
+        let mut payload = self.payload(BRANCH_COMPLETED_EVENT, invocation);
+        payload["status"] = json!(close.status.as_str());
+        payload["disposition"] = json!(close.disposition.as_str());
+        payload["started"] = json!(started);
+        payload["duration_ms"] = json!(self.elapsed_ms());
+        StepEvent::Custom(payload)
+    }
+}
+
 #[async_trait::async_trait]
 impl Step for BranchStep {
     const NAME: &'static str = "attractor/branch";
@@ -460,19 +598,6 @@ impl Step for BranchStep {
             // fan-in drops this envelope.
             return Outcome::success(placeholder_item());
         }
-        let failed = |reason: String, class: FailureClass| {
-            let output = envelope(
-                &config.node,
-                config.index,
-                label.as_deref(),
-                StageOutcome::Failed,
-                Map::new(),
-            );
-            Outcome::new(
-                Status::Failure(FailureInfo::new(reason).with_class(class)),
-                output,
-            )
-        };
         let client: Arc<dyn InvocationClient> = match ctx.capability::<ChildInvoker>() {
             Some(invoker) => invoker.0.clone(),
             None => match ctx.require_capability::<CoordinatorInvocationClient>() {
@@ -507,40 +632,14 @@ impl Step for BranchStep {
                 max_parallel: config.max_parallel,
             }),
         };
-        let identity = json!({
-            "fork": config.fork,
-            FORK_OCCURRENCE_FIELD: { "fork": config.fork, "firing": config.fork_firing },
-            "branch": config.node,
-            "index": config.index,
-            "item_label": label,
-        });
-        let completed = |invocation: Option<u64>,
-                         status: StageOutcome,
-                         disposition: BranchDisposition,
-                         started: bool| {
-            let mut payload = identity.clone();
-            payload["kind"] = json!(BRANCH_COMPLETED_EVENT);
-            payload["invocation"] = json!(invocation);
-            payload["status"] = json!(status.as_str());
-            payload["disposition"] = json!(disposition.as_str());
-            payload["started"] = json!(started);
-            payload["duration_ms"] = json!(elapsed_ms(started_at));
-            StepEvent::Custom(payload)
-        };
+        let report = BranchReport::new(&config, label.as_deref(), started_at);
         let mut handle = match client.start_or_attach(request).await {
             Ok(handle) => handle,
             Err(error) => {
                 // The child could not be declared: the branch never started.
-                let _ = ctx
-                    .logs
-                    .send(completed(
-                        None,
-                        StageOutcome::Failed,
-                        BranchDisposition::FailedToStart,
-                        false,
-                    ))
-                    .await;
-                return failed(error.to_string(), INVOCATION_CLASS);
+                let close = Close::failed_to_start(error.to_string());
+                let _ = ctx.logs.send(report.completed(None, &close, false)).await;
+                return close.into_outcome(&config.node, config.index, label.as_deref());
             }
         };
         let invocation = handle.id().raw();
@@ -549,86 +648,32 @@ impl Step for BranchStep {
         // stop that arrives first means the branch never started; the
         // coordinator still runs the child's cancelled execution to record
         // the cancellation, and the step waits for that.
-        let (started, settled) = match handle.started_with_control(&mut ctx.control).await {
-            ChildStart::Started => {
-                let mut payload = identity.clone();
-                payload["kind"] = json!(BRANCH_STARTED_EVENT);
-                payload["invocation"] = json!(invocation);
-                let _ = ctx.logs.send(StepEvent::Custom(payload)).await;
-                let settled = match handle.settled_with_control(&mut ctx.control).await {
-                    Ok(result) => Settled::Result(result),
-                    Err(stop) => settle_after_stop(&mut handle, &mut ctx, stop).await,
-                };
-                (true, settled)
-            }
-            ChildStart::Finished(result) => {
-                // The child ran to its end before its start was observed.
-                let mut payload = identity.clone();
-                payload["kind"] = json!(BRANCH_STARTED_EVENT);
-                payload["invocation"] = json!(invocation);
-                let _ = ctx.logs.send(StepEvent::Custom(payload)).await;
-                (true, Settled::Result(result))
-            }
-            ChildStart::Stopped(stop) => {
-                (false, settle_after_stop(&mut handle, &mut ctx, stop).await)
-            }
+        let start = handle.started_with_control(&mut ctx.control).await;
+        let started = !matches!(start, ChildStart::Stopped(_));
+        if started {
+            let _ = ctx.logs.send(report.started(invocation)).await;
+        }
+        let settled = match start {
+            ChildStart::Started => match handle.settled_with_control(&mut ctx.control).await {
+                Ok(result) => Settled::Result(result),
+                Err(stop) => settle_after_stop(&mut handle, &mut ctx, stop).await,
+            },
+            // The child ran to its end before its start was observed.
+            ChildStart::Finished(result) => Settled::Result(result),
+            ChildStart::Stopped(stop) => settle_after_stop(&mut handle, &mut ctx, stop).await,
         };
-        // The child's own result decides: a child that finished before the
-        // stop reached it completed, whatever the parent was told.
-        let result = match settled {
-            Settled::Result(result) => Some(result),
-            Settled::Killed => None,
-        };
-        let disposition = match &result {
-            None => BranchDisposition::Killed,
-            Some(result) if result.status == RunStatus::Cancelled => BranchDisposition::Cancelled,
-            Some(_) => BranchDisposition::Completed,
-        };
-        // A cancelled or killed branch is `failed` with no changes, as
-        // Fabro's `failed_branch_result` reports it.
-        let (status, updates) = match (&result, disposition) {
-            (Some(result), BranchDisposition::Completed) => (
-                branch_status(result),
-                branch_updates(&result.updates, &snapshot, &result.context),
-            ),
-            _ => (StageOutcome::Failed, Map::new()),
-        };
-        let output = envelope(
-            &config.node,
-            config.index,
-            label.as_deref(),
-            status,
-            updates,
-        );
+        let close = settled.close(&snapshot);
         let _ = ctx
             .logs
-            .send(completed(Some(invocation), status, disposition, started))
+            .send(report.completed(Some(invocation), &close, started))
             .await;
-        let engine_status = match (disposition, status) {
-            (BranchDisposition::Cancelled | BranchDisposition::Killed, _) => Status::Cancelled,
-            (_, StageOutcome::Succeeded) => Status::Success,
-            (_, StageOutcome::PartiallySucceeded) => Status::partial_clean(),
-            (_, StageOutcome::Skipped) => Status::Skipped,
-            (_, StageOutcome::Failed) => Status::Failure(
-                result
-                    .as_ref()
-                    .and_then(|result| result.failure.clone())
-                    .unwrap_or_else(|| {
-                        FailureInfo::new(format!("branch `{}` failed", config.node))
-                    }),
-            ),
-        };
-        let mut outcome = Outcome::new(engine_status, output);
+        let mut outcome = close.into_outcome(&config.node, config.index, label.as_deref());
         outcome.metrics = Metrics {
-            duration_ms: Some(elapsed_ms(started_at)),
+            duration_ms: Some(report.elapsed_ms()),
             ..Metrics::default()
         };
         outcome
     }
-}
-
-fn elapsed_ms(since: Instant) -> u64 {
-    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 #[derive(Debug, Deserialize)]

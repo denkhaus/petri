@@ -898,7 +898,7 @@ fn remap_node(
         scope_map[scope.index()],
         StepRef::new(
             step.kind.clone(),
-            placeholder::map_expr_ids(&step.config, &|id| id + u64::from(expr_base)),
+            placeholder::map_expr_ids(&step.config, &mut |id| id + u64::from(expr_base)),
         ),
     );
     node.join = *join;

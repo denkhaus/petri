@@ -54,21 +54,16 @@
 //! answer. Cancellation (a `Cancel` or `Kill` control, a closed channel) is
 //! the same notification followed by stopping the process.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::{Arc, Mutex, PoisonError};
+mod command;
+mod hooks;
+
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 
-use execution::hooks::{HookDecision, HookPoint, HookRequest, HookService};
-use executor::{
-    LineStream, Masker, ProcessHandle, ProcessSpec, SECRET_REF_KEY, SecretError, SecretProvider,
-    Sig, StdinMode, StdinWriter,
-};
-use frontend_attractor::hooks::HookEvent;
+use executor::{LineStream, Masker, ProcessHandle, ProcessSpec, Sig, StdinWriter};
 use ir::{Attempt, Control, FiringId, LogStream, ScopeId, StepEvent, Value};
 use lithos_llm::types::{Cost, CostSource, TokenCounts, Usage};
-use runtime::driver::FiringView;
-use serde::Deserialize;
-use serde::de::Error as _;
 use serde_json::json;
 use smol_str::SmolStr;
 use steps::{Answer, Interrupt, ProgressSender, Steer};
@@ -76,8 +71,11 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc;
 use tokio::time;
 
+pub use self::command::{AgentCommand, EnvValue, PRODUCT_CREDENTIALS};
+pub use self::hooks::AcpHooks;
+use self::hooks::{Finished, ToolCall, tool_output};
 use crate::agent::INTERRUPTED_EVENT;
-use crate::hooks::{ToolPayload, WARNING_EVENT, record_report, warning_event};
+use crate::hooks::WARNING_EVENT;
 
 /// The backend name in hook warnings and the thread event.
 pub const BACKEND: &str = "acp";
@@ -91,315 +89,8 @@ pub const BACKEND: &str = "acp";
 /// `session/request_permission` with the answer Petri gave.
 pub const ENVELOPE_KIND: &str = "acp";
 
-/// The credentials a product reads from its environment. Each one the run's
-/// secret provider knows is put into the agent's environment at launch, so a
-/// product in a container has its key without the workflow naming it; a name
-/// the provider does not know is left out.
-pub const PRODUCT_CREDENTIALS: &[&str] = &["ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY"];
-
 /// The JSON-RPC error code ACP reserves for `auth_required`.
 const AUTH_REQUIRED: i64 = -32000;
-
-/// The hook service bound to one ACP node, and what it has already warned
-/// about.
-pub struct AcpHooks {
-    service: Arc<dyn HookService>,
-    view:    Arc<FiringView>,
-    node:    SmolStr,
-    firing:  FiringId,
-    attempt: Attempt,
-    /// Configured tool hooks by event, so a boundary gap is reported once per
-    /// hook.
-    pre:     Vec<String>,
-    post:    Vec<String>,
-    warned:  Mutex<BTreeSet<String>>,
-}
-
-impl AcpHooks {
-    pub fn new(
-        service: Arc<dyn HookService>,
-        view: Arc<FiringView>,
-        node: SmolStr,
-        firing: FiringId,
-        attempt: Attempt,
-        pre: Vec<String>,
-        post: Vec<String>,
-    ) -> Self {
-        Self {
-            service,
-            view,
-            node,
-            firing,
-            attempt,
-            pre,
-            post,
-            warned: Mutex::new(BTreeSet::new()),
-        }
-    }
-
-    /// Whether a `pre_tool_use` hook is configured: the permission policy
-    /// then allows once, never always, so every later call still asks.
-    pub fn has_pre(&self) -> bool {
-        !self.pre.is_empty()
-    }
-
-    /// The warnings to emit before the agent starts: what this backend can
-    /// and cannot see for each configured tool hook.
-    pub fn known_gaps(&self) -> Vec<StepEvent> {
-        let mut out = Vec::new();
-        for hook in &self.pre {
-            out.push(warning_event(
-                &self.node,
-                self.firing,
-                self.attempt,
-                BACKEND,
-                hook,
-                HookEvent::PreToolUse,
-                "session/request_permission",
-                "the ACP agent decides which tool calls ask for permission; this hook runs only \
-                 for those, and a tool call the agent does not ask about is not intercepted",
-            ));
-        }
-        for hook in &self.post {
-            out.push(warning_event(
-                &self.node,
-                self.firing,
-                self.attempt,
-                BACKEND,
-                hook,
-                HookEvent::PostToolUse,
-                "session/update",
-                "the ACP agent decides which tool calls it reports; this hook runs for the calls \
-                 it reports finished (`tool_call_update` with status `completed` or `failed`), \
-                 and a call the agent never reports is not seen",
-            ));
-        }
-        out
-    }
-
-    async fn ask(
-        &self,
-        point: HookPoint,
-        payload: ToolPayload,
-        logs: &ProgressSender,
-    ) -> HookDecision {
-        let report = self
-            .service
-            .run(HookRequest {
-                point,
-                view: Some(self.view.clone()),
-                outcome: None,
-                routes: Vec::new(),
-                payload: serde_json::to_value(&payload).unwrap_or(Value::Null),
-            })
-            .await;
-        let event = match point {
-            HookPoint::BeforeToolUse => HookEvent::PreToolUse,
-            HookPoint::AfterToolUse => HookEvent::PostToolUse,
-            _ => HookEvent::PostToolUseFailure,
-        };
-        record_report(logs, &self.node, self.firing, self.attempt, event, &report).await;
-        report.decision
-    }
-
-    /// Ask the `pre_tool_use` hooks about a permission request.
-    /// `Some(reason)` blocks.
-    async fn pre_tool(&self, call: &ToolCall, logs: &ProgressSender) -> Option<String> {
-        let payload = ToolPayload {
-            tool_name: call.name.clone(),
-            tool_call_id: call.id.clone(),
-            tool_input: call.input.clone(),
-            ..ToolPayload::default()
-        };
-        match self.ask(HookPoint::BeforeToolUse, payload, logs).await {
-            HookDecision::Block { reason } => Some(reason),
-            _ => None,
-        }
-    }
-
-    /// A tool call the agent reported finished: `post_tool_use` with its
-    /// output, or `post_tool_use_failure` with its error. The decision is
-    /// ignored, as Fabro ignores it.
-    async fn post_tool(&self, call: &ToolCall, finished: &Finished, logs: &ProgressSender) {
-        if self.post.is_empty() {
-            return;
-        }
-        let (point, payload) = match finished {
-            Finished::Completed { output } => (HookPoint::AfterToolUse, ToolPayload {
-                tool_name: call.name.clone(),
-                tool_call_id: call.id.clone(),
-                tool_output: output.clone(),
-                ..ToolPayload::default()
-            }),
-            Finished::Failed { error } => (HookPoint::AfterToolFailure, ToolPayload {
-                tool_name: call.name.clone(),
-                tool_call_id: call.id.clone(),
-                error_message: error.clone(),
-                ..ToolPayload::default()
-            }),
-        };
-        let _ = self.ask(point, payload, logs).await;
-    }
-
-    /// A tool call the agent ran without asking permission: the configured
-    /// `pre_tool_use` hooks could not run for it. Warn once per hook and
-    /// tool.
-    async fn unintercepted(&self, tool: &str, logs: &ProgressSender) {
-        for hook in &self.pre {
-            let key = format!("{hook}:{tool}");
-            let first = self
-                .warned
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(key);
-            if !first {
-                continue;
-            }
-            let _ = logs
-                .send(warning_event(
-                    &self.node,
-                    self.firing,
-                    self.attempt,
-                    BACKEND,
-                    hook,
-                    HookEvent::PreToolUse,
-                    "session/update",
-                    &format!(
-                        "the agent ran `{tool}` without a permission request; the hook did not \
-                         run for it"
-                    ),
-                ))
-                .await;
-        }
-    }
-}
-
-/// A value in the agent command's environment: a literal, or a reference
-/// to one of the run's secrets, resolved at launch and never written down.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EnvValue {
-    Literal(String),
-    Secret(String),
-}
-
-impl<'de> Deserialize<'de> for EnvValue {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = Value::deserialize(deserializer)?;
-        if let Value::String(text) = &value {
-            return Ok(Self::Literal(text.clone()));
-        }
-        if let Value::Object(map) = &value
-            && map.len() == 1
-            && let Some(Value::String(name)) = map.get(SECRET_REF_KEY)
-        {
-            return Ok(Self::Secret(name.clone()));
-        }
-        Err(D::Error::custom(format!(
-            "an env value is a string or {{\"{SECRET_REF_KEY}\": \"NAME\"}}, not {value}"
-        )))
-    }
-}
-
-/// How an agent is launched.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AgentCommand {
-    pub program: String,
-    pub args:    Vec<String>,
-    pub env:     BTreeMap<String, EnvValue>,
-}
-
-impl AgentCommand {
-    /// `acp.command`: one shell-quoted command line.
-    pub fn from_command_line(line: &str) -> Result<Self, String> {
-        let words = shlex::split(line.trim()).ok_or_else(|| "unbalanced quotes".to_string())?;
-        let mut words = words.into_iter();
-        let program = words
-            .next()
-            .ok_or_else(|| "the command line is empty".to_string())?;
-        Ok(Self {
-            program,
-            args: words.collect(),
-            env: BTreeMap::new(),
-        })
-    }
-
-    /// `acp.config`: the JSON stdio server shape `{command, args, env}`.
-    pub fn from_config(config: &Value) -> Result<Self, String> {
-        let config: StdioConfig = serde_json::from_value(config.clone())
-            .map_err(|error| format!("invalid `acp.config`: {error}"))?;
-        if config.command.is_empty() {
-            return Err("`acp.config` needs a non-empty `command`".into());
-        }
-        let env = match config.env {
-            None => BTreeMap::new(),
-            Some(ConfigEnv::Map(env)) => env,
-            Some(ConfigEnv::Pairs(pairs)) => pairs
-                .into_iter()
-                .map(|pair| (pair.name, pair.value))
-                .collect(),
-        };
-        Ok(Self {
-            program: config.command,
-            args: config.args,
-            env,
-        })
-    }
-
-    /// The process to start: the command with its environment resolved.
-    /// Every product credential the provider knows comes first, then the
-    /// command's own `env` on top; a `$secret` reference the provider cannot
-    /// supply is an error naming the secret.
-    pub fn spec(&self, secrets: &dyn SecretProvider) -> Result<ProcessSpec, String> {
-        let mut env: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
-        for name in PRODUCT_CREDENTIALS {
-            match secrets.resolve(name) {
-                Ok(secret) => {
-                    env.insert(SmolStr::new(name), secret.expose());
-                }
-                Err(SecretError::Unknown(_)) => {}
-                Err(error) => return Err(format!("resolving secret `{name}`: {error}")),
-            }
-        }
-        for (key, value) in &self.env {
-            let value = match value {
-                EnvValue::Literal(text) => SmolStr::new(text),
-                EnvValue::Secret(name) => secrets
-                    .resolve(name)
-                    .map_err(|error| format!("secret `{name}` for env `{key}`: {error}"))?
-                    .expose(),
-            };
-            env.insert(SmolStr::new(key), value);
-        }
-        let args: Vec<&str> = self.args.iter().map(String::as_str).collect();
-        Ok(ProcessSpec::new(&self.program, &args)
-            .with_env(env)
-            .with_stdin(StdinMode::Piped))
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StdioConfig {
-    command: String,
-    #[serde(default)]
-    args:    Vec<String>,
-    #[serde(default)]
-    env:     Option<ConfigEnv>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum ConfigEnv {
-    Map(BTreeMap<String, EnvValue>),
-    Pairs(Vec<EnvPair>),
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EnvPair {
-    name:  String,
-    value: EnvValue,
-}
 
 /// Why a turn did not complete.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -435,51 +126,6 @@ pub struct Stage {
     pub attempt: Attempt,
     pub scope:   ScopeId,
     pub masker:  Masker,
-}
-
-/// A tool call the agent named, by its id: what the hooks call it, and
-/// whether the agent asked permission for it.
-#[derive(Clone, Debug, Default)]
-struct ToolCall {
-    id:    Option<String>,
-    name:  String,
-    input: Option<Value>,
-    asked: bool,
-}
-
-impl ToolCall {
-    /// The call a `tool_call`, `tool_call_update` or permission request's
-    /// `toolCall` names, over what was remembered for its id.
-    fn from_value(value: &Value, known: Option<&Self>) -> Self {
-        let id = value
-            .get("toolCallId")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| known.and_then(|k| k.id.clone()));
-        let name = value
-            .get("title")
-            .or_else(|| value.get("kind"))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| known.map(|k| k.name.clone()))
-            .unwrap_or_else(|| "tool".to_owned());
-        let input = value
-            .get("rawInput")
-            .cloned()
-            .or_else(|| known.and_then(|k| k.input.clone()));
-        Self {
-            id,
-            name,
-            input,
-            asked: known.is_some_and(|k| k.asked),
-        }
-    }
-}
-
-/// How a reported tool call ended.
-enum Finished {
-    Completed { output: Option<String> },
-    Failed { error: Option<String> },
 }
 
 /// One live connection to an agent process.
@@ -737,15 +383,16 @@ impl Client {
                 .find(|o| o.get("kind").and_then(Value::as_str) == Some(kind))
         };
         let named = params.get("toolCall").cloned().unwrap_or(Value::Null);
-        let known = named
-            .get("toolCallId")
-            .and_then(Value::as_str)
-            .and_then(|id| self.tools.get(id));
-        let mut call = ToolCall::from_value(&named, known);
+        // The call is remembered under its id; a request naming no id is
+        // answered from what it says and not remembered.
+        let mut unnamed = ToolCall::default();
+        let call = match named.get("toolCallId").and_then(Value::as_str) {
+            Some(id) => self.tools.entry(id.to_owned()).or_default(),
+            None => &mut unnamed,
+        };
+        call.merge(&named);
         call.asked = true;
-        if let Some(id) = &call.id {
-            self.tools.insert(id.clone(), call.clone());
-        }
+        let call = call.clone();
         let hooks = self.hooks.clone();
         let blocked = match &hooks {
             Some(hooks) => hooks.pre_tool(&call, &self.logs).await,
@@ -862,19 +509,22 @@ impl Client {
         let Some(id) = update.get("toolCallId").and_then(Value::as_str) else {
             return;
         };
-        let call = ToolCall::from_value(update, self.tools.get(id));
-        self.tools.insert(id.to_owned(), call.clone());
         let status = update.get("status").and_then(Value::as_str);
+        let call = self.tools.entry(id.to_owned()).or_default();
+        call.merge(update);
         let Some(hooks) = self.hooks.clone() else {
             return;
         };
-        if !call.asked && matches!(status, Some("in_progress" | "completed" | "failed")) {
+        // A call seen running or finished that never asked ran past every
+        // `pre_tool_use` hook. Said once per call: the next update of this
+        // call is not a second unasked run.
+        let unasked = !call.asked && matches!(status, Some("in_progress" | "completed" | "failed"));
+        if unasked {
+            call.asked = true;
+        }
+        let call = call.clone();
+        if unasked {
             hooks.unintercepted(&call.name, &self.logs).await;
-            // Said once per call: the next update of this call is not a
-            // second unasked run.
-            if let Some(known) = self.tools.get_mut(id) {
-                known.asked = true;
-            }
         }
         let finished = match status {
             Some("completed") => Finished::Completed {
@@ -1192,32 +842,6 @@ fn api_key_method(methods: &[Value]) -> Option<String> {
         })
 }
 
-/// What a finished tool call carries for the post-tool hooks, as Fabro's
-/// `tool_output`: the text of its content blocks, else `rawOutput` as JSON,
-/// else nothing.
-fn tool_output(update: &Value) -> Option<String> {
-    let text: Vec<&str> = update
-        .get("content")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|block| {
-            let content = block.get("content")?;
-            (content.get("type").and_then(Value::as_str) == Some("text"))
-                .then(|| content.get("text").and_then(Value::as_str))
-                .flatten()
-        })
-        .collect();
-    if !text.is_empty() {
-        return Some(text.join("\n"));
-    }
-    match update.get("rawOutput") {
-        Some(Value::String(text)) => Some(text.clone()),
-        Some(Value::Null) | None => None,
-        Some(other) => serde_json::to_string(other).ok(),
-    }
-}
-
 /// The stage's report that a host's interrupt stopped its turn.
 async fn interrupted_event(logs: &ProgressSender, stage: &Stage, session: &str) {
     let _ = logs
@@ -1247,101 +871,7 @@ fn steer_text(value: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use executor::MapSecrets;
-
     use super::*;
-
-    #[test]
-    fn command_lines_split_like_a_shell() {
-        let command =
-            AgentCommand::from_command_line("python3 -c 'print(1)' --flag").expect("splits");
-        assert_eq!(command.program, "python3");
-        assert_eq!(command.args, ["-c", "print(1)", "--flag"]);
-        assert!(AgentCommand::from_command_line("").is_err());
-        assert!(AgentCommand::from_command_line("a 'b").is_err());
-    }
-
-    #[test]
-    fn configs_carry_args_and_env() {
-        let command = AgentCommand::from_config(&json!({
-            "command": "agent",
-            "args": ["--acp"],
-            "env": [{ "name": "K", "value": "v" }],
-        }))
-        .expect("parses");
-        assert_eq!(command.args, ["--acp"]);
-        assert_eq!(command.env.get("K"), Some(&EnvValue::Literal("v".into())));
-        assert!(AgentCommand::from_config(&json!({ "args": [] })).is_err());
-        assert!(AgentCommand::from_config(&json!({ "command": ["agent"], "args": [] })).is_err());
-        assert!(
-            AgentCommand::from_config(&json!({ "command": "agent", "args": "--acp" })).is_err()
-        );
-        assert!(
-            AgentCommand::from_config(&json!({ "command": "agent", "unknown": true })).is_err()
-        );
-    }
-
-    #[test]
-    fn config_env_values_may_reference_secrets() {
-        let command = AgentCommand::from_config(&json!({
-            "command": "agent",
-            "env": { "KEY": { "$secret": "AGENT_KEY" }, "MODE": "test" },
-        }))
-        .expect("parses");
-        assert_eq!(
-            command.env.get("KEY"),
-            Some(&EnvValue::Secret("AGENT_KEY".into()))
-        );
-        assert!(
-            AgentCommand::from_config(&json!({
-                "command": "agent",
-                "env": { "KEY": { "$secret": "A", "extra": 1 } },
-            }))
-            .is_err()
-        );
-        assert!(
-            AgentCommand::from_config(&json!({ "command": "agent", "env": { "KEY": 1 } })).is_err()
-        );
-    }
-
-    #[test]
-    fn the_spec_resolves_secrets_and_forwards_known_product_credentials() {
-        let secrets = MapSecrets::new(BTreeMap::from([
-            ("AGENT_KEY".into(), "agent-secret-value".into()),
-            ("GEMINI_API_KEY".into(), "gemini-secret-value".into()),
-        ]));
-        let command = AgentCommand::from_config(&json!({
-            "command": "agent",
-            "env": { "KEY": { "$secret": "AGENT_KEY" }, "MODE": "test" },
-        }))
-        .expect("parses");
-        let spec = command.spec(&secrets).expect("resolves");
-        assert_eq!(
-            spec.env.get("KEY").map(SmolStr::as_str),
-            Some("agent-secret-value")
-        );
-        assert_eq!(spec.env.get("MODE").map(SmolStr::as_str), Some("test"));
-        assert_eq!(
-            spec.env.get("GEMINI_API_KEY").map(SmolStr::as_str),
-            Some("gemini-secret-value"),
-            "a product credential the provider knows is forwarded"
-        );
-        assert!(
-            !spec.env.contains_key("ANTHROPIC_API_KEY"),
-            "one it does not know is left out"
-        );
-        assert_eq!(spec.stdin, StdinMode::Piped);
-        // Resolving registered both values for masking.
-        assert_eq!(secrets.masker().mask("agent-secret-value"), "***");
-
-        let missing = AgentCommand::from_config(&json!({
-            "command": "agent",
-            "env": { "KEY": { "$secret": "NOT_THERE" } },
-        }))
-        .expect("parses");
-        let error = missing.spec(&secrets).expect_err("the secret is unknown");
-        assert!(error.contains("NOT_THERE"), "{error}");
-    }
 
     #[test]
     fn the_api_key_method_is_the_marked_one_else_the_named_one() {
@@ -1361,27 +891,5 @@ mod tests {
         );
         let claude = json!([{ "id": "claude-login", "name": "Log in with Claude Code" }]);
         assert_eq!(api_key_method(claude.as_array().expect("array")), None);
-    }
-
-    #[test]
-    fn tool_output_prefers_text_content_over_raw_output() {
-        let update = json!({
-            "content": [
-                { "type": "content", "content": { "type": "text", "text": "one" } },
-                { "type": "diff", "path": "a", "newText": "b" },
-                { "type": "content", "content": { "type": "text", "text": "two" } },
-            ],
-            "rawOutput": { "ignored": true },
-        });
-        assert_eq!(tool_output(&update).as_deref(), Some("one\ntwo"));
-        assert_eq!(
-            tool_output(&json!({ "rawOutput": "plain" })).as_deref(),
-            Some("plain")
-        );
-        assert_eq!(
-            tool_output(&json!({ "rawOutput": { "a": 1 } })).as_deref(),
-            Some("{\"a\":1}")
-        );
-        assert_eq!(tool_output(&json!({ "status": "completed" })), None);
     }
 }

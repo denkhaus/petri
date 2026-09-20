@@ -40,19 +40,19 @@
 //! waiting out a retry backoff holds no slot. Fabro's normalization applies:
 //! missing, non-integer or negative is 4, zero is 1.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::mem;
 use std::time::Duration;
 
-use frontend::Span;
-use ir::placeholder::{BRANCH_ROLE_META, EXPR_PLACEHOLDER_KEY, placeholder_item};
+use frontend::{Diagnostic, Span};
+use ir::placeholder::{BRANCH_ROLE_META, placeholder_item};
 use ir::{
-    BinOp, Budget, Edge, ExpandTarget, Expr, ExprId, ExprOrValue, ExprTable, GraphBuilder,
-    JoinPolicy, NodeId, ResultProjection, RetryPolicy, Routing, RoutingGroup, StepRef,
+    BinOp, Budget, Edge, ExpandTarget, ExprId, ExprTable, GraphBuilder, JoinPolicy, NodeId,
+    ResultProjection, RetryPolicy, Routing, StepRef,
 };
 use serde_json::{Map, Value, json};
-use smol_str::SmolStr;
 
-use super::{Ctx, Kind, MAX_FOR_EACH_ITEMS, Resolved, attrs, placeholder, threads};
+use super::{Ctx, Kind, MAX_FOR_EACH_ITEMS, NodeRef, attrs, placeholder, threads};
 use crate::kinds::{
     AGENT_KIND, BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_NODES_KEY, FAN_IN_KIND, FORK_KIND,
     FORK_NODES_FIELD, FORK_OCCURRENCE_FIELD, FORK_SNAPSHOT_FIELD, PROMPT_KIND,
@@ -75,18 +75,32 @@ enum BranchIndex {
     Item,
 }
 
+/// One parallel node as its branches are lowered: the declaration, its
+/// engine node, its branch edges in order, and its normalized
+/// `max_parallel`.
+struct Fork<'w> {
+    decl:         &'w NodeDecl,
+    id:           NodeId,
+    edges:        Vec<&'w EdgeDecl>,
+    max_parallel: u32,
+}
+
+/// What an outer fork needs of an inner one it takes as a branch: the
+/// workflow node the inner branches join at, so the outer fork continues
+/// from where they converged, and the snapshot keys the inner branch graphs
+/// read by expression, so the outer fork keeps them inline in its snapshot.
+struct LoweredFork {
+    join:   String,
+    inline: BTreeSet<String>,
+}
+
 impl Ctx<'_> {
     /// Lower every parallel node and configure every fan-in. Nested parallel
     /// nodes (a parallel node that is another's branch target) lower first,
     /// so the outer branch's child graph copies the finished inner region.
-    pub(super) fn parallel(
-        &mut self,
-        workflow: &Workflow,
-        resolved: &[Resolved],
-        exit: NodeId,
-        goal_check: Option<NodeId>,
-    ) {
-        for (node, res) in workflow.nodes.iter().zip(resolved) {
+    pub(super) fn parallel(&mut self, workflow: &Workflow) {
+        for node in &workflow.nodes {
+            let res = self.nodes[&node.id];
             if res.kind == Kind::FanIn {
                 self.fan_in_step(node, res.id);
             }
@@ -94,19 +108,15 @@ impl Ctx<'_> {
         let mut pending: Vec<&NodeDecl> = workflow
             .nodes
             .iter()
-            .filter(|node| self.kinds.get(&node.id) == Some(&Kind::Parallel))
+            .filter(|node| self.nodes.get(&node.id).map(|n| n.kind) == Some(Kind::Parallel))
             .collect();
         let mut done: HashSet<String> = HashSet::new();
-        // Each lowered parallel node's join, so an outer fork whose branch is
-        // an inner fork continues from where the inner branches converged.
-        let mut joins: HashMap<String, String> = HashMap::new();
-        // The snapshot keys each lowered parallel node's branch graphs read by
-        // expression, so an outer fork keeps them inline in its snapshot.
-        let mut reads: HashMap<String, BTreeSet<String>> = HashMap::new();
+        let mut forks: HashMap<String, LoweredFork> = HashMap::new();
         while !pending.is_empty() {
             let ready = pending.iter().position(|node| {
                 workflow.outgoing(&node.id).iter().all(|edge| {
-                    self.kinds.get(&edge.to) != Some(&Kind::Parallel) || done.contains(&edge.to)
+                    self.nodes.get(&edge.to).map(|n| n.kind) != Some(Kind::Parallel)
+                        || done.contains(&edge.to)
                 })
             });
             let Some(position) = ready else {
@@ -124,11 +134,8 @@ impl Ctx<'_> {
                 return;
             };
             let node = pending.remove(position);
-            if let Some((join, inline)) =
-                self.lower_parallel(node, workflow, exit, goal_check, &joins, &reads)
-            {
-                joins.insert(node.id.clone(), join);
-                reads.insert(node.id.clone(), inline);
+            if let Some(lowered) = self.lower_parallel(node, workflow, &forks) {
+                forks.insert(node.id.clone(), lowered);
             }
             done.insert(node.id.clone());
         }
@@ -158,18 +165,14 @@ impl Ctx<'_> {
         );
     }
 
-    /// Lower one parallel node. Returns the workflow node its branches join
-    /// at, when it has one, and the snapshot keys its branch graphs read by
-    /// expression.
+    /// Lower one parallel node. Returns what an outer fork needs of it, when
+    /// its branches have a join.
     fn lower_parallel(
         &mut self,
         node: &NodeDecl,
         workflow: &Workflow,
-        exit: NodeId,
-        goal_check: Option<NodeId>,
-        joins: &HashMap<String, String>,
-        reads: &HashMap<String, BTreeSet<String>>,
-    ) -> Option<(String, BTreeSet<String>)> {
+        forks: &HashMap<String, LoweredFork>,
+    ) -> Option<LoweredFork> {
         let edges = workflow.outgoing(&node.id);
         for edge in &edges {
             // The routing pass skips a parallel node's edges, so they are
@@ -201,30 +204,16 @@ impl Ctx<'_> {
             );
             return None;
         }
-        let max_parallel = self.max_parallel(node);
+        let fork = Fork {
+            decl: node,
+            id: self.nodes[&node.id].id,
+            edges,
+            max_parallel: self.max_parallel(node),
+        };
         if let Some(source) = node.attrs.text("for_each") {
-            self.dynamic_branches(
-                node,
-                &edges,
-                &source,
-                max_parallel,
-                workflow,
-                exit,
-                goal_check,
-                joins,
-            )
-            .map(|join| (join, BTreeSet::new()))
+            self.dynamic_branches(&fork, &source, workflow, forks)
         } else {
-            self.static_branches(
-                node,
-                &edges,
-                max_parallel,
-                workflow,
-                exit,
-                goal_check,
-                joins,
-                reads,
-            )
+            self.static_branches(&fork, workflow, forks)
         }
     }
 
@@ -234,8 +223,7 @@ impl Ctx<'_> {
     /// keys it must keep inline.
     fn fork_step(
         &mut self,
-        fork_id: NodeId,
-        fork: &NodeDecl,
+        fork: &Fork,
         source: Option<&str>,
         inline: &BTreeSet<String>,
         with_nodes: bool,
@@ -243,9 +231,14 @@ impl Ctx<'_> {
         let mut config = Map::new();
         config.insert(
             "label".into(),
-            Value::String(fork.attrs.text("label").unwrap_or_else(|| fork.id.clone())),
+            Value::String(
+                fork.decl
+                    .attrs
+                    .text("label")
+                    .unwrap_or_else(|| fork.decl.id.clone()),
+            ),
         );
-        config.insert("node".into(), Value::String(fork.id.clone()));
+        config.insert("node".into(), Value::String(fork.decl.id.clone()));
         let kv = self.b.exprs().var("kv");
         config.insert("kv".into(), placeholder(kv));
         if with_nodes {
@@ -258,7 +251,7 @@ impl Ctx<'_> {
         if !inline.is_empty() {
             config.insert("inline".into(), json!(inline));
         }
-        self.b.node_mut(fork_id).step = StepRef::new(FORK_KIND, Value::Object(config));
+        self.b.node_mut(fork.id).step = StepRef::new(FORK_KIND, Value::Object(config));
     }
 
     /// Fabro's `max_parallel`: missing, non-integer or negative is 4; zero
@@ -322,22 +315,18 @@ impl Ctx<'_> {
     /// never taken and are reported.
     fn branch_collector(
         &mut self,
-        fork: &NodeDecl,
-        branches: &[&EdgeDecl],
+        fork: &Fork,
         workflow: &Workflow,
-        exit: NodeId,
-        goal_check: Option<NodeId>,
-        joins: &HashMap<String, String>,
+        forks: &HashMap<String, LoweredFork>,
     ) -> Option<(NodeId, String)> {
         // A branch that is itself a parallel node continues from its own join.
         let exit_of = |target: &str| {
-            joins
+            forks
                 .get(target)
-                .cloned()
-                .unwrap_or_else(|| target.to_owned())
+                .map_or_else(|| target.to_owned(), |inner| inner.join.clone())
         };
         let mut common: Option<HashSet<String>> = None;
-        for branch in branches {
+        for branch in &fork.edges {
             let targets: HashSet<String> = workflow
                 .outgoing(&exit_of(&branch.to))
                 .into_iter()
@@ -353,16 +342,16 @@ impl Ctx<'_> {
         let Some(join) = shared.into_iter().next() else {
             self.diags.error(
                 "attractor.parallel.no_join",
-                fork.span.clone(),
+                fork.decl.span.clone(),
                 format!(
                     "the branches of parallel node `{}` share no direct successor to join at; \
                      every branch target must have an edge to the same node",
-                    fork.id
+                    fork.decl.id
                 ),
             );
             return None;
         };
-        for branch in branches {
+        for branch in &fork.edges {
             for edge in workflow.outgoing(&exit_of(&branch.to)) {
                 if edge.to != join {
                     self.diags.warning(
@@ -371,22 +360,26 @@ impl Ctx<'_> {
                         format!(
                             "`{} -> {}` is never taken: `{}` runs as a branch of `{}` and returns \
                              to the join `{join}`",
-                            edge.from, edge.to, branch.to, fork.id
+                            edge.from, edge.to, branch.to, fork.decl.id
                         ),
                     );
                 }
             }
         }
-        let join_id = self.ids.get(&join).copied()?;
-        if self.kinds.get(&join) == Some(&Kind::FanIn) {
+        let join_id = self.nodes.get(&join).map(|n| n.id)?;
+        if self.nodes.get(&join).map(|n| n.kind) == Some(Kind::FanIn) {
             // The join reports `parallel_complete` for this fork.
             if let Value::Object(config) = &mut self.b.node_mut(join_id).step.config {
-                config.insert("fork".into(), Value::String(fork.id.clone()));
+                config.insert("fork".into(), Value::String(fork.decl.id.clone()));
             }
             return Some((join_id, join));
         }
-        let target = goal_check.filter(|_| join_id == exit).unwrap_or(join_id);
-        let name = format!("{}.fan_in", fork.id);
+        let exit = self.exit();
+        let target = self
+            .goal_check
+            .filter(|_| join_id == exit)
+            .unwrap_or(join_id);
+        let name = format!("{}.fan_in", fork.decl.id);
         let results = placeholder(self.ordered_results());
         let occurrences = placeholder(self.ordered_field(FORK_OCCURRENCE_FIELD));
         let collector = self.b.add_node(
@@ -395,24 +388,24 @@ impl Ctx<'_> {
             StepRef::new(
                 FAN_IN_KIND,
                 json!({
-                    "label": format!("Fan-in of {}", fork.id),
+                    "label": format!("Fan-in of {}", fork.decl.id),
                     "node": name,
-                    "fork": fork.id,
+                    "fork": fork.decl.id,
                     "results": results,
                     "occurrences": occurrences,
                 }),
             ),
         );
-        self.spans.insert(collector, fork.span.clone());
+        self.spans.insert(collector, fork.decl.span.clone());
         self.b.set_meta(
             collector,
             json!({
-                "label": format!("Fan-in of {}", fork.id),
+                "label": format!("Fan-in of {}", fork.decl.id),
                 "shape": "tripleoctagon",
                 "kind": Kind::FanIn.name(),
                 "classes": [],
                 "synthetic": true,
-                "span": { "line": fork.span.line, "column": fork.span.column },
+                "span": { "line": fork.decl.span.line, "column": fork.decl.span.column },
             }),
         );
         self.b.set_join(collector, JoinPolicy::All);
@@ -436,24 +429,15 @@ impl Ctx<'_> {
         exprs.call("pluck", vec![sorted, field])
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one fork is described by exactly these facts"
-    )]
     fn static_branches(
         &mut self,
-        fork: &NodeDecl,
-        edges: &[&EdgeDecl],
-        max_parallel: u32,
+        fork: &Fork,
         workflow: &Workflow,
-        exit: NodeId,
-        goal_check: Option<NodeId>,
-        joins: &HashMap<String, String>,
-        reads: &HashMap<String, BTreeSet<String>>,
-    ) -> Option<(String, BTreeSet<String>)> {
+        forks: &HashMap<String, LoweredFork>,
+    ) -> Option<LoweredFork> {
         let mut ok = true;
-        for edge in edges {
-            let kind = self.kinds.get(&edge.to).copied();
+        for edge in &fork.edges {
+            let kind = self.nodes.get(&edge.to).map(|n| n.kind);
             if matches!(kind, None | Some(Kind::Start | Kind::Exit | Kind::FanIn)) {
                 self.diags.error(
                     "attractor.parallel.bad_branch_target",
@@ -461,7 +445,7 @@ impl Ctx<'_> {
                     format!(
                         "`{}` cannot be a branch of parallel node `{}`; a branch target is a \
                          stage that does work and then returns to the join",
-                        edge.to, fork.id
+                        edge.to, fork.decl.id
                     ),
                 );
                 ok = false;
@@ -470,40 +454,42 @@ impl Ctx<'_> {
         if !ok {
             return None;
         }
-        let (collector, join) =
-            self.branch_collector(fork, edges, workflow, exit, goal_check, joins)?;
-        let fork_id = self.ids[&fork.id];
+        let (collector, join) = self.branch_collector(fork, workflow, forks)?;
         // A nested fork's branch graphs read their `for_each` lists from the
         // context by expression, which cannot see through a reference: those
         // keys stay inline in this fork's snapshot.
         let mut inline: BTreeSet<String> = BTreeSet::new();
-        for edge in edges {
-            if self.kinds.get(&edge.to) != Some(&Kind::Parallel) {
+        for edge in &fork.edges {
+            if self.nodes.get(&edge.to).map(|n| n.kind) != Some(Kind::Parallel) {
                 continue;
             }
             inline.extend(workflow.node(&edge.to).and_then(for_each_key));
-            if let Some(nested) = reads.get(&edge.to) {
-                inline.extend(nested.iter().cloned());
+            if let Some(inner) = forks.get(&edge.to) {
+                inline.extend(inner.inline.iter().cloned());
             }
         }
-        let with_nodes = edges.iter().any(|edge| self.kinds[&edge.to].is_llm());
+        let with_nodes = fork
+            .edges
+            .iter()
+            .any(|edge| self.nodes[&edge.to].kind.is_llm());
         // Every child graph first: a branch node is rewritten into its branch
         // step only after every branch copied its target as lowered, so a
         // duplicate target's child copies the stage and not a branch step.
-        let mut prepared = Vec::with_capacity(edges.len());
-        for (index, edge) in edges.iter().enumerate() {
+        let mut prepared = Vec::with_capacity(fork.edges.len());
+        for (index, edge) in fork.edges.iter().enumerate() {
             let index = u32::try_from(index).unwrap_or(u32::MAX);
-            let target = self.ids[&edge.to];
-            let kind = self.kinds[&edge.to];
+            let NodeRef {
+                id: target, kind, ..
+            } = self.nodes[&edge.to];
             let region = self.branch_region(&edge.to, target, kind);
-            let Some(child) = self.branch_child(&edge.to, &region, Some((fork_id, index))) else {
+            let Some(child) = self.branch_child(&edge.to, &region, Some((fork.id, index))) else {
                 continue;
             };
-            prepared.push((index, *edge, target, kind, region, child));
+            prepared.push((index, *edge, target, region, child));
         }
         let mut seen: HashSet<&str> = HashSet::new();
         let mut branch_nodes = Vec::with_capacity(prepared.len());
-        for (index, edge, target, kind, region, child) in prepared {
+        for (index, edge, target, region, child) in prepared {
             let branch_node = if seen.insert(edge.to.as_str()) {
                 target
             } else {
@@ -532,57 +518,48 @@ impl Ctx<'_> {
                 fork,
                 &edge.to,
                 BranchIndex::Static(index),
-                max_parallel,
                 &child,
                 collector,
-                kind,
             );
             branch_nodes.push(branch_node);
         }
-        self.b.fan_out(fork_id, &branch_nodes);
-        self.fork_step(fork_id, fork, None, &inline, with_nodes);
-        Some((join, inline))
+        self.b.fan_out(fork.id, &branch_nodes);
+        self.fork_step(fork, None, &inline, with_nodes);
+        Some(LoweredFork { join, inline })
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one fork is described by exactly these facts"
-    )]
     fn dynamic_branches(
         &mut self,
-        fork: &NodeDecl,
-        edges: &[&EdgeDecl],
+        fork: &Fork,
         source: &str,
-        max_parallel: u32,
         workflow: &Workflow,
-        exit: NodeId,
-        goal_check: Option<NodeId>,
-        joins: &HashMap<String, String>,
-    ) -> Option<String> {
-        let span = fork.attrs.span_of("for_each", &fork.span);
+        forks: &HashMap<String, LoweredFork>,
+    ) -> Option<LoweredFork> {
+        let span = fork.decl.attrs.span_of("for_each", &fork.decl.span);
         let key = source_key(source);
         if key.is_empty() {
             self.diags.error(
                 "attractor.for_each.source",
                 span,
-                format!("`for_each` on `{}` must name a context key", fork.id),
+                format!("`for_each` on `{}` must name a context key", fork.decl.id),
             );
             return None;
         }
-        if edges.len() != 1 {
+        if fork.edges.len() != 1 {
             self.diags.error(
                 "attractor.for_each.template_edges",
-                fork.span.clone(),
+                fork.decl.span.clone(),
                 format!(
                     "`for_each` node `{}` needs exactly one template edge",
-                    fork.id
+                    fork.decl.id
                 ),
             );
             return None;
         }
-        let template = edges[0];
-        let target = self.ids.get(&template.to).copied()?;
-        let kind = self.kinds[&template.to];
+        let template = fork.edges[0];
+        let NodeRef {
+            id: target, kind, ..
+        } = *self.nodes.get(&template.to)?;
         if !kind.is_llm() {
             self.diags.error(
                 "attractor.for_each.target",
@@ -605,10 +582,8 @@ impl Ctx<'_> {
             );
             return None;
         }
-        let (collector, join) =
-            self.branch_collector(fork, edges, workflow, exit, goal_check, joins)?;
+        let (collector, join) = self.branch_collector(fork, workflow, forks)?;
         let child = self.branch_child(&template.to, &[target], None)?;
-        let fork_id = self.ids[&fork.id];
 
         // The expansion reads the item array from the context itself, so
         // the fork's output (the snapshot every clone receives as its input
@@ -631,7 +606,7 @@ impl Ctx<'_> {
             let placeholder_list = exprs.array(vec![marker]);
             exprs.cond(both, placeholder_list, items)
         };
-        self.fork_step(fork_id, fork, Some(&key), &BTreeSet::new(), true);
+        self.fork_step(fork, Some(&key), &BTreeSet::new(), true);
         let cap = {
             let exprs = self.b.exprs();
             let kv = exprs.var("kv");
@@ -641,20 +616,21 @@ impl Ctx<'_> {
             let limit = exprs.lit(MAX_FOR_EACH_ITEMS);
             exprs.binary(BinOp::Le, len, limit)
         };
-        self.b.set_precondition(fork_id, cap);
-        self.b.link(fork_id, target);
+        self.b.set_precondition(fork.id, cap);
+        self.b.link(fork.id, target);
         self.branch_step(
             target,
             fork,
             &template.to,
             BranchIndex::Item,
-            max_parallel,
             &child,
             collector,
-            kind,
         );
         ir::parallel_for_each(&mut self.b, target, items, ExpandTarget::Node, None, false);
-        Some(join)
+        Some(LoweredFork {
+            join,
+            inline: BTreeSet::new(),
+        })
     }
 
     /// The parent-graph nodes a branch child copies: the target alone, or a
@@ -682,22 +658,18 @@ impl Ctx<'_> {
         region
     }
 
-    /// Turn the parent node `branch_node` into the branch step for `target`.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one branch is described by exactly these facts"
-    )]
+    /// Turn the parent node `branch_node` into the branch step for `target`,
+    /// whose child graph is registered under the digest `child`.
     fn branch_step(
         &mut self,
         branch_node: NodeId,
-        fork: &NodeDecl,
+        fork: &Fork,
         target: &str,
         index: BranchIndex,
-        max_parallel: u32,
         child: &str,
         collector: NodeId,
-        kind: Kind,
     ) {
+        let kind = self.nodes[target].kind;
         let label = self
             .b
             .graph()
@@ -707,7 +679,7 @@ impl Ctx<'_> {
         let mut config = Map::new();
         config.insert("label".into(), Value::String(label));
         config.insert("node".into(), Value::String(target.to_string()));
-        config.insert("fork".into(), Value::String(fork.id.clone()));
+        config.insert("fork".into(), Value::String(fork.decl.id.clone()));
         let index_expr = match index {
             BranchIndex::Static(i) => {
                 config.insert("index".into(), Value::from(i));
@@ -722,7 +694,7 @@ impl Ctx<'_> {
                 index
             }
         };
-        config.insert("max_parallel".into(), Value::from(max_parallel));
+        config.insert("max_parallel".into(), Value::from(fork.max_parallel));
         config.insert("child_digest".into(), Value::String(child.to_string()));
         config.insert("target_kind".into(), Value::String(kind.name().into()));
         // The fork snapshot, from the fork step's output on the incoming
@@ -777,7 +749,7 @@ impl Ctx<'_> {
             // stage runs in the child with the target's own metadata. Hosts
             // tell the two apart by kind, and skip this one as a lowering
             // artifact where they skip `goal_check`.
-            let mut branch = json!({ "fork": fork.id, "target": target });
+            let mut branch = json!({ "fork": fork.decl.id, "target": target });
             if let BranchIndex::Static(i) = index {
                 branch["index"] = Value::from(i);
             }
@@ -800,137 +772,51 @@ impl Ctx<'_> {
         region: &[NodeId],
         role: Option<(NodeId, u32)>,
     ) -> Option<String> {
-        let mut builder = GraphBuilder::bare();
-        let mut copier = ExprCopier::default();
-        let parent = self.b.graph();
-        for scope in &parent.scopes {
-            let mut copy = scope.clone();
-            for value in copy.env.values_mut() {
-                if let ExprOrValue::Expr(id) = value {
-                    *id = copier.copy(&parent.exprs, *id, builder.exprs());
-                }
+        let (mut builder, copies) = GraphBuilder::copy_region(self.b.graph(), region);
+        let entry = copies.get(region.first()?).copied()?;
+        let result = copies.get(region.last()?).copied()?;
+        let target = builder.node_mut(entry);
+        let is_llm = target.step.kind == AGENT_KIND || target.step.kind == PROMPT_KIND;
+        let mut config = mem::take(&mut target.step.config);
+        if let Value::Object(map) = &mut config {
+            map.remove(super::ROUTES_KEY);
+            if is_llm {
+                // The child's own records are empty when its target starts:
+                // the preamble renders from the parent's records at fork
+                // time, which the branch step puts in the snapshot.
+                let nodes = context_read(builder.exprs(), BRANCH_NODES_KEY);
+                map.insert("nodes".into(), placeholder(nodes));
+                let item = context_read(builder.exprs(), BRANCH_ITEM_KEY);
+                map.insert("item_data".into(), placeholder(item));
+                // Fabro's branch rules: threads are inert and an explicit
+                // `full` degrades to `summary:high`.
+                map.insert("branch".into(), Value::Bool(true));
             }
-            builder.add_scope(copy);
         }
-        let mut remap: HashMap<NodeId, NodeId> = HashMap::new();
-        for old in region {
-            let Some(node) = parent.node(*old) else {
-                continue;
-            };
-            let id = builder.add_node(&node.name, node.scope, StepRef::new("noop", Value::Null));
-            remap.insert(*old, id);
+        let target = builder.node_mut(entry);
+        target.step.config = config;
+        if let Some((fork, index)) = role
+            && let Value::Object(meta) = &mut target.meta
+        {
+            meta.insert(
+                BRANCH_ROLE_META.into(),
+                json!({ "fork": fork.raw(), "index": index }),
+            );
         }
-        for (position, old) in region.iter().enumerate() {
-            let Some(source) = parent.node(*old) else {
-                continue;
-            };
-            let id = remap[old];
-            let mut config =
-                copier.copy_config(&parent.exprs, &source.step.config, builder.exprs());
-            if position == 0
-                && let Value::Object(map) = &mut config
-            {
-                map.remove(super::ROUTES_KEY);
-                if source.step.kind == AGENT_KIND || source.step.kind == PROMPT_KIND {
-                    // The child's own records are empty when its target
-                    // starts: the preamble renders from the parent's records
-                    // at fork time, which the branch step puts in the
-                    // snapshot.
-                    let nodes = context_read(builder.exprs(), BRANCH_NODES_KEY);
-                    map.insert("nodes".into(), placeholder(nodes));
-                    let item = context_read(builder.exprs(), BRANCH_ITEM_KEY);
-                    map.insert("item_data".into(), placeholder(item));
-                    // Fabro's branch rules: threads are inert and an explicit
-                    // `full` degrades to `summary:high`.
-                    map.insert("branch".into(), Value::Bool(true));
-                }
-            }
-            let precondition = source
-                .precondition
-                .map(|expr| copier.copy(&parent.exprs, expr, builder.exprs()));
-            let expand = source.expand.clone().map(|expansion| match expansion {
-                ir::Expansion::ForEach {
-                    items,
-                    target,
-                    max_parallel,
-                    fail_fast,
-                } => ir::Expansion::ForEach {
-                    items: copier.copy(&parent.exprs, items, builder.exprs()),
-                    target,
-                    max_parallel,
-                    fail_fast,
-                },
-            });
-            let mut groups = Vec::new();
-            for group in &source.routing.groups {
-                let mut arms = Vec::new();
-                for arm in &group.arms {
-                    let Some(to) = remap.get(&arm.to).copied() else {
-                        continue;
-                    };
-                    let mut edge = Edge::always(builder.next_edge_id(), to);
-                    if let ir::Guard::Expr(guard) = arm.guard {
-                        edge.guard =
-                            ir::Guard::Expr(copier.copy(&parent.exprs, guard, builder.exprs()));
-                    }
-                    edge.map = arm
-                        .map
-                        .map(|map| copier.copy(&parent.exprs, map, builder.exprs()));
-                    edge.back = arm.back;
-                    edge.weight = arm.weight;
-                    edge.label.clone_from(&arm.label);
-                    edge.transition = arm.transition;
-                    arms.push(edge);
-                }
-                if !arms.is_empty() {
-                    groups.push(RoutingGroup::new(arms));
-                }
-            }
-            let mut meta = source.meta.clone();
-            if position == 0
-                && let Some((fork, index)) = role
-                && let Value::Object(map) = &mut meta
-            {
-                map.insert(
-                    BRANCH_ROLE_META.into(),
-                    json!({ "fork": fork.raw(), "index": index }),
-                );
-            }
-            let node = builder.node_mut(id);
-            node.step = StepRef::new(source.step.kind.clone(), config);
-            node.join = source.join;
-            node.precondition = precondition;
-            node.routing = Routing::groups(groups);
-            node.budget = source.budget;
-            node.retry = source.retry.clone();
-            node.run_on_cancel = source.run_on_cancel;
-            node.tolerates_failure = source.tolerates_failure;
-            node.splice_policy = source.splice_policy;
-            node.meta = meta;
-            node.expand = expand;
-        }
-        let entry = remap.get(region.first()?).copied()?;
-        let result = remap.get(region.last()?).copied()?;
         builder.mark_entry(entry);
         let mut graph = builder.build();
         graph.result = ResultProjection::NodeOutput(result);
         graph.params = self.params();
         let report = ir::check(&graph);
         let span = self
-            .ids
+            .nodes
             .get(target_name)
-            .and_then(|id| self.spans.get(id).cloned())
+            .and_then(|declared| self.spans.get(&declared.id).cloned())
             .unwrap_or_else(|| Span::file(target_name));
         for error in &report.errors {
-            let mut d = frontend::Diagnostic::error(
-                error.code(),
-                span.clone(),
-                format!("branch `{target_name}`: {error}"),
-            );
-            if let Some(hint) = error.hint() {
-                d = d.with_hint(hint);
-            }
-            self.diags.push(d);
+            let mut diagnostic = Diagnostic::validation_error(error, span.clone());
+            diagnostic.message = format!("branch `{target_name}`: {}", diagnostic.message);
+            self.diags.push(diagnostic);
         }
         if !report.errors.is_empty() {
             return None;
@@ -963,109 +849,4 @@ fn context_read(table: &mut ExprTable, key: &str) -> ExprId {
     let kv = table.var("kv");
     let name = table.lit(key);
     table.call("get", vec![kv, name])
-}
-
-/// Copies expressions from one table into another, once each.
-#[derive(Default)]
-struct ExprCopier {
-    memo: BTreeMap<u32, ExprId>,
-}
-
-impl ExprCopier {
-    fn copy(&mut self, from: &ExprTable, id: ExprId, to: &mut ExprTable) -> ExprId {
-        if let Some(copied) = self.memo.get(&id.raw()) {
-            return *copied;
-        }
-        let expr = from
-            .get(id)
-            .cloned()
-            .expect("a lowered expression id names an entry in its own table");
-        let copied = match expr {
-            Expr::Lit(value) => to.lit(value),
-            Expr::Var(name) => to.var(&name),
-            Expr::Field(base, name) => {
-                let base = self.copy(from, base, to);
-                to.field(base, &name)
-            }
-            Expr::Index(base, index) => {
-                let base = self.copy(from, base, to);
-                let index = self.copy(from, index, to);
-                to.index(base, index)
-            }
-            Expr::Unary(op, arg) => {
-                let arg = self.copy(from, arg, to);
-                to.unary(op, arg)
-            }
-            Expr::Binary(op, lhs, rhs) => {
-                let lhs = self.copy(from, lhs, to);
-                let rhs = self.copy(from, rhs, to);
-                to.binary(op, lhs, rhs)
-            }
-            Expr::Cond {
-                cond,
-                then,
-                otherwise,
-            } => {
-                let cond = self.copy(from, cond, to);
-                let then = self.copy(from, then, to);
-                let otherwise = self.copy(from, otherwise, to);
-                to.cond(cond, then, otherwise)
-            }
-            Expr::Array(items) => {
-                let items = items
-                    .into_iter()
-                    .map(|item| self.copy(from, item, to))
-                    .collect();
-                to.array(items)
-            }
-            Expr::Object(fields) => {
-                let fields: Vec<(SmolStr, ExprId)> = fields
-                    .into_iter()
-                    .map(|(key, value)| (key, self.copy(from, value, to)))
-                    .collect();
-                to.object(
-                    fields
-                        .iter()
-                        .map(|(key, value)| (key.as_str(), *value))
-                        .collect(),
-                )
-            }
-            Expr::Call(name, args) => {
-                let args = args
-                    .into_iter()
-                    .map(|arg| self.copy(from, arg, to))
-                    .collect();
-                to.call(&name, args)
-            }
-        };
-        self.memo.insert(id.raw(), copied);
-        copied
-    }
-
-    /// A step config with every `{"$expr": id}` placeholder pointing into
-    /// `to`.
-    fn copy_config(&mut self, from: &ExprTable, config: &Value, to: &mut ExprTable) -> Value {
-        match config {
-            Value::Object(map) => {
-                if map.len() == 1
-                    && let Some(id) = map.get(EXPR_PLACEHOLDER_KEY).and_then(Value::as_u64)
-                    && let Ok(id) = u32::try_from(id)
-                {
-                    return placeholder(self.copy(from, ExprId::new(id), to));
-                }
-                Value::Object(
-                    map.iter()
-                        .map(|(key, value)| (key.clone(), self.copy_config(from, value, to)))
-                        .collect(),
-                )
-            }
-            Value::Array(items) => Value::Array(
-                items
-                    .iter()
-                    .map(|item| self.copy_config(from, item, to))
-                    .collect(),
-            ),
-            other => other.clone(),
-        }
-    }
 }
