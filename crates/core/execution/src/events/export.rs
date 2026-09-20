@@ -17,7 +17,8 @@ use engine::{EventLog, EventRecord, LOG_VERSION};
 use serde_json::Value;
 use store::{Access, RunLogs};
 
-use super::{EventSource, Projection, Record, ReplayError, load_run, project_loaded};
+use super::replay::{load_run, project_loaded};
+use super::{EventSource, Projection, Record, ReplayError};
 use crate::{
     CoordinatorRecord, DecodedEngineLog, ExecutionId, StoredEngineRecord,
     decode_coordinator_records, decode_engine_records, encode_engine_record, encode_record,
