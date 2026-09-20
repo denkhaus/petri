@@ -6,16 +6,18 @@
 //! [`GraphBuilder::fan_out`], so fan-out is as explicit here as it is in the
 //! IR.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde_json::Value;
 
 use crate::expr::ExprTable;
 use crate::graph::{
-    Budget, Completion, Edge, Expansion, Fallthrough, Graph, GraphBody, JoinPolicy, Node,
-    ResultProjection, Routing, RunPolicy, Scope, SelectGroup, SelectionPolicy, StepRef,
+    Budget, Completion, Edge, Expansion, ExprOrValue, Fallthrough, Graph, GraphBody, Guard,
+    JoinPolicy, Node, ResultProjection, Routing, RoutingGroup, RunPolicy, Scope, SelectGroup,
+    SelectionPolicy, StepRef,
 };
 use crate::ids::{EdgeId, ExprId, Live, NodeId, ScopeId, StepKindId};
+use crate::placeholder;
 
 /// One arm of a select group, before edge ids are allocated.
 pub struct Arm<S = Live> {
@@ -88,6 +90,119 @@ impl GraphBuilder {
     /// A builder with no scopes at all, for callers that define their own.
     pub fn bare() -> Self {
         Self::default()
+    }
+
+    /// A builder holding a copy of `region`, nodes of `parent` in the order
+    /// given, with the copies' ids by the originals'. The copy has the
+    /// parent's scopes, with their environment expressions, and each node's
+    /// step config, precondition, expansion, routing, budget, retry, flags
+    /// and meta, every expression imported into the new table once. Each
+    /// routing group keeps the arms whose target is in the region, in order,
+    /// under the default selection policy; a group left with no arm is
+    /// dropped, so no edge leaves the region. A cancel group is not copied.
+    pub fn copy_region(parent: &Graph, region: &[NodeId]) -> (Self, HashMap<NodeId, NodeId>) {
+        let mut copy = RegionCopy {
+            parent,
+            builder: Self::bare(),
+            imported: HashMap::new(),
+        };
+        for scope in &parent.scopes {
+            let mut scope = scope.clone();
+            for value in scope.env.values_mut() {
+                if let ExprOrValue::Expr(id) = value {
+                    *id = copy.import(*id);
+                }
+            }
+            copy.builder.add_scope(scope);
+        }
+        let mut copies: HashMap<NodeId, NodeId> = HashMap::new();
+        for old in region {
+            let Some(node) = parent.node(*old) else {
+                continue;
+            };
+            let id =
+                copy.builder
+                    .add_node(&node.name, node.scope, StepRef::new("noop", Value::Null));
+            copies.insert(*old, id);
+        }
+        for old in region {
+            let Some(source) = parent.node(*old) else {
+                continue;
+            };
+            copy.node(copies[old], source, &copies);
+        }
+        (copy.builder, copies)
+    }
+}
+
+/// One region copy in progress: the parent it reads, the builder it fills,
+/// and what each parent expression became in the builder's table.
+struct RegionCopy<'p> {
+    parent:   &'p Graph,
+    builder:  GraphBuilder,
+    imported: HashMap<ExprId, ExprId>,
+}
+
+impl RegionCopy<'_> {
+    fn import(&mut self, id: ExprId) -> ExprId {
+        self.builder
+            .exprs()
+            .import(&self.parent.exprs, id, &mut self.imported)
+    }
+
+    /// Fill the copy `id` of `source`, keeping the arms to `copies`.
+    fn node(&mut self, id: NodeId, source: &Node, copies: &HashMap<NodeId, NodeId>) {
+        let config = placeholder::map_expr_ids(&source.step.config, &mut |raw| {
+            u32::try_from(raw).map_or(raw, |id| u64::from(self.import(ExprId::new(id)).raw()))
+        });
+        let precondition = source.precondition.map(|expr| self.import(expr));
+        let expand = source.expand.clone().map(|expansion| match expansion {
+            Expansion::ForEach {
+                items,
+                target,
+                max_parallel,
+                fail_fast,
+            } => Expansion::ForEach {
+                items: self.import(items),
+                target,
+                max_parallel,
+                fail_fast,
+            },
+        });
+        let mut groups = Vec::new();
+        for group in &source.routing.groups {
+            let mut arms = Vec::new();
+            for arm in &group.arms {
+                let Some(to) = copies.get(&arm.to).copied() else {
+                    continue;
+                };
+                let mut edge = Edge::always(self.builder.next_edge_id(), to);
+                if let Guard::Expr(guard) = arm.guard {
+                    edge.guard = Guard::Expr(self.import(guard));
+                }
+                edge.map = arm.map.map(|map| self.import(map));
+                edge.back = arm.back;
+                edge.weight = arm.weight;
+                edge.label.clone_from(&arm.label);
+                edge.transition = arm.transition;
+                arms.push(edge);
+            }
+            if !arms.is_empty() {
+                groups.push(RoutingGroup::new(arms));
+            }
+        }
+        let node = self.builder.node_mut(id);
+        node.step = StepRef::new(source.step.kind.clone(), config);
+        node.join = source.join;
+        node.precondition = precondition;
+        node.routing = Routing::groups(groups);
+        node.budget = source.budget;
+        node.retry = source.retry.clone();
+        node.run_on_cancel = source.run_on_cancel;
+        node.tolerates_failure = source.tolerates_failure;
+        node.splice_policy = source.splice_policy;
+        node.meta = source.meta.clone();
+        node.expand = expand;
     }
 }
 

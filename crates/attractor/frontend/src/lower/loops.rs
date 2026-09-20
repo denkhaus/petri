@@ -18,7 +18,8 @@ impl Ctx<'_> {
     /// back to the gate's retry target — the first that exists of the node's
     /// `retry_target`, its `fallback_retry_target`, the graph's, and the
     /// graph's fallback — and a gate with no target ends the run failed.
-    pub(super) fn goal_check(&mut self, workflow: &Workflow, exit: NodeId) -> Option<NodeId> {
+    /// Every later pass routes an edge to the exit through it.
+    pub(super) fn insert_goal_check(&mut self, workflow: &Workflow) {
         let mut gates: Vec<&NodeDecl> = Vec::new();
         for node in &workflow.nodes {
             if node
@@ -30,9 +31,10 @@ impl Ctx<'_> {
             }
         }
         if gates.is_empty() {
-            return None;
+            return;
         }
         gates.sort_by(|a, b| a.id.cmp(&b.id));
+        let exit = self.exit();
         let exit_span = self.spans[&exit].clone();
         let check = self.b.add_node(
             GOAL_CHECK_NODE,
@@ -95,7 +97,7 @@ impl Ctx<'_> {
         let id = self.b.next_edge_id();
         arms.push(Edge::when(id, exit, all_ok));
         self.b.node_mut(check).routing = Routing::select(arms);
-        Some(check)
+        self.goal_check = Some(check);
     }
 
     /// A depth-first search from `start` over the lowered edges marks every
@@ -161,7 +163,7 @@ impl Ctx<'_> {
         }
     }
 
-    pub(super) fn joins_and_budgets(&mut self, workflow: &Workflow, goal_check: Option<NodeId>) {
+    pub(super) fn joins_and_budgets(&mut self, workflow: &Workflow) {
         let looped = loop_reachable(&self.b.graph().body);
         let global = workflow
             .attrs
@@ -229,7 +231,7 @@ impl Ctx<'_> {
             });
         }
         // The synthetic goal check, when it exists, loops too.
-        if let Some(check) = goal_check {
+        if let Some(check) = self.goal_check {
             self.b.set_join(check, JoinPolicy::Any);
             if looped.contains(&check) {
                 let limit = global

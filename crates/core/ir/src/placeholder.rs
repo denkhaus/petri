@@ -142,9 +142,10 @@ pub fn contains_placeholder(config: &Value) -> bool {
 
 /// Rewrite every `{"$expr": id}` placeholder id through `f`, leaving the rest
 /// of the config untouched. How the engine's splice remapper shifts
-/// fragment-local expression ids into the live table — kept here so only this
-/// module walks the placeholder encoding.
-pub fn map_expr_ids(config: &Value, f: &impl Fn(u64) -> u64) -> Value {
+/// fragment-local expression ids into the live table, and how a graph copy
+/// imports a step config's expressions into its own table — kept here so
+/// only this module walks the placeholder encoding.
+pub fn map_expr_ids(config: &Value, f: &mut impl FnMut(u64) -> u64) -> Value {
     match config {
         Value::Object(map) => Value::Object(
             map.iter()

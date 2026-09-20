@@ -176,6 +176,11 @@ struct Ctx<'a> {
     /// not here.
     nodes:            HashMap<String, NodeRef>,
     spans:            HashMap<NodeId, Span>,
+    /// The exit node, once declared.
+    exit:             Option<NodeId>,
+    /// The synthetic goal check in front of the exit, once a goal gate put
+    /// one there: what an edge to the exit routes to instead.
+    goal_check:       Option<NodeId>,
     /// The directory of the workflow file, for `@file` references.
     base_dir:         String,
     template:         Context,
@@ -257,6 +262,8 @@ fn lower_nested(
         scope,
         nodes: HashMap::new(),
         spans: HashMap::new(),
+        exit: None,
+        goal_check: None,
         base_dir,
         template,
         random: false,
@@ -295,21 +302,21 @@ fn lower_nested(
         ctx.node(node, &workflow);
     }
     // Pass 3: routing, then the goal gate, then back edges, joins and budgets.
-    let exit = ctx.nodes[&structure.exit].id;
-    let goal_check = ctx.goal_check(&workflow, exit);
+    ctx.insert_goal_check(&workflow);
     for node in &workflow.nodes {
-        ctx.routing(node, &workflow, exit, goal_check);
+        ctx.routing(node, &workflow);
     }
-    ctx.parallel(&workflow, exit, goal_check);
+    ctx.parallel(&workflow);
     let start = ctx.nodes[&structure.start].id;
     ctx.b.mark_entry(start);
     ctx.back_edges(start);
-    ctx.joins_and_budgets(&workflow, goal_check);
+    ctx.joins_and_budgets(&workflow);
 
     if ctx.diags.has_errors() {
         return Lowered::rejected(ctx.diags);
     }
     let params = ctx.params();
+    let exit = ctx.exit();
     let Ctx {
         mut diags,
         b,
@@ -381,6 +388,12 @@ impl Ctx<'_> {
     /// its template failed.
     fn goal(&self) -> &str {
         self.template.goal().unwrap_or_default()
+    }
+
+    /// The exit node. Declared before any pass routes to it.
+    fn exit(&self) -> NodeId {
+        self.exit
+            .expect("the exit node is declared before any pass routes to it")
     }
 
     fn unknown_attrs(
@@ -687,17 +700,18 @@ impl Ctx<'_> {
     /// and its failure policy.
     fn declare_nodes(&mut self, workflow: &Workflow, structure: &Structure) {
         for node in &workflow.nodes {
+            let id = self
+                .b
+                .add_node(&node.id, self.scope, StepRef::new("noop", Value::Null));
             let kind = if node.id == structure.start {
                 Kind::Start
             } else if node.id == structure.exit {
+                self.exit = Some(id);
                 Kind::Exit
             } else {
                 self.kind_of(node)
             };
             let policy = FailurePolicy::of(node, workflow, &mut self.diags);
-            let id = self
-                .b
-                .add_node(&node.id, self.scope, StepRef::new("noop", Value::Null));
             self.spans.insert(id, node.span.clone());
             self.nodes
                 .insert(node.id.clone(), NodeRef { id, kind, policy });

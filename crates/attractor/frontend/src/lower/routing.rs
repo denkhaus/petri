@@ -405,13 +405,7 @@ pub(super) fn retry_policy(
 impl Ctx<'_> {
     /// The node's routing group: its outgoing edges in Fabro's four tiers,
     /// and the edge table on its meta.
-    pub(super) fn routing(
-        &mut self,
-        node: &NodeDecl,
-        workflow: &Workflow,
-        exit: NodeId,
-        goal_check: Option<NodeId>,
-    ) {
+    pub(super) fn routing(&mut self, node: &NodeDecl, workflow: &Workflow) {
         let res = self.nodes[&node.id];
         if matches!(res.kind, Kind::Exit | Kind::Parallel) {
             // The exit routes nowhere; a parallel node's edges are its fan-out.
@@ -450,8 +444,8 @@ impl Ctx<'_> {
             let Some(mut to) = self.nodes.get(&edge.to).map(|n| n.id) else {
                 continue;
             };
-            if let Some(check) = goal_check
-                && to == exit
+            if let Some(check) = self.goal_check
+                && to == self.exit()
             {
                 to = check;
             }
