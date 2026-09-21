@@ -118,7 +118,7 @@ pub fn runtime() -> Runtime {
 /// kinds have no simulation; a step of theirs that runs a process fails,
 /// routably, because a simulated sandbox runs none.
 pub fn dry_run_runtime() -> Runtime {
-    assemble(attractor_steps::register_stubs)
+    assemble(attractor_steps::register_stubs).simulated_sandboxes()
 }
 
 fn assemble(attractor: fn(Runtime) -> Runtime) -> Runtime {
