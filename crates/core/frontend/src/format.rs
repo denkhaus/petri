@@ -41,6 +41,13 @@ pub const LAUNCH_PROVIDER_VAR: &str = "petri.launch_provider";
 /// them ignores it. Unset when the launch named none.
 pub const LAUNCH_ENVIRONMENT_VAR: &str = "petri.launch_environment";
 
+/// The compile variable `petri run --goal` binds: the run goal the launch
+/// states, as text. A format whose runs have a goal reads it over its run
+/// configuration's goal and over the file's own, as `fabro run --goal` and a
+/// Fabro run's goal override do; a format without a goal ignores it. Unset
+/// when the launch stated none.
+pub const LAUNCH_GOAL_VAR: &str = "petri.launch_goal";
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CompileInputs {
     pub inputs:             BTreeMap<SmolStr, Value>,

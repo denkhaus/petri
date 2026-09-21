@@ -14,9 +14,9 @@
 //! defaults under the host's `--input`, `[run] goal`, `[run.model]` with its
 //! fallback chains, `[run.execution]`, `[run.environment]`, `[run.prepare]`,
 //! `[run.clone]`, `[[run.hooks]]`, `[run.agent.mcps]`, the launch precedence
-//! (`petri run --model`, `--provider`, `--dry-run`, `--auto-approve`,
-//! `--backend`), and the `.fabro` bundle root. What the graph runs, the step
-//! kinds, and every construct in the DOT file are the language's
+//! (`petri run --model`, `--provider`, `--environment`, `--goal`, `--dry-run`,
+//! `--auto-approve`, `--backend`), and the `.fabro` bundle root. What the graph
+//! runs, the step kinds, and every construct in the DOT file are the language's
 //! (`crates/attractor/FORMAT.md`). `crates/fabro/FORMAT.md` says how each
 //! file section lowers.
 

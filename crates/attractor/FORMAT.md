@@ -41,7 +41,11 @@ the literal graph. The frontend does the same at load, so
 | `import="<path>"` | expanded at load as Fabro's import transform expands it (below); the persisted graph carries the imported nodes |
 
 Inputs, vars and the rendered goal land in `Graph.params` (`inputs`, `vars`,
-`goal`), so the persisted graph is self-describing for replay. The merged
+`goal`), so the persisted graph is self-describing for replay. The graph's
+`goal` attribute is the run's goal by default; a run goal the host frontend's
+settings resolve (Fabro's `[run] goal`, or the launch's goal above it,
+`crates/fabro/FORMAT.md`) replaces it, and is the goal every stage and
+`{{ goal }}` see. The merged
 hooks land in `Graph.params["attractor.hooks"]` and the workflow's name in
 `Graph.params["attractor.workflow"]`. The frontend that resolved the run's
 settings adds its own record beside them (Fabro: `fabro.launch`,

@@ -32,8 +32,8 @@ use execution::prune as sandbox_prune;
 use runtime::engine::{self, EventLog};
 use runtime::executor::Retention;
 use runtime::frontend::{
-    self, CompileInputs, Frontend, LAUNCH_ENVIRONMENT_VAR, LAUNCH_MODEL_VAR, LAUNCH_PROVIDER_VAR,
-    LaunchSettings, Lowered, WorkspaceRetention,
+    self, CompileInputs, Frontend, LAUNCH_ENVIRONMENT_VAR, LAUNCH_GOAL_VAR, LAUNCH_MODEL_VAR,
+    LAUNCH_PROVIDER_VAR, LaunchSettings, Lowered, WorkspaceRetention,
 };
 use runtime::ir::Graph;
 use runtime::{DaytonaSandboxKind, LoadError, RunOptions, Runtime, SandboxBackend, SandboxOptions};
@@ -161,6 +161,10 @@ struct ModelArgs {
     /// selects itself.
     #[arg(long)]
     environment: Option<String>,
+    /// The run goal, over the one the workflow's run configuration or the
+    /// file itself states.
+    #[arg(long)]
+    goal:        Option<String>,
 }
 
 impl ModelArgs {
@@ -174,6 +178,9 @@ impl ModelArgs {
         }
         if let Some(environment) = &self.environment {
             inputs = inputs.with_var(LAUNCH_ENVIRONMENT_VAR, environment.as_str());
+        }
+        if let Some(goal) = &self.goal {
+            inputs = inputs.with_var(LAUNCH_GOAL_VAR, goal.as_str());
         }
         inputs
     }

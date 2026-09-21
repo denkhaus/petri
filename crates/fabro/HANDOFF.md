@@ -300,7 +300,8 @@ notifications and Slack interviews, the vault, the environment and MCP
 server catalogs (the host hands Petri what a bundle may name: the
 environments as `[environments.<id>]` tables of the settings layer,
 `Fabro::with_settings_toml`, the environment its run selected as the
-`petri.launch_environment` compile variable, and the MCP catalog as
+`petri.launch_environment` compile variable, the goal its run resolved as
+the `petri.launch_goal` compile variable, and the MCP catalog as
 `Fabro::with_mcp_catalog_toml`; `crates/fabro/FORMAT.md`, "The files"),
 minted GitHub tokens, image builds from `image.dockerfile`, and the choice of
 which runner version serves a run. Petri keeps local replay

@@ -27,7 +27,9 @@ pub const PREPARE_NODE_PREFIX: &str = "run_prepare_";
 /// resolved (rendered, merged across layers) before it arrives here.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RunSettings {
-    /// The run goal when the graph sets none (`[run] goal`, rendered).
+    /// The run goal the settings state, rendered (`[run] goal`, or the
+    /// launch's goal above it). It replaces the graph's own `goal`
+    /// attribute; `None` leaves the graph's in charge.
     pub goal:               Option<String>,
     /// Model defaults for LLM nodes (`[run.model]`, every layer applied).
     pub model:              ModelDefaults,
