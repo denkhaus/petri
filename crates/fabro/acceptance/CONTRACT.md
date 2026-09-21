@@ -616,13 +616,16 @@ names the decision record under `decisions/`; "gap" names the owner.
 
 ## Library pin
 
-Pebble is pinned at `67c9f486dd28f15c04e8d590a91e6f5563f7605d`, which is
-Pebble `main`. That commit is Pebble PRs #23 and #24 on top of `a39f43e`.
-PR #23 moves Pebble's lithos-llm pin forward and drops the removed
-`openai`, `anthropic`, `gemini`, and `openai-compatible` features; PR #24
-moves it to `43a42ac` and migrates Pebble's catalogs to the `codecs`
-schema. Neither changes a Pebble type Petri uses, so the pin moves with no
-Petri code change. lithos-llm moves with it to
+Pebble is pinned at `6d03b3ba58c501e0b4ee8341bfb69d288dda9408`, the head
+of Pebble PR #27 (the `sandbox_driver` module that replaces Fabro's
+`fabro-pebble-sandbox` crate) on top of Pebble `main` at `b2512a2`. Petri
+does not use that module; the pin moves because Fabro's `fabro-petri`
+hands Pebble types to Petri's crates, so the two repositories must pin one
+Pebble revision. Between `67c9f48` (PRs #23 and #24 on top of `a39f43e`:
+the lithos-llm pin and the `codecs` catalogs) and this pin, Pebble folded
+the session projection's lifetime tallies into
+`SessionProjection::totals`; the subagent metrics read them from there,
+and the serialized shape is unchanged. lithos-llm stays at
 `43a42ac28e9d9bcf40a91abc02be4f12ca274ebb`, lithoscomputer/lithos-llm #8,
 #9, #10, and #13 on top of #7: the four adapter features are gone (each meant
 `runtime`); a catalog provider names one `adapter` (default `http`) and a
@@ -783,7 +786,7 @@ fails when any of them disagree. The row names are the keys of a record's
 
 | Pin | Revision | Repository | Role |
 |---|---|---|---|
-| `pebble` | `67c9f486dd28f15c04e8d590a91e6f5563f7605d` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
+| `pebble` | `6d03b3ba58c501e0b4ee8341bfb69d288dda9408` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
 | `lithos_llm` | `43a42ac28e9d9bcf40a91abc02be4f12ca274ebb` | `lithoscomputer/lithos-llm` (public) | provider transport, request retries, and the `Usage` type every usage takes |
 | `sandbox_driver` | `07600aa5c6695ec4c999da93c05d2cb78fe11b0c` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `ca45f0e50a6716d716aa2f638ca3cf767e88f613` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
