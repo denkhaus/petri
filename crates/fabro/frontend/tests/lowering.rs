@@ -1285,3 +1285,101 @@ fn the_launch_environment_wins_over_every_layer() {
     .collect();
     assert_eq!(codes, ["unsupported.workflow_toml.run.environment"]);
 }
+
+/// One rule for the run goal, as Fabro's run materialization orders it: the
+/// launch's goal (`petri run --goal`, the `petri.launch_goal` variable) over
+/// `[run] goal` over the graph's own `goal` attribute, which is the default.
+/// The goal that wins is the one `Graph.params["goal"]`, every stage's
+/// config and `{{ goal }}` see, and both settings forms render as the
+/// graph's does.
+#[test]
+fn the_run_goal_overrides_the_graphs_goal_and_the_launch_overrides_both() {
+    let workflow = |graph_attrs: &str| {
+        dot(&format!(
+            r#"
+            {graph_attrs}
+            a [prompt="Toward: {{{{ goal }}}}"]
+            start -> a -> exit
+        "#
+        ))
+    };
+    let with_settings = files(&[(
+        "wf/workflow.toml",
+        "[run]\ngoal = \"Settings {{ inputs.target }}\"\n[run.inputs]\ntarget = \"main\"\n",
+    )]);
+    let goal_of = |text: &str, files: &dyn frontend::FileSource, inputs: &CompileInputs| {
+        let lowered = load("wf/workflow.fabro", text, files, inputs);
+        assert!(
+            !lowered.diagnostics.has_errors(),
+            "{:?}",
+            lowered.diagnostics
+        );
+        let graph = lowered.graph.expect("lowers");
+        let stage = &node(&graph, "a").step.config;
+        assert_eq!(
+            stage["goal"], graph.params["goal"],
+            "the stage sees the run's goal"
+        );
+        assert_eq!(
+            stage["prompt"],
+            json!(format!(
+                "Toward: {}",
+                graph.params["goal"].as_str().expect("text")
+            )),
+            "`{{{{ goal }}}}` renders the run's goal"
+        );
+        graph.params["goal"].clone()
+    };
+    let inputs = CompileInputs::new().with_input("target", "main");
+    let launch = |goal: &str| inputs.clone().with_var(frontend::LAUNCH_GOAL_VAR, goal);
+
+    // The graph alone: its own goal, rendered.
+    assert_eq!(
+        goal_of(
+            &workflow("graph [goal=\"Graph {{ inputs.target }}\"]"),
+            &frontend::NoFiles,
+            &inputs
+        ),
+        json!("Graph main")
+    );
+    // `[run] goal` alone: the settings' goal.
+    assert_eq!(
+        goal_of(&workflow(""), &with_settings, &CompileInputs::new()),
+        json!("Settings main")
+    );
+    // Both: the settings' goal replaces the graph's.
+    assert_eq!(
+        goal_of(
+            &workflow("graph [goal=\"Graph {{ inputs.target }}\"]"),
+            &with_settings,
+            &CompileInputs::new()
+        ),
+        json!("Settings main")
+    );
+    // The launch replaces both, and renders like `[run] goal`.
+    assert_eq!(
+        goal_of(
+            &workflow("graph [goal=\"Graph goal\"]"),
+            &with_settings,
+            &launch("Launch {{ inputs.target }}")
+        ),
+        json!("Launch main")
+    );
+    assert_eq!(
+        goal_of(
+            &workflow("graph [goal=\"Graph goal\"]"),
+            &frontend::NoFiles,
+            &launch("Launch")
+        ),
+        json!("Launch")
+    );
+    // A blank launch goal states none.
+    assert_eq!(
+        goal_of(
+            &workflow("graph [goal=\"Graph goal\"]"),
+            &with_settings,
+            &launch("  ")
+        ),
+        json!("Settings main")
+    );
+}

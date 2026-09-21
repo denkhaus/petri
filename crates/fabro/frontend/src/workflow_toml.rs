@@ -11,9 +11,12 @@
 //! What the runner acts on:
 //!
 //! - `[run.inputs]`: input defaults under the host's `--input`.
-//! - `[run] goal`: the run goal when the graph sets none (the graph's `goal`
-//!   attribute wins, as in Fabro's run materialization). The `{ file }` form
-//!   reads beside `workflow.toml`.
+//! - `[run] goal`: the run goal, over the graph's own `goal` attribute, as
+//!   Fabro's run materialization orders them. The `{ file }` form reads beside
+//!   `workflow.toml`. Above it sits the launch: `petri run --goal`, or the goal
+//!   a host's run stated, bound as `petri.launch_goal`, replaces it. Both
+//!   render `{{ inputs.* }}` and `{{ vars.* }}` as the file's other settings
+//!   strings do.
 //! - `[run.model]`: the default `provider`, `name`, `reasoning_effort` and
 //!   `speed` an agent or prompt node gets when neither it nor the graph sets
 //!   one. `[run.model.fallbacks]` is read by [`crate::fallbacks`].
@@ -45,7 +48,9 @@
 
 use std::collections::BTreeMap;
 
-use frontend::{CompileInputs, Diagnostics, FileSource, LAUNCH_ENVIRONMENT_VAR, Span};
+use frontend::{
+    CompileInputs, Diagnostics, FileSource, LAUNCH_ENVIRONMENT_VAR, LAUNCH_GOAL_VAR, Span,
+};
 use frontend_attractor::model::parse_duration;
 use frontend_attractor::template::Context;
 use frontend_attractor::{
@@ -172,6 +177,7 @@ pub fn read(
     if let Some(table) = &table {
         reader.top_level(table);
     }
+    reader.launch_goal(inputs);
     // The environment resolves over every layer, so a bundle with no
     // `workflow.toml` still runs in the environment the host's layer names.
     let layers = EnvironmentLayers::read(files, inputs, table.as_ref().map(|t| (path.as_str(), t)));
@@ -509,6 +515,23 @@ impl Reader<'_> {
             }
         };
         if let Some(rendered) = self.render(&text, "`[run] goal`") {
+            self.settings.run.goal = Some(rendered);
+        }
+    }
+
+    /// The goal the launch stated (`petri run --goal`, or a host run's goal
+    /// override, bound as `petri.launch_goal`), over `[run] goal`. Rendered
+    /// as `[run] goal` is, so the two forms read the same language.
+    fn launch_goal(&mut self, inputs: &CompileInputs) {
+        let Some(goal) = inputs
+            .vars
+            .get(LAUNCH_GOAL_VAR)
+            .and_then(Value::as_str)
+            .filter(|goal| !goal.trim().is_empty())
+        else {
+            return;
+        };
+        if let Some(rendered) = self.render(goal, "the launch `--goal`") {
             self.settings.run.goal = Some(rendered);
         }
     }

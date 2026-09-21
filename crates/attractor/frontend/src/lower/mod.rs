@@ -621,15 +621,16 @@ impl Ctx<'_> {
         let attrs = workflow.attrs.clone();
         self.unknown_attrs(&attrs, attrs::GRAPH, attrs::GRAPH_IGNORED, "the graph");
         let span = workflow.span.clone();
-        let goal_span = attrs.span_of("goal", &span);
-        // The graph's `goal` wins over the settings' goal, as Fabro's run
-        // materialization orders them.
-        let goal = attrs
-            .text("goal")
-            .filter(|goal| !goal.trim().is_empty())
-            .or_else(|| self.settings.goal.clone())
-            .unwrap_or_default();
-        if let Some(goal) = self.rendered(&goal, &goal_span, "the graph `goal`") {
+        // The run settings' goal (`[run] goal`, or the launch's) replaces the
+        // graph's own, as Fabro's run materialization orders them; the
+        // graph's `goal` is the default. The settings' goal arrives
+        // rendered, so only the graph's renders here.
+        let goal = self.settings.goal.clone().or_else(|| {
+            let goal_span = attrs.span_of("goal", &span);
+            let goal = attrs.text("goal").unwrap_or_default();
+            self.rendered(&goal, &goal_span, "the graph `goal`")
+        });
+        if let Some(goal) = goal {
             self.template.set_goal(goal);
         }
         match attrs.text("selection").as_deref() {
