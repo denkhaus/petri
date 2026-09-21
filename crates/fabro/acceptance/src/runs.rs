@@ -23,14 +23,16 @@ use runtime::executor::Retention;
 use runtime::{RunOptions, Runtime};
 use serde::{Deserialize, Serialize};
 
-/// The standard runtime plus the Fabro stub registry, over `run_dir`. The
-/// stubs simulate every sandbox too, so the runtime reaches no provider.
+/// The standard runtime plus the Fabro stub registry, over `run_dir`, with
+/// every sandbox simulated, so the runtime reaches no provider.
 pub fn stub_runtime(run_dir: &Path) -> Runtime {
     let mut options = RunOptions::new(run_dir);
     options.grace = Duration::from_secs(2);
     options.retention = Retention::Never;
     options.echo = false;
-    attractor_steps::register_stubs(Runtime::standard()).options(options)
+    attractor_steps::register_stubs(Runtime::standard())
+        .simulated_sandboxes()
+        .options(options)
 }
 
 /// A fresh run directory under the system temp dir.

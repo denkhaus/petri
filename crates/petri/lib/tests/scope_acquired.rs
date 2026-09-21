@@ -149,3 +149,59 @@ async fn a_host_that_refuses_the_environment_fails_the_scopes_firings_routably()
         "nothing was written"
     );
 }
+
+/// The stub registry alone leaves the sandboxes as the host configured them:
+/// a host whose hooks work the workspace during a dry run (Fabro checkpoints
+/// its host workspace) is handed a real one. Simulating the sandboxes is the
+/// host's own choice, the one `petri run --dry-run` makes.
+#[tokio::test]
+async fn the_stub_registry_keeps_the_hosts_real_workspace_unless_it_simulates_the_sandboxes() {
+    let dir = RunDir::new("stubs-real-workspace");
+    let host = Arc::new(SeedingHost::default());
+    let mut options = RunOptions::new(dir.path());
+    options.retention = Retention::Always;
+    let mut b = GraphBuilder::new();
+    add_script(&mut b, "one", ScopeId::new(0), "true");
+    let report = petri::attractor::register_stubs(Runtime::standard())
+        .hooks(Arc::clone(&host) as Arc<dyn ExecutionHooks>)
+        .options(options)
+        .run(b.build())
+        .await
+        .expect("the run replays");
+
+    assert_eq!(report.status, RunStatus::Success);
+    assert_eq!(
+        fs::read_to_string(dir.workspace().join("seed.txt")).expect("the seed file"),
+        "seeded\n",
+        "the host wrote through a real workspace under the stub registry"
+    );
+
+    let dir = RunDir::new("stubs-simulated-workspace");
+    let host = Arc::new(SeedingHost::default());
+    let mut options = RunOptions::new(dir.path());
+    options.retention = Retention::Always;
+    let mut b = GraphBuilder::new();
+    add_script(&mut b, "one", ScopeId::new(0), "true");
+    let report = petri::attractor::register_stubs(Runtime::standard())
+        .simulated_sandboxes()
+        .hooks(Arc::clone(&host) as Arc<dyn ExecutionHooks>)
+        .options(options)
+        .run(b.build())
+        .await
+        .expect("the run replays");
+
+    assert_eq!(
+        report.status,
+        RunStatus::Failed,
+        "a simulated sandbox holds no file, so the host's write refuses the scope"
+    );
+    assert!(
+        !dir.workspace().join("seed.txt").exists(),
+        "nothing exists behind a simulated scope"
+    );
+    assert_eq!(
+        *lock(&host.workspaces),
+        vec!["scope-0".to_string()],
+        "the host was still handed the scope"
+    );
+}

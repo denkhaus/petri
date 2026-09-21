@@ -10,10 +10,13 @@
 //! model, shell or person.
 //!
 //! A stub runs no process and reads no file, so the scope it fires in needs
-//! nothing behind it: [`register_stubs`] also puts the runtime's sandboxes
-//! on the simulated provider. A dry run touches no provider — no plugin is
-//! launched for the backend the workflow's environment selects — and its
-//! scope records name the provider `simulated`.
+//! nothing behind it. What stands behind it is the host's choice:
+//! `petri run --dry-run` puts the runtime's sandboxes on the simulated
+//! provider ([`Runtime::simulated_sandboxes`]), so no plugin is launched for
+//! the backend the workflow's environment selects and its scope records name
+//! the provider `simulated`; a host whose own hooks work a real workspace
+//! during a dry run (Fabro checkpoints its host workspace) keeps the
+//! sandboxes it configured.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -258,9 +261,9 @@ impl Step for Simulate {
     }
 }
 
-/// Register a stub for every Fabro step kind, and simulate every sandbox:
-/// the runtime acquires no scope on any provider
-/// ([`Runtime::simulated_sandboxes`]).
+/// Register a stub for every Fabro step kind. The sandboxes are left as the
+/// runtime has them: a caller that wants a dry run to touch no provider adds
+/// [`Runtime::simulated_sandboxes`], as `petri run --dry-run` does.
 pub fn register_stubs(runtime: Runtime) -> Runtime {
     let mut registry = runtime.registry().clone();
     let calls = Arc::new(Mutex::new(HashMap::new()));
@@ -276,5 +279,5 @@ pub fn register_stubs(runtime: Runtime) -> Runtime {
     registry.register(ForkStep);
     registry.register(BranchStep);
     registry.register(FanInStep);
-    runtime.steps(registry).simulated_sandboxes()
+    runtime.steps(registry)
 }

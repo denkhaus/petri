@@ -259,10 +259,11 @@ impl Runtime {
 
     /// Acquire every scope on the simulated provider: no plugin is launched,
     /// no process runs, no workspace exists, and the run's scope records name
-    /// the provider `simulated`. A dry run touches no provider; the stub
-    /// registry sets this, since a stub needs nothing behind its scope. The
-    /// sandbox options a run is given still parse and are recorded, but
-    /// place nothing. Does not apply under [`Runtime::executor`].
+    /// the provider `simulated`. `petri run --dry-run` sets this, so a dry
+    /// run touches no provider; a host that registers the stubs chooses,
+    /// since its own hooks may still work a real workspace. The sandbox
+    /// options a run is given still parse and are recorded, but place
+    /// nothing. Does not apply under [`Runtime::executor`].
     #[must_use]
     pub fn simulated_sandboxes(mut self) -> Self {
         self.simulated = true;
