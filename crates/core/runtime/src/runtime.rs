@@ -161,6 +161,9 @@ pub struct Runtime {
     provisioners: Vec<RunProvisioner>,
     admissions:   Vec<Arc<dyn AdmissionPass>>,
     options:      RunOptions,
+    /// The standard router acquires every scope on the simulated provider:
+    /// a dry run.
+    simulated:    bool,
 }
 
 impl Runtime {
@@ -198,6 +201,7 @@ impl Runtime {
             options:      RunOptions::new(
                 env::temp_dir().join(format!("petri-run-{}", process::id())),
             ),
+            simulated:    false,
         }
     }
 
@@ -219,6 +223,7 @@ impl Runtime {
             options:      RunOptions::new(
                 env::temp_dir().join(format!("petri-run-{}", process::id())),
             ),
+            simulated:    false,
         }
     }
 
@@ -249,6 +254,18 @@ impl Runtime {
     #[must_use]
     pub fn executor(mut self, executor: impl Executor + 'static) -> Self {
         self.executor = Some(Arc::new(executor));
+        self
+    }
+
+    /// Acquire every scope on the simulated provider: no plugin is launched,
+    /// no process runs, no workspace exists, and the run's scope records name
+    /// the provider `simulated`. A dry run touches no provider; the stub
+    /// registry sets this, since a stub needs nothing behind its scope. The
+    /// sandbox options a run is given still parse and are recorded, but
+    /// place nothing. Does not apply under [`Runtime::executor`].
+    #[must_use]
+    pub fn simulated_sandboxes(mut self) -> Self {
+        self.simulated = true;
         self
     }
 
@@ -820,14 +837,16 @@ impl Runtime {
     }
 
     fn default_router_for(&self, run_dir: &Path, key: &RunKey) -> Arc<RoutingExecutor> {
-        Arc::new(
+        let router = if self.simulated {
+            RoutingExecutor::simulated(run_dir)
+        } else {
             RoutingExecutor::with_options(
                 run_dir,
                 self.options.retention,
                 self.options.sandbox.clone(),
             )
-            .with_run_id(key.as_str()),
-        )
+        };
+        Arc::new(router.with_run_id(key.as_str()))
     }
 }
 

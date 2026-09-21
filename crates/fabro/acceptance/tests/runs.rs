@@ -1,5 +1,5 @@
 //! Acceptance §7 item 5, first half: every corpus workflow that lowers runs
-//! to completion on the host executor under the stub registry, with
+//! to completion under the stub registry, with every sandbox simulated and
 //! byte-identical replay, and the sweep is written to
 //! `crates/fabro/corpus/RUNS.md`.
 

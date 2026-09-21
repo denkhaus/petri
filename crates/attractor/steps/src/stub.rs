@@ -8,6 +8,12 @@
 //! preferred label, suggested targets, context updates — which is how a test
 //! drives every routing tier and failure policy through a real run with no
 //! model, shell or person.
+//!
+//! A stub runs no process and reads no file, so the scope it fires in needs
+//! nothing behind it: [`register_stubs`] also puts the runtime's sandboxes
+//! on the simulated provider. A dry run touches no provider — no plugin is
+//! launched for the backend the workflow's environment selects — and its
+//! scope records name the provider `simulated`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -252,7 +258,9 @@ impl Step for Simulate {
     }
 }
 
-/// Register a stub for every Fabro step kind.
+/// Register a stub for every Fabro step kind, and simulate every sandbox:
+/// the runtime acquires no scope on any provider
+/// ([`Runtime::simulated_sandboxes`]).
 pub fn register_stubs(runtime: Runtime) -> Runtime {
     let mut registry = runtime.registry().clone();
     let calls = Arc::new(Mutex::new(HashMap::new()));
@@ -268,5 +276,5 @@ pub fn register_stubs(runtime: Runtime) -> Runtime {
     registry.register(ForkStep);
     registry.register(BranchStep);
     registry.register(FanInStep);
-    runtime.steps(registry)
+    runtime.steps(registry).simulated_sandboxes()
 }

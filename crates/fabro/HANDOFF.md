@@ -123,7 +123,8 @@ subset; the unconfigured path stays the standalone runner.
 - **Sandboxes and workspaces.** `invocation.declared`'s `sandbox` is the binding;
   `scope.acquired` names the sandbox a scope runs in (the provider, the
   provider's id, the image and snapshot when known, the working directory,
-  the workspace and lease, the acquisition time) and `scope.failed` why it
+  the workspace and lease, the acquisition time; a dry run's scopes name the
+  `simulated` provider, on which nothing exists) and `scope.failed` why it
   could not be acquired; `scope.released` records the retention outcome per
   lease (`retained`, `outcome`, `problems`) once the owning invocation
   finished. `petri inspect` reports every scope's workspace and the

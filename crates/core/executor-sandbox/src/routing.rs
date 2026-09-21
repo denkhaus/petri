@@ -1,6 +1,7 @@
 //! An [`Executor`] that routes each scope to the backend its runtime target
-//! needs, using [`SandboxExecutor`] over the Host, Docker, or Daytona plugin.
-//! It is the composition the runtime registers for a run.
+//! needs, using [`SandboxExecutor`] over the Host, Docker, or Daytona plugin,
+//! or over the in-process [`SimulatedProvider`] for a dry run. It is the
+//! composition the runtime registers for a run.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -20,6 +21,7 @@ use crate::actions::{ActionHost, ActionHostRunner, remove_recorded};
 use crate::lease::{LeaseLedger, MemoryLedger, ReconcileReport, RecordedLease};
 use crate::plugin::{FixedProvider, PluginSettings, PluginSource, ProviderSource};
 use crate::run::{RunIdentity, workspace_dir};
+use crate::simulated::{SIMULATED_KIND, SimulatedProvider};
 use crate::{SandboxBackend, SandboxExecutor, SandboxOptions, SandboxTeardown};
 
 /// The provider kind container scopes go to.
@@ -53,6 +55,12 @@ struct ProviderConfig {
 /// the Docker provider, reached through its plugin. The plugin is launched
 /// on the first container scope, so a host-only run never touches a daemon,
 /// and a container scope fails routably at acquire when it cannot be.
+///
+/// A [`RoutingExecutor::simulated`] router is a dry run's: every scope,
+/// whatever its target and whatever backend the options name, is acquired
+/// on the [`SimulatedProvider`], and no plugin is ever launched. A lease
+/// another provider holds (a real run resumed as a dry run) is left where
+/// it is and reported, never touched.
 pub struct RoutingExecutor {
     host:         OnceCell<Result<Arc<SandboxExecutor>, String>>,
     source:       ContainerSource,
@@ -65,6 +73,8 @@ pub struct RoutingExecutor {
     identity:     Arc<RunIdentity>,
     retention:    Retention,
     options:      SandboxOptions,
+    /// Every scope goes to the simulated provider: a dry run.
+    simulated:    bool,
 }
 
 impl RoutingExecutor {
@@ -112,6 +122,19 @@ impl RoutingExecutor {
         Self::with_provider_source(Arc::new(FixedProvider::new(provider)), run_dir, retention)
     }
 
+    /// A dry run's router: every scope is acquired on the
+    /// [`SimulatedProvider`], and no plugin is launched. The sandbox options
+    /// a run would place scopes with do not apply, and neither does its
+    /// retention: there is nothing to place and nothing to keep, so every
+    /// lease is recorded deleted when it is released.
+    pub fn simulated(run_dir: impl Into<PathBuf>) -> Self {
+        let provider: Arc<dyn sandbox_driver::SandboxProvider> = Arc::new(SimulatedProvider::new());
+        let source: Arc<dyn ProviderSource> = Arc::new(FixedProvider::new(provider));
+        let mut router = Self::over(run_dir, Retention::Never, ContainerSource::Fixed(source));
+        router.simulated = true;
+        router
+    }
+
     fn over(run_dir: impl Into<PathBuf>, retention: Retention, source: ContainerSource) -> Self {
         let run_dir = run_dir.into();
         Self {
@@ -124,6 +147,7 @@ impl RoutingExecutor {
             identity: Arc::new(RunIdentity::for_run_dir(run_dir)),
             retention,
             options: SandboxOptions::default(),
+            simulated: false,
         }
     }
 
@@ -171,6 +195,9 @@ impl RoutingExecutor {
 
     /// Provider identity for the lease reservation, before resource creation.
     pub fn provider_kind_for(&self, runtime: &ir::RuntimeSpec) -> &str {
+        if self.simulated {
+            return SIMULATED_KIND;
+        }
         if self.options.backend == SandboxBackend::Host
             && matches!(runtime.target, RuntimeTarget::HostProcess)
         {
@@ -183,6 +210,9 @@ impl RoutingExecutor {
     }
 
     fn plugin_kind(&self) -> &'static str {
+        if self.simulated {
+            return SIMULATED_KIND;
+        }
         match self.options.backend {
             SandboxBackend::Host | SandboxBackend::Docker => "docker",
             SandboxBackend::Daytona => "daytona",
@@ -192,10 +222,14 @@ impl RoutingExecutor {
     fn provider(&self) -> Result<&ProviderConfig, EnvError> {
         self.provider
             .get_or_init(|| match &self.source {
+                // A simulated sandbox offers no route to this machine and
+                // mounts no workspace: nothing runs in it.
                 ContainerSource::Fixed(source) => Ok(ProviderConfig {
                     source:                  source.clone(),
-                    host_address:            Ok(Some(crate::DOCKER_HOST_ALIAS.to_owned())),
-                    supports_host_workspace: true,
+                    host_address:            Ok(
+                        (!self.simulated).then(|| crate::DOCKER_HOST_ALIAS.to_owned())
+                    ),
+                    supports_host_workspace: !self.simulated,
                 }),
                 ContainerSource::Env => {
                     let settings =
@@ -217,6 +251,11 @@ impl RoutingExecutor {
     async fn host(&self) -> Result<Arc<SandboxExecutor>, EnvError> {
         self.host
             .get_or_init(|| async {
+                if self.simulated {
+                    return Err("a dry run launches no provider plugin; a lease the host \
+                                provider holds is left as recorded"
+                        .to_owned());
+                }
                 let directory = self.identity.run_dir().join("host-registry");
                 fs::create_dir_all(&directory)
                     .await
@@ -246,20 +285,33 @@ impl RoutingExecutor {
             .map_err(|message| EnvError::backend("host", "configure", message))
     }
 
+    /// The provider kind a lease is recorded on, when the ledger knows it.
+    async fn recorded_provider(&self, lease: SandboxLeaseId) -> Result<Option<String>, EnvError> {
+        let Some(ledger) = self.ledger.get() else {
+            return Ok(None);
+        };
+        let record = ledger
+            .lookup(lease)
+            .await
+            .map_err(|e| EnvError::backend("sandbox", "lookup", e.to_string()))?;
+        Ok(record.and_then(|record| record.provider.map(|provider| provider.to_string())))
+    }
+
     async fn executor_for_record(
         &self,
         lease: SandboxLeaseId,
     ) -> Result<Arc<SandboxExecutor>, EnvError> {
-        if let Some(ledger) = self.ledger.get() {
-            let record = ledger
-                .lookup(lease)
-                .await
-                .map_err(|e| EnvError::backend("sandbox", "lookup", e.to_string()))?;
-            if record.is_some_and(|record| record.provider.as_deref() == Some("host")) {
-                return self.host().await;
-            }
+        match self.recorded_provider(lease).await?.as_deref() {
+            Some("host") => self.host().await,
+            // A dry run's lease under a real router: no provider holds it,
+            // so no plugin is launched to look for it.
+            Some(SIMULATED_KIND) if !self.simulated => Err(EnvError::backend(
+                SIMULATED_KIND,
+                "lookup",
+                format!("lease {lease} was simulated by a dry run; no provider holds it"),
+            )),
+            _ => self.container().await,
         }
-        self.container().await
     }
 
     /// The container executor, built on first use. A configuration error
@@ -273,6 +325,13 @@ impl RoutingExecutor {
                     self.ledger.get().cloned().unwrap_or_else(|| {
                         Arc::new(MemoryLedger::default()) as Arc<dyn LeaseLedger>
                     });
+                if self.simulated {
+                    return Ok(Arc::new(SandboxExecutor::simulated(
+                        provider.source.clone(),
+                        ledger,
+                        Arc::clone(&self.identity),
+                    )));
+                }
                 Ok(Arc::new(SandboxExecutor::new(
                     provider.source.clone(),
                     ledger,
@@ -431,6 +490,12 @@ impl RoutingExecutor {
         lease: SandboxLeaseId,
         workspace_id: &str,
     ) -> Result<Vec<SandboxId>, EnvError> {
+        if !self.simulated
+            && self.recorded_provider(lease).await?.as_deref() == Some(SIMULATED_KIND)
+        {
+            // A dry run's lease: nothing was ever on a provider.
+            return Ok(Vec::new());
+        }
         let executor = self.executor_for_record(lease).await?;
         // An action host has its own marker and Docker resource. Remove it
         // before the Host provider deletes the workspace, even if an earlier
@@ -463,7 +528,7 @@ impl Executor for RoutingExecutor {
         scope: &ScopeSpec,
         ctx: &AcquireContext,
     ) -> Result<EnvHandle, EnvError> {
-        if self.options.backend != SandboxBackend::Host {
+        if self.simulated || self.options.backend != SandboxBackend::Host {
             return self.container().await?.acquire(scope, ctx).await;
         }
         match scope.runtime.target {

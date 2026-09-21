@@ -112,8 +112,11 @@ pub fn runtime() -> Runtime {
 
 /// [`runtime`] with the Attractor step kinds simulated — `petri run --dry-run`:
 /// every stage succeeds and a human gate takes its first choice, as Fabro's
-/// own `--dry-run` does. The GitHub Actions kinds have no simulation and run
-/// for real.
+/// own `--dry-run` does. A dry run touches no provider: every scope is
+/// acquired on the simulated provider, whatever backend the workflow's
+/// environment selects, so no sandbox plugin is needed. The GitHub Actions
+/// kinds have no simulation; a step of theirs that runs a process fails,
+/// routably, because a simulated sandbox runs none.
 pub fn dry_run_runtime() -> Runtime {
     assemble(attractor_steps::register_stubs)
 }

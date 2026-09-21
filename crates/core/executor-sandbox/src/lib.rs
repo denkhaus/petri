@@ -8,7 +8,8 @@
 //!
 //! No provider crate is linked here: every provider is a plugin process
 //! ([`plugin`]), which is the path a third-party provider must take, so
-//! Petri's own take it too.
+//! Petri's own take it too. The one in-process provider is the
+//! [`SimulatedProvider`], a dry run's: it creates nothing and runs nothing.
 
 #[cfg(test)]
 mod acquire_tests;
@@ -24,6 +25,9 @@ pub mod plugin;
 mod reconcile_tests;
 mod routing;
 mod run;
+mod simulated;
+#[cfg(test)]
+mod simulated_tests;
 mod snapshots;
 
 use std::fmt;
@@ -56,6 +60,7 @@ pub use crate::plugin::{FixedProvider, PluginError, PluginSettings, PluginSource
 pub use crate::routing::{CONTAINER_KIND, RoutingExecutor};
 use crate::run::workspace_dir;
 pub use crate::run::{LEASE_LABEL, RUN_LABEL, RunIdentity, WORKSPACE_LABEL};
+pub use crate::simulated::{SIMULATED_KIND, SimulatedProvider};
 use crate::snapshots::{RunnerSnapshot, RunnerSnapshots};
 
 /// The container path every scope's workspace lives at.
@@ -90,6 +95,9 @@ pub struct SandboxExecutor {
     host_address: Option<String>,
     options:      SandboxOptions,
     snapshots:    RunnerSnapshots,
+    /// Every scope is realized on the [`SimulatedProvider`], whatever its
+    /// target: a bare spec, no host-process semantics, no route back.
+    simulated:    bool,
 }
 
 impl SandboxExecutor {
@@ -113,7 +121,27 @@ impl SandboxExecutor {
             host_address,
             options,
             snapshots: RunnerSnapshots::default(),
+            simulated: false,
         }
+    }
+
+    /// An executor over the [`SimulatedProvider`] in `source`: what a dry
+    /// run acquires every scope on. A simulated sandbox does not outlive
+    /// its process, so a lease whose sandbox is gone gets a fresh one
+    /// ([`LostSandbox::Replace`]): there was never a workspace to lose. Nor
+    /// is there one to keep, so a standalone lease ends deleted.
+    pub fn simulated(
+        source: Arc<dyn ProviderSource>,
+        ledger: Arc<dyn LeaseLedger>,
+        identity: Arc<RunIdentity>,
+    ) -> Self {
+        let options = SandboxOptions {
+            lost_sandbox: LostSandbox::Replace,
+            ..SandboxOptions::default()
+        };
+        let mut executor = Self::new(source, ledger, identity, Retention::Never, None, options);
+        executor.simulated = true;
+        executor
     }
 
     pub fn manager(&self) -> &Arc<SandboxLeaseManager> {
@@ -174,7 +202,8 @@ impl SandboxExecutor {
         }
         let workspace = sandbox.working_directory().to_owned();
         let instance = self.describe(&**sandbox, &workspace).await;
-        let host = self.options.backend == SandboxBackend::Host
+        let host = !self.simulated
+            && self.options.backend == SandboxBackend::Host
             && matches!(scope.runtime.target, RuntimeTarget::HostProcess);
         let env = SandboxEnv {
             host,
@@ -241,6 +270,16 @@ impl SandboxExecutor {
         ctx: &AcquireContext,
         provider: &dyn SandboxProvider,
     ) -> Result<SandboxSpec, EnvError> {
+        if self.simulated {
+            // A name, a working directory string and the run's labels:
+            // nothing the scope declares (its image, services, env or
+            // credentials) reaches a provider, because none is involved.
+            let mut spec = SandboxSpec::new(SandboxSource::HostDirectory)
+                .name(name)
+                .working_directory(format!("/{SIMULATED_KIND}/{}", scope.workspace_id));
+            spec.labels.extend(labels.iter().cloned());
+            return Ok(spec);
+        }
         if self.options.backend == SandboxBackend::Host
             && matches!(scope.runtime.target, RuntimeTarget::HostProcess)
         {

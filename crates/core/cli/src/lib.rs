@@ -265,7 +265,8 @@ enum Command {
         session:  SessionArgs,
         /// Simulate the step kinds that offer it (Fabro's stages) instead of
         /// running them: every stage succeeds, a human gate takes its first
-        /// choice.
+        /// choice. No sandbox is acquired on any provider, so no plugin is
+        /// needed, whatever backend the workflow selects.
         #[arg(long)]
         dry_run:  bool,
         #[command(flatten)]
