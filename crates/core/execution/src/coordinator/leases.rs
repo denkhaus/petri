@@ -7,7 +7,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use driver::{SandboxAssignment, ScopeLease, ScopeLeaseAllocator, ScopeLeases};
-use executor_sandbox::{CONTAINER_KIND, RecordedLease, RoutingExecutor};
+use executor_sandbox::{CONTAINER_KIND, RecordedLease, RoutingExecutor, SIMULATED_KIND};
 use ir::{RunStatus, RuntimeTarget, ScopeId};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinSet;
@@ -138,11 +138,15 @@ impl Coordinator {
     /// create left on a provider and remove what no record names. Runs
     /// with the ledger attached, so an adopted lease is recorded live.
     pub(super) async fn reconcile_leases(&self) -> Result<(), CoordinatorError> {
+        // A simulated lease (a dry run's) was never on a provider: there is
+        // nothing to adopt and nothing to sweep.
         let (host, container): (Vec<_>, Vec<_>) = self
             .resources()
             .await
             .records()
-            .filter(|record| record.state != crate::LeaseState::Deleted)
+            .filter(|record| {
+                record.state != crate::LeaseState::Deleted && record.provider != SIMULATED_KIND
+            })
             .map(|record| {
                 (record.provider == HOST_PROVIDER, RecordedLease {
                     lease:        record.lease,

@@ -555,7 +555,11 @@ the coordinator registers `attractor_steps::workflow::ChildInvoker`.
   text. `petri inspect` shows the references as recorded; they resolve under
   `<run_dir>/blobs/<hex>`.
 - **`petri run --dry-run`** is the stub registry: every stage succeeds, a human
-  gate takes its first choice, as Fabro's `--dry-run` does.
+  gate takes its first choice, as Fabro's `--dry-run` does. A dry run touches
+  no provider: every scope is acquired on the simulated provider, whatever
+  backend the workflow's environment selects, so no sandbox plugin is needed
+  and no workspace exists. Its `scope.acquired` and `scope.released` records
+  say `provider: simulated`.
 
 ### Fidelity and threads
 
