@@ -785,7 +785,7 @@ fails when any of them disagree. The row names are the keys of a record's
 |---|---|---|---|
 | `pebble` | `67c9f486dd28f15c04e8d590a91e6f5563f7605d` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
 | `lithos_llm` | `43a42ac28e9d9bcf40a91abc02be4f12ca274ebb` | `lithoscomputer/lithos-llm` (public) | provider transport, request retries, and the `Usage` type every usage takes |
-| `sandbox_driver` | `07600aa5c6695ec4c999da93c05d2cb78fe11b0c` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
+| `sandbox_driver` | `7cc5d5baf9f4d8a19dc3d9e1e4215f6634c71735` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `ca45f0e50a6716d716aa2f638ca3cf767e88f613` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
 | `fabro_reference` | `05ebd0fd1beec214b558f4b478e36bd08b507dc7` | `fabro-sh/fabro` (public, `main`) | the reference Fabro the corpus, oracle, bundles, and differential matrix use |
 | `runner_image` | `f8bbbfd81934` | `lithoscomputer/sandbox-images` (public) | the default runner images (`ghcr.io/lithoscomputer/ubuntu-*`) Docker and Daytona scopes start from (`RUNNER_PIN` in `crates/core/executor-sandbox/src/backend.rs`; PyYAML present since `df708f910111`) |
@@ -797,7 +797,15 @@ the readiness work asked for is inside the pinned revisions (Pebble `4c00633`,
 sandbox-driver `a92c0db6`); the twins are pinned in both test crates that
 serve them. Since Pebble `6996942` the sandbox-driver pin is Petri's alone:
 Pebble's `mcp` feature no longer names the crate, so the two move
-independently. sandbox-driver `07600aa5` (lithoscomputer/sandbox-driver#23,
+independently. sandbox-driver `7cc5d5ba` (lithoscomputer/sandbox-driver#61,
+on `6eb41d0`) lets a second process attach read-only to a managed host
+workspace with its registry record: `HostProvider::observe_registry` reads
+the registry another process owns without writing it, `attach_directory`
+resolves a workspace path to that record (id, labels, ownership, state),
+and the handle refuses `start`, `stop`, and `delete` with the new
+`Error::ReadOnly` (wire kind `read_only`), so Fabro's `petri.run`
+ownership check runs on the host as it does on Docker. Petri's own use of
+the driver is unchanged by it. sandbox-driver `07600aa5` (lithoscomputer/sandbox-driver#23,
 on `64c14b89`) lets an idle Host sentinel kill its own process group once
 its owning provider pid is gone, so a provider that is killed rather than
 stopped leaves no sentinel behind; a running workload still survives its
