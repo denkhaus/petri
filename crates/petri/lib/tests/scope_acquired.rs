@@ -7,6 +7,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use petri::attractor::register_stubs;
 use petri::driver::lifecycle::{
     AdmitAttempt, AttemptDecision, ExecutionHooks, HookContext, ScopeAcquired, ScopeAcquiredError,
 };
@@ -162,7 +163,7 @@ async fn the_stub_registry_keeps_the_hosts_real_workspace_unless_it_simulates_th
     options.retention = Retention::Always;
     let mut b = GraphBuilder::new();
     add_script(&mut b, "one", ScopeId::new(0), "true");
-    let report = petri::attractor::register_stubs(Runtime::standard())
+    let report = register_stubs(Runtime::standard())
         .hooks(Arc::clone(&host) as Arc<dyn ExecutionHooks>)
         .options(options)
         .run(b.build())
@@ -182,7 +183,7 @@ async fn the_stub_registry_keeps_the_hosts_real_workspace_unless_it_simulates_th
     options.retention = Retention::Always;
     let mut b = GraphBuilder::new();
     add_script(&mut b, "one", ScopeId::new(0), "true");
-    let report = petri::attractor::register_stubs(Runtime::standard())
+    let report = register_stubs(Runtime::standard())
         .simulated_sandboxes()
         .hooks(Arc::clone(&host) as Arc<dyn ExecutionHooks>)
         .options(options)
