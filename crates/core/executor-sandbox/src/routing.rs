@@ -1,7 +1,8 @@
 //! An [`Executor`] that routes each scope to the backend its runtime target
-//! needs, using [`SandboxExecutor`] over the Host, Docker, or Daytona plugin,
-//! or over the in-process [`SimulatedProvider`] for a dry run. It is the
-//! composition the runtime registers for a run.
+//! needs, using [`SandboxExecutor`] over the Host, Docker, or Daytona
+//! provider (its plugin, or a built-in linked into this process through
+//! [`InProcessProviders`]), or over the in-process [`SimulatedProvider`] for
+//! a dry run. It is the composition the runtime registers for a run.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -17,7 +18,9 @@ use sandbox_driver::SandboxId;
 use tokio::fs;
 use tokio::sync::OnceCell;
 
-use crate::actions::{ActionHost, ActionHostRunner, remove_recorded};
+use crate::actions::{ActionHost, ActionHostRunner, has_recorded, remove_recorded};
+use crate::gate::{DRAIN_BUDGET, RunGate};
+use crate::in_process::{InProcessProviders, InProcessSource, ProviderContext};
 use crate::lease::{LeaseLedger, MemoryLedger, ReconcileReport, RecordedLease};
 use crate::plugin::{FixedProvider, PluginSettings, PluginSource, ProviderSource};
 use crate::run::{RunIdentity, workspace_dir};
@@ -56,6 +59,10 @@ struct ProviderConfig {
 /// on the first container scope, so a host-only run never touches a daemon,
 /// and a container scope fails routably at acquire when it cannot be.
 ///
+/// With [`RoutingExecutor::with_in_process`], the same routes go to the
+/// built-in providers linked into this process instead of their plugins,
+/// and no plugin is launched.
+///
 /// A [`RoutingExecutor::simulated`] router is a dry run's: every scope,
 /// whatever its target and whatever backend the options name, is acquired
 /// on the [`SimulatedProvider`], and no plugin is ever launched. A lease
@@ -75,6 +82,11 @@ pub struct RoutingExecutor {
     options:      SandboxOptions,
     /// Every scope goes to the simulated provider: a dry run.
     simulated:    bool,
+    /// Built-in providers to use instead of launching plugins.
+    in_process:   Option<Arc<InProcessProviders>>,
+    /// Admission to every environment this router hands out; closed at
+    /// shutdown, so a retained environment cannot outlive the run.
+    gate:         RunGate,
 }
 
 impl RoutingExecutor {
@@ -148,7 +160,19 @@ impl RoutingExecutor {
             retention,
             options: SandboxOptions::default(),
             simulated: false,
+            in_process: None,
+            gate: RunGate::default(),
         }
+    }
+
+    /// Reach Host, Docker, and Daytona through the built-in providers in
+    /// `providers` instead of their plugins. A kind with no factory fails
+    /// routably at acquire; no plugin is launched in its place. A router
+    /// over a supplied or simulated source ignores this.
+    #[must_use]
+    pub fn with_in_process(mut self, providers: Arc<InProcessProviders>) -> Self {
+        self.in_process = Some(providers);
+        self
     }
 
     /// Name the run on its providers: the run's store key, so a resume
@@ -174,10 +198,18 @@ impl RoutingExecutor {
         &self.identity
     }
 
-    /// Stop plugins created by this router after its run's leases settle.
-    /// A supplied container source belongs to its caller and can be shared.
-    /// Durable sandbox records and retained workspaces remain available.
+    /// Close the run's access to its sandboxes, then stop the providers
+    /// this router created, after its run's leases settle. Environments
+    /// handed out earlier refuse new work from here on. A supplied container
+    /// source belongs to its caller and can be shared. Durable sandbox
+    /// records and retained workspaces remain available.
     pub async fn shutdown(&self) {
+        if !self.gate.close(DRAIN_BUDGET).await {
+            tracing::warn!(
+                budget_secs = DRAIN_BUDGET.as_secs(),
+                "sandbox operations were still running when the run closed its sandboxes"
+            );
+        }
         let host = async {
             if let Some(Ok(executor)) = self.host.get() {
                 executor.manager().source().shutdown().await;
@@ -232,6 +264,22 @@ impl RoutingExecutor {
                     supports_host_workspace: !self.simulated,
                 }),
                 ContainerSource::Env => {
+                    if let Some(providers) = &self.in_process {
+                        let factory = providers.factory(self.plugin_kind())?;
+                        let network = factory.network();
+                        let context = ProviderContext::new(
+                            self.identity.run_id(),
+                            self.identity.run_dir(),
+                            None,
+                        );
+                        return Ok(ProviderConfig {
+                            source:                  Arc::new(InProcessSource::new(
+                                factory, context,
+                            )),
+                            host_address:            network.host_address(),
+                            supports_host_workspace: network.supports_host_workspace(),
+                        });
+                    }
                     let settings =
                         PluginSettings::from_env(self.plugin_kind(), self.options.plugin_dev)
                             .map_err(|error| error.to_string())?;
@@ -263,22 +311,44 @@ impl RoutingExecutor {
                 let directory = fs::canonicalize(directory)
                     .await
                     .map_err(|e| e.to_string())?;
-                let settings = PluginSettings::from_env("host", self.options.plugin_dev)
-                    .map_err(|e| e.to_string())?
-                    .with_host_registry(&directory);
+                let (source, host_address): (Arc<dyn ProviderSource>, _) =
+                    if let Some(providers) = &self.in_process {
+                        let factory = providers.factory("host")?;
+                        let host_address = factory.network().host_address()?;
+                        let context = ProviderContext::new(
+                            self.identity.run_id(),
+                            self.identity.run_dir(),
+                            Some(directory),
+                        );
+                        (
+                            Arc::new(InProcessSource::new(factory, context)),
+                            host_address,
+                        )
+                    } else {
+                        let settings = PluginSettings::from_env("host", self.options.plugin_dev)
+                            .map_err(|e| e.to_string())?
+                            .with_host_registry(&directory);
+                        (
+                            Arc::new(PluginSource::new(settings)),
+                            Some("127.0.0.1".to_owned()),
+                        )
+                    };
                 let ledger = self
                     .ledger
                     .get()
                     .cloned()
                     .unwrap_or_else(|| Arc::new(MemoryLedger::default()));
-                Ok(Arc::new(SandboxExecutor::new(
-                    Arc::new(PluginSource::new(settings)),
-                    ledger,
-                    self.identity.clone(),
-                    self.retention,
-                    Some("127.0.0.1".to_owned()),
-                    self.options.clone(),
-                )))
+                Ok(Arc::new(
+                    SandboxExecutor::new(
+                        source,
+                        ledger,
+                        self.identity.clone(),
+                        self.retention,
+                        host_address,
+                        self.options.clone(),
+                    )
+                    .with_gate(self.gate.clone()),
+                ))
             })
             .await
             .clone()
@@ -326,20 +396,26 @@ impl RoutingExecutor {
                         Arc::new(MemoryLedger::default()) as Arc<dyn LeaseLedger>
                     });
                 if self.simulated {
-                    return Ok(Arc::new(SandboxExecutor::simulated(
+                    return Ok(Arc::new(
+                        SandboxExecutor::simulated(
+                            provider.source.clone(),
+                            ledger,
+                            Arc::clone(&self.identity),
+                        )
+                        .with_gate(self.gate.clone()),
+                    ));
+                }
+                Ok(Arc::new(
+                    SandboxExecutor::new(
                         provider.source.clone(),
                         ledger,
                         Arc::clone(&self.identity),
-                    )));
-                }
-                Ok(Arc::new(SandboxExecutor::new(
-                    provider.source.clone(),
-                    ledger,
-                    Arc::clone(&self.identity),
-                    self.retention,
-                    host_address,
-                    self.options.clone(),
-                )))
+                        self.retention,
+                        host_address,
+                        self.options.clone(),
+                    )
+                    .with_gate(self.gate.clone()),
+                ))
             })
             .await
             .clone()
@@ -501,13 +577,17 @@ impl RoutingExecutor {
         // before the Host provider deletes the workspace, even if an earlier
         // cleanup left a tombstone for the Host lease itself.
         let mut deleted = if executor.manager().source().kind() == "host" {
-            remove_recorded(
-                &*self.provider()?.source,
-                &self.identity,
-                workspace_id,
-                None,
-            )
-            .await?
+            match self.provider() {
+                Ok(provider) => {
+                    remove_recorded(&*provider.source, &self.identity, workspace_id, None).await?
+                }
+                // No container provider can be configured, so none can
+                // have created an action host unless a marker says so.
+                Err(error) if has_recorded(&self.identity, workspace_id).await => {
+                    return Err(error);
+                }
+                Err(_) => Vec::new(),
+            }
         } else {
             Vec::new()
         };
@@ -541,7 +621,11 @@ impl Executor for RoutingExecutor {
                     host.prepare().await;
                 }
                 let handle = self.host().await?.acquire(scope, ctx).await?;
-                Ok(handle.with_runner(Arc::new(ActionHostRunner::new(action_host, scope))))
+                Ok(handle.with_runner(Arc::new(ActionHostRunner::new(
+                    action_host,
+                    scope,
+                    self.gate.clone(),
+                ))))
             }
             RuntimeTarget::Container { .. } => self.container().await?.acquire(scope, ctx).await,
         }
