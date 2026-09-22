@@ -5,7 +5,7 @@
 //! run — leaves a stopped or running sandbox and its workspace on the
 //! provider. The run's resource records say exactly which. Prune opens the
 //! run for writing, so no coordinator can resume it meanwhile, checks each
-//! record's provider fingerprint against the plugin it launches (a changed
+//! record's provider fingerprint against the provider it reaches (a changed
 //! daemon or account is a configuration error, never a delete on another
 //! backend), writes the delete intent before the provider call, and leaves
 //! a tombstone after. Each provider deletes its sandbox's managed workspace,
@@ -13,7 +13,8 @@
 
 use std::sync::Arc;
 
-use runtime::{RunAccess, Runtime};
+use runtime::{RunAccess, RunRuntime, Runtime};
+use store::RunLogs;
 use tokio::sync::Mutex;
 
 use crate::resource::{ResourceLedger, ResourceStore};
@@ -57,6 +58,15 @@ pub enum PruneError {
 pub async fn prune(rt: &Runtime) -> Result<PruneReport, PruneError> {
     let run_dir = rt.run_options().run_dir.clone();
     let run = rt.prepare_run(&run_dir);
+    let result = prune_prepared(&run).await;
+    // Every path tears the run's services and providers down, a refused
+    // one included: preparing the run already started its services. The
+    // run's write lease, when prune took it, is held until that is done.
+    run.finish().await;
+    result.map(|(report, _logs)| report)
+}
+
+async fn prune_prepared(run: &RunRuntime) -> Result<(PruneReport, Arc<dyn RunLogs>), PruneError> {
     let logs = run
         .open(RunAccess::Write)
         .await
@@ -84,7 +94,5 @@ pub async fn prune(rt: &Runtime) -> Result<PruneReport, PruneError> {
             Err(error) => report.problems.push((lease, error.to_string())),
         }
     }
-    run.finish().await;
-    drop(logs);
-    Ok(report)
+    Ok((report, logs))
 }

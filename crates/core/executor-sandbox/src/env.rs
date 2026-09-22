@@ -36,6 +36,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::BACKEND;
+use crate::gate::{Admission, RunGate};
 
 /// Bytes of pipe buffer between the output sink and each line pump.
 const OUTPUT_PIPE_CAPACITY: usize = 64 * 1024;
@@ -56,6 +57,9 @@ pub(crate) struct SandboxEnv {
     pub(crate) grace:        Duration,
     /// How a process in the sandbox reaches services on Petri's machine.
     pub(crate) host_address: Option<String>,
+    /// The run's admission: every operation passes it, and none starts
+    /// after the run closes it.
+    pub(crate) gate:         RunGate,
 }
 
 /// Maps a finished `run_streaming` to the executor's exit status. The
@@ -148,12 +152,14 @@ enum Job {
 }
 
 /// Runs `job` in an owned task with the interface's line pumps on its
-/// output and the step's stop tokens on its controls.
+/// output and the step's stop tokens on its controls. The task holds
+/// `admission` until the job settles, so the run's gate waits for it.
 fn spawn_streamed(
     sandbox: Arc<dyn Sandbox>,
     job: Job,
     stdin: bool,
     output: OutputMode,
+    admission: Admission,
 ) -> SandboxProcess {
     // Stdin: a piped step gets a writer whose read half streams into the
     // command for its whole life.
@@ -244,6 +250,7 @@ fn spawn_streamed(
             Err(error) => Err(error.to_string()),
         };
         let _ = status_tx.send(Some(status));
+        drop(admission);
     });
 
     SandboxProcess {
@@ -294,6 +301,7 @@ fn facet_error(operation: &str, error: &DriverError) -> EnvError {
 #[async_trait]
 impl ExecEnv for SandboxEnv {
     async fn spawn(&self, spec: ProcessSpec) -> Result<Box<dyn ProcessHandle>, EnvError> {
+        let admission = self.gate.admit("exec").await?;
         // `docker exec -w` refuses a directory that does not exist yet
         // (`repo/` before the first checkout), so create the step's cwd
         // first, with the one command every image contract provides.
@@ -349,6 +357,7 @@ impl ExecEnv for SandboxEnv {
             Job::Exec(exec_spec),
             stdin,
             spec.output,
+            admission,
         )))
     }
 
@@ -379,6 +388,7 @@ impl ExecEnv for SandboxEnv {
     /// the daemon), Daytona returns its preview link and token header. A
     /// provider without the facet offers no route.
     async fn preview_url(&self, port: u16) -> Result<Option<PreviewUrl>, EnvError> {
+        let _admission = self.gate.admit("preview_url").await?;
         let Some(previews) = self.sandbox.preview_urls() else {
             return Ok(None);
         };
@@ -393,6 +403,7 @@ impl ExecEnv for SandboxEnv {
     }
 
     async fn release_preview_url(&self, port: u16) -> Result<(), EnvError> {
+        let _admission = self.gate.admit("release_preview_url").await?;
         match self.sandbox.preview_urls() {
             Some(previews) => previews
                 .release_preview_url(port)
@@ -403,6 +414,7 @@ impl ExecEnv for SandboxEnv {
     }
 
     async fn read_file(&self, relative: &Path) -> Result<Option<Vec<u8>>, EnvError> {
+        let _admission = self.gate.admit("read").await?;
         match self.sandbox.fs().read(&relative.to_string_lossy()).await {
             Ok(bytes) => Ok(Some(bytes)),
             Err(DriverError::NotFound { .. }) => Ok(None),
@@ -415,6 +427,7 @@ impl ExecEnv for SandboxEnv {
         relative: &Path,
         limit: usize,
     ) -> Result<Option<Vec<u8>>, EnvError> {
+        let _admission = self.gate.admit("read").await?;
         // One byte past the limit is enough to know the file is too big,
         // without ever pulling the whole of it across.
         let bounded = limit.saturating_add(1) as u64;
@@ -436,6 +449,7 @@ impl ExecEnv for SandboxEnv {
     }
 
     async fn write_file(&self, relative: &Path, contents: &[u8]) -> Result<(), EnvError> {
+        let _admission = self.gate.admit("write").await?;
         self.sandbox
             .fs()
             .write(&relative.to_string_lossy(), contents)
@@ -448,6 +462,7 @@ impl ExecEnv for SandboxEnv {
         path: &Path,
         depth: usize,
     ) -> Result<Vec<DirectoryEntry>, EnvError> {
+        let _admission = self.gate.admit("list_directory").await?;
         self.sandbox
             .fs()
             .list_dir(&path.to_string_lossy(), depth)
@@ -547,21 +562,16 @@ pub(crate) struct OneShotRunner {
     pub(crate) host_address: Option<String>,
     /// The scope's env, under the spec's own.
     pub(crate) env:          BTreeMap<SmolStr, SmolStr>,
+    pub(crate) gate:         RunGate,
 }
 
-#[async_trait]
-impl ContainerRunner for OneShotRunner {
-    fn workspace_path(&self) -> &str {
-        &self.workspace
-    }
-
-    fn host_address(&self) -> Result<&str, EnvError> {
-        self.host_address
-            .as_deref()
-            .ok_or(EnvError::HostUnreachable)
-    }
-
-    async fn run(&self, spec: OneShotContainer) -> Result<Box<dyn ProcessHandle>, EnvError> {
+impl OneShotRunner {
+    /// Runs `spec` under an admission its caller already holds.
+    pub(crate) fn run_admitted(
+        &self,
+        spec: OneShotContainer,
+        admission: Admission,
+    ) -> Result<Box<dyn ProcessHandle>, EnvError> {
         if self.sandbox.one_shot().is_none() {
             return Err(EnvError::backend(
                 BACKEND,
@@ -607,7 +617,26 @@ impl ContainerRunner for OneShotRunner {
             Job::OneShot(one_shot),
             false,
             OutputMode::Lines,
+            admission,
         )))
+    }
+}
+
+#[async_trait]
+impl ContainerRunner for OneShotRunner {
+    fn workspace_path(&self) -> &str {
+        &self.workspace
+    }
+
+    fn host_address(&self) -> Result<&str, EnvError> {
+        self.host_address
+            .as_deref()
+            .ok_or(EnvError::HostUnreachable)
+    }
+
+    async fn run(&self, spec: OneShotContainer) -> Result<Box<dyn ProcessHandle>, EnvError> {
+        let admission = self.gate.admit("one-shot").await?;
+        self.run_admitted(spec, admission)
     }
 }
 
@@ -777,11 +806,16 @@ mod tests {
             id:   SandboxId::try_new("scripted").expect("the test sandbox id is valid"),
             exec: ScriptedExec { loss },
         });
+        let admission = RunGate::default()
+            .admit("exec")
+            .await
+            .expect("an open gate admits");
         let mut process = spawn_streamed(
             sandbox,
             Job::Exec(ExecSpec::new("true")),
             false,
             OutputMode::Lines,
+            admission,
         );
         let mut lines = process.lines().expect("a lines stream");
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());

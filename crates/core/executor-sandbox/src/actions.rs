@@ -20,6 +20,7 @@ use tokio::fs;
 use tokio::sync::Mutex;
 
 use crate::env::OneShotRunner;
+use crate::gate::RunGate;
 use crate::lease::{LiveSandbox, delete_sandbox};
 use crate::plugin::ProviderSource;
 use crate::run::{RUN_LABEL, RunIdentity, scope_dir, write_record};
@@ -46,6 +47,13 @@ fn host_name(prefix: &str, workspace_id: &str) -> String {
         })
         .collect();
     format!("{prefix}a-{safe}")
+}
+
+/// Whether an action host was ever recorded for this workspace.
+pub(crate) async fn has_recorded(identity: &RunIdentity, workspace_id: &str) -> bool {
+    fs::try_exists(marker_path(identity.run_dir(), workspace_id))
+        .await
+        .unwrap_or(true)
 }
 
 /// Delete an action host, reconciling an uncertain create by its marker and
@@ -247,13 +255,19 @@ impl ActionHost {
 pub(crate) struct ActionHostRunner {
     host: Result<Arc<ActionHost>, String>,
     env:  BTreeMap<SmolStr, SmolStr>,
+    gate: RunGate,
 }
 
 impl ActionHostRunner {
-    pub(crate) fn new(host: Result<Arc<ActionHost>, EnvError>, scope: &ScopeSpec) -> Self {
+    pub(crate) fn new(
+        host: Result<Arc<ActionHost>, EnvError>,
+        scope: &ScopeSpec,
+        gate: RunGate,
+    ) -> Self {
         Self {
             host: host.map_err(|error| error.to_string()),
-            env:  scope.env.clone(),
+            env: scope.env.clone(),
+            gate,
         }
     }
 
@@ -276,14 +290,18 @@ impl ContainerRunner for ActionHostRunner {
 
     async fn run(&self, spec: OneShotContainer) -> Result<Box<dyn ProcessHandle>, EnvError> {
         let host = self.host()?;
+        // Admitted before the action host is created, so a finished run
+        // creates none.
+        let admission = self.gate.admit("one-shot").await?;
         let sandbox = host.sandbox().await?;
         let runner = OneShotRunner {
             sandbox,
             workspace: CONTAINER_WORKSPACE.to_owned(),
             host_address: Some(host.host_address.clone()),
             env: self.env.clone(),
+            gate: self.gate.clone(),
         };
-        runner.run(spec).await
+        runner.run_admitted(spec, admission)
     }
 }
 
