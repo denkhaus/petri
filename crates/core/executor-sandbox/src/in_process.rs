@@ -25,16 +25,20 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use executor::EnvError;
-use sandbox_driver::{HealthStatus, SandboxProvider};
+use sandbox_driver::{HealthStatus, SandboxFilter, SandboxProvider, SandboxState};
 use smol_str::SmolStr;
 use tokio::sync::OnceCell;
 use tokio::time::timeout;
 
 use crate::fingerprint;
 use crate::plugin::{ProviderSource, docker_host_is_local, infer_host_address};
+use crate::run::RUN_LABEL;
 
 /// How long connecting and the first health check may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long shutdown may take to stop the run's Host sandboxes.
+const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Builds one kind's provider for a run.
 ///
@@ -49,8 +53,10 @@ pub trait ProviderFactory: Send + Sync {
     fn kind(&self) -> &str;
 
     /// The non-secret namespace seed, built with the [`fingerprint`]
-    /// helpers from the same inputs `connect` uses, so a lease recorded
-    /// through the kind's plugin is recoverable here.
+    /// helpers from the settings as configured, the values the kind's
+    /// plugin would find in its environment. Pass an unset value as `None`,
+    /// never the default `connect` falls back to: the plugin records the
+    /// unset value, so a resolved default would refuse its leases.
     fn fingerprint_seed(&self, context: &ProviderContext) -> String;
 
     /// Where sandboxes are placed (a Daytona target), when configured.
@@ -203,6 +209,12 @@ impl InProcessProviders {
 /// resource has been touched. The provider then serves the run as one
 /// generation: nothing in this process replaces it.
 /// [`ProviderSource::shutdown`] closes the source; it never serves again.
+///
+/// A Host plugin's exit ends the process groups its sandboxes leave
+/// behind. A Host provider in this process has no exit, so shutdown stops
+/// the run's Host sandboxes that are still running instead: a lease whose
+/// release failed, or one a refused resume never reached. Their records
+/// and workspaces stay, as a plugin's exit leaves them.
 pub(crate) struct InProcessSource {
     factory:   Arc<dyn ProviderFactory>,
     context:   ProviderContext,
@@ -310,6 +322,24 @@ impl ProviderSource for InProcessSource {
 
     async fn shutdown(&self) {
         self.closed.store(true, Ordering::Release);
+        if self.factory.kind() != "host" {
+            return;
+        }
+        let Some((provider, _)) = self.connected.get() else {
+            return;
+        };
+        if timeout(
+            STOP_TIMEOUT,
+            stop_running(&**provider, self.context.run_id()),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                timeout_secs = STOP_TIMEOUT.as_secs(),
+                "the run's Host sandboxes did not stop in time"
+            );
+        }
     }
 
     fn fingerprint(&self) -> &str {
@@ -324,5 +354,34 @@ impl ProviderSource for InProcessSource {
 
     fn region(&self) -> Option<&str> {
         self.factory.region().filter(|region| !region.is_empty())
+    }
+}
+
+/// Stops every sandbox of `run_id` on `provider` that is not already
+/// stopped. A failure is logged; the sandbox's record keeps it for a later
+/// resume or prune.
+async fn stop_running(provider: &dyn SandboxProvider, run_id: &str) {
+    let mut filter = SandboxFilter::default();
+    filter
+        .labels
+        .insert(RUN_LABEL.to_owned(), run_id.to_owned());
+    let statuses = match provider.list(&filter).await {
+        Ok(statuses) => statuses,
+        Err(error) => {
+            tracing::warn!(%error, "listing the run's Host sandboxes at shutdown failed");
+            return;
+        }
+    };
+    for status in statuses {
+        if status.state == SandboxState::Stopped {
+            continue;
+        }
+        let stopped = match provider.attach(&status.id, None).await {
+            Ok(sandbox) => sandbox.stop().await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = stopped {
+            tracing::warn!(sandbox = %status.id, %error, "stopping a Host sandbox at shutdown failed");
+        }
     }
 }

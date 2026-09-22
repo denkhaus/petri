@@ -8,8 +8,11 @@
 //!
 //! The seed is the same whichever way the provider is reached, a plugin or
 //! an in-process factory, so a lease recorded one way is recoverable the
-//! other. The first health report's identity, when the provider gives one,
-//! is appended to the seed ([`verified`]).
+//! other. It is built from the settings as configured, not as the provider
+//! resolves them: an unset value stays unset (`None`) rather than becoming
+//! the default the provider falls back to, because that is what a plugin
+//! records. The first health report's identity, when the provider gives
+//! one, is appended to the seed ([`verified`]).
 
 use std::path::Path;
 
@@ -20,8 +23,8 @@ pub fn host(registry: &Path) -> String {
     format!("host:{}", registry.to_string_lossy())
 }
 
-/// `docker:<endpoint>`: the daemon endpoint, or `default` when none is
-/// configured (the local socket).
+/// `docker:<endpoint>`: the configured `DOCKER_HOST`, or `default` when
+/// none is configured. The local socket's path is never passed for `None`.
 pub fn docker(docker_host: Option<&str>) -> String {
     let endpoint = match docker_host.map(str::trim) {
         None | Some("") => "default",
@@ -30,7 +33,8 @@ pub fn docker(docker_host: Option<&str>) -> String {
     format!("docker:{endpoint}")
 }
 
-/// `daytona:<api url>:<organization>:<target>`, each empty when unset.
+/// `daytona:<api url>:<organization>:<target>`, each as configured and
+/// empty when unset. An unset API URL is `None`, not the Daytona default.
 pub fn daytona(
     api_url: Option<&str>,
     organization_id: Option<&str>,

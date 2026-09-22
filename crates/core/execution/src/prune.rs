@@ -58,23 +58,34 @@ pub enum PruneError {
 pub async fn prune(rt: &Runtime) -> Result<PruneReport, PruneError> {
     let run_dir = rt.run_options().run_dir.clone();
     let run = rt.prepare_run(&run_dir);
-    let result = prune_prepared(&run).await;
     // Every path tears the run's services and providers down, a refused
-    // one included: preparing the run already started its services. The
-    // run's write lease, when prune took it, is held until that is done.
+    // one included: preparing the run already started its services.
+    let logs = match open_for_prune(&run).await {
+        Ok(logs) => logs,
+        Err(error) => {
+            run.finish().await;
+            return Err(error);
+        }
+    };
+    let result = prune_open(&run, &logs).await;
+    // The run's write lease is held until teardown is done, so no
+    // coordinator resumes the run under it.
     run.finish().await;
-    result.map(|(report, _logs)| report)
+    drop(logs);
+    result
 }
 
-async fn prune_prepared(run: &RunRuntime) -> Result<(PruneReport, Arc<dyn RunLogs>), PruneError> {
-    let logs = run
-        .open(RunAccess::Write)
+async fn open_for_prune(run: &RunRuntime) -> Result<Arc<dyn RunLogs>, PruneError> {
+    run.open(RunAccess::Write)
         .await
         .map_err(|error| match error {
             store::StoreError::Leased { locator, .. } => PruneError::RunHeld(locator),
             other => PruneError::Store(other.into()),
-        })?;
-    let store = Arc::new(Mutex::new(ResourceStore::load(&logs).await?));
+        })
+}
+
+async fn prune_open(run: &RunRuntime, logs: &Arc<dyn RunLogs>) -> Result<PruneReport, PruneError> {
+    let store = Arc::new(Mutex::new(ResourceStore::load(logs).await?));
     let router = run.sandbox_router().cloned().ok_or(PruneError::NoRouter)?;
     router.set_ledger(Arc::new(ResourceLedger::new(store.clone())));
 
@@ -94,5 +105,5 @@ async fn prune_prepared(run: &RunRuntime) -> Result<(PruneReport, Arc<dyn RunLog
             Err(error) => report.problems.push((lease, error.to_string())),
         }
     }
-    Ok((report, logs))
+    Ok(report)
 }

@@ -454,6 +454,13 @@ pub trait ProviderSource: Send + Sync {
     /// Sources backed by a caller-owned provider have no process to stop.
     async fn shutdown(&self) {}
 
+    /// Whether [`ProviderSource::shutdown`] itself ends the work admitted
+    /// on this source, as a plugin's closing transport does. When it does
+    /// not, the router waits for admitted work before shutting down.
+    fn ends_work_on_shutdown(&self) -> bool {
+        false
+    }
+
     /// The non-secret backend fingerprint every lease records. Call
     /// `current` first, so a plugin can verify its effective namespace.
     fn fingerprint(&self) -> &str;
@@ -478,6 +485,10 @@ impl ProviderSource for PluginSource {
 
     async fn shutdown(&self) {
         Self::shutdown(self).await;
+    }
+
+    fn ends_work_on_shutdown(&self) -> bool {
+        true
     }
 
     fn fingerprint(&self) -> &str {

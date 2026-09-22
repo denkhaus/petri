@@ -169,7 +169,9 @@ impl RoutingExecutor {
     /// Reach Host, Docker, and Daytona through the built-in providers in
     /// `providers` instead of their plugins. A kind with no factory fails
     /// routably at acquire; no plugin is launched in its place. A router
-    /// over a supplied or simulated source ignores this.
+    /// over a supplied source keeps that source for its container scopes
+    /// and still takes its Host scopes here; a simulated router reaches no
+    /// provider at all.
     #[must_use]
     pub fn with_in_process(mut self, providers: InProcessProviders) -> Self {
         self.in_process = Some(providers);
@@ -205,9 +207,23 @@ impl RoutingExecutor {
     /// source belongs to its caller and can be shared. Durable sandbox
     /// records and retained workspaces remain available.
     pub async fn shutdown(&self) {
-        // A plugin's closing transport ends its in-flight work; only a
-        // provider in this process needs admitted work to settle first.
-        let budget = if self.in_process.is_some() {
+        // A plugin's closing transport ends its in-flight work; any other
+        // source needs admitted work to settle first.
+        let host_source = self
+            .host
+            .get()
+            .and_then(|executor| executor.as_ref().ok())
+            .map(|executor| executor.manager().source());
+        let container_source = self
+            .provider
+            .get()
+            .and_then(|provider| provider.as_ref().ok())
+            .map(|provider| &provider.source);
+        let settles = host_source
+            .into_iter()
+            .chain(container_source)
+            .any(|source| !source.ends_work_on_shutdown());
+        let budget = if settles {
             DRAIN_BUDGET
         } else {
             Duration::ZERO

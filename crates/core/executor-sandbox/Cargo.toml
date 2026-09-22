@@ -33,6 +33,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 testkit.workspace = true
+# The in-process source's shutdown is tested against the real Host provider.
+sandbox-driver-host.workspace = true
 # The Daytona battery fetches a preview URL the provider signs for a port.
 reqwest.workspace = true
 

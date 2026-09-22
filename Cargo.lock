@@ -1711,6 +1711,7 @@ dependencies = [
  "sandbox-driver",
  "sandbox-driver-daytona-config",
  "sandbox-driver-docker-config",
+ "sandbox-driver-host",
  "sandbox-driver-protocol",
  "serde",
  "serde_json",

@@ -1,5 +1,6 @@
 //! The in-process source: connection, health, identity, and closing.
 
+use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -8,9 +9,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use sandbox_driver::{
     Capabilities, Capability, Error as DriverError, EventContext, HealthStatus, Isolation,
-    ProviderHealth, ProviderKind, Sandbox, SandboxFilter, SandboxId, SandboxProvider, SandboxSpec,
-    SandboxStatus,
+    ProviderHealth, ProviderKind, Sandbox, SandboxFilter, SandboxId, SandboxProvider,
+    SandboxSource, SandboxSpec, SandboxState, SandboxStatus,
 };
+use sandbox_driver_host::HostProvider;
+use testkit::RunDir;
 use tokio::sync::Notify;
 use tokio::time::sleep;
 
@@ -18,7 +21,7 @@ use crate::in_process::{
     InProcessProviders, InProcessSource, ProviderContext, ProviderFactory, ProviderNetwork,
 };
 use crate::plugin::ProviderSource;
-use crate::{DOCKER_HOST_ALIAS, fingerprint};
+use crate::{DOCKER_HOST_ALIAS, RUN_LABEL, fingerprint};
 
 /// A provider with a scripted kind and health report; it creates nothing.
 struct ScriptedProvider {
@@ -319,4 +322,93 @@ fn verified_fingerprints_append_a_reported_identity() {
         "daytona:u:o:t:organization:org-1"
     );
     assert!(fingerprint::verified("daytona", "daytona:u:o:t", &healthy(Some(" "))).is_err());
+}
+
+/// sandbox-driver's Host provider over the run's registry.
+struct HostFactory;
+
+#[async_trait]
+impl ProviderFactory for HostFactory {
+    fn kind(&self) -> &'static str {
+        "host"
+    }
+
+    fn fingerprint_seed(&self, context: &ProviderContext) -> String {
+        fingerprint::host(context.host_registry().expect("a Host registry"))
+    }
+
+    fn network(&self) -> ProviderNetwork {
+        ProviderNetwork::host()
+    }
+
+    async fn connect(
+        &self,
+        context: &ProviderContext,
+    ) -> sandbox_driver::Result<Arc<dyn SandboxProvider>> {
+        let registry = context.host_registry().expect("a Host registry");
+        Ok(Arc::new(HostProvider::with_registry(registry).await?))
+    }
+}
+
+#[tokio::test]
+async fn shutdown_stops_the_runs_host_sandboxes_that_are_still_running() {
+    let dir = RunDir::new("in-process-host-shutdown");
+    let registry = dir.path().join("host-registry");
+    fs::create_dir_all(&registry).expect("registry");
+    let source = InProcessSource::new(
+        Arc::new(HostFactory),
+        ProviderContext::new("run-1", dir.path(), Some(registry)),
+    );
+    let (provider, _) = source.current().await.expect("connects");
+    let create = |run: &'static str, name: &'static str| {
+        let provider = provider.clone();
+        let workspace = dir.path().join(name);
+        async move {
+            fs::create_dir_all(&workspace).expect("workspace");
+            let spec = SandboxSpec::new(SandboxSource::HostDirectory)
+                .name(name)
+                .working_directory(workspace.to_string_lossy())
+                .label(RUN_LABEL, run);
+            provider.create(&spec, None).await.expect("created")
+        }
+    };
+    // A lease whose release failed, one already stopped, and another run's.
+    let leaked = create("run-1", "leaked").await;
+    let stopped = create("run-1", "stopped").await;
+    stopped.stop().await.expect("stopped");
+    let other = create("run-2", "other").await;
+
+    source.shutdown().await;
+
+    let states: Vec<_> = provider
+        .list(&SandboxFilter::default())
+        .await
+        .expect("listed")
+        .into_iter()
+        .map(|status| (status.id, status.state))
+        .collect();
+    let state = |id: &SandboxId| {
+        states
+            .iter()
+            .find(|(listed, _)| listed == id)
+            .map(|(_, state)| *state)
+            .expect("listed")
+    };
+    assert_eq!(state(leaked.id()), SandboxState::Stopped);
+    assert_eq!(state(stopped.id()), SandboxState::Stopped);
+    assert_ne!(
+        state(other.id()),
+        SandboxState::Stopped,
+        "another run's sandbox is left alone"
+    );
+    assert!(
+        source.current().await.is_err(),
+        "the closed source never serves"
+    );
+}
+
+#[tokio::test]
+async fn only_a_plugin_ends_admitted_work_by_shutting_down() {
+    let factory = Arc::new(ScriptedFactory::new("docker", vec![healthy(None)]));
+    assert!(!source(&factory).ends_work_on_shutdown());
 }

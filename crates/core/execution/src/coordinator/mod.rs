@@ -260,10 +260,7 @@ impl Coordinator {
             }
         };
         let coordinator = Self::assemble(store, resources, runtime, middleware, options, true);
-        if let Err(error) = coordinator.reconcile_leases().await {
-            coordinator.abandon().await;
-            return Err(error);
-        }
+        coordinator.reconcile_leases().await;
         Ok(coordinator)
     }
 
@@ -305,16 +302,6 @@ impl Coordinator {
             resources.resolve(lease)?;
         }
         Ok((store, resources))
-    }
-
-    /// Tear down a coordinator that never ran: its run's services and
-    /// providers, and its store writer. No lease is released; a later
-    /// resume or prune takes them from the records.
-    async fn abandon(self) {
-        self.runtime.finish().await;
-        if let Err(error) = self.writer.shutdown().await {
-            tracing::warn!(%error, "the store writer stopped with an error");
-        }
     }
 
     fn assemble(
