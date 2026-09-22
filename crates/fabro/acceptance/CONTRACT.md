@@ -616,7 +616,7 @@ names the decision record under `decisions/`; "gap" names the owner.
 
 ## Library pin
 
-Pebble is pinned at `eb08b70337a650cde8a94e920a83c56537657f8f`, the head
+Pebble is pinned at `13a7798eddd8e248e0bbdb65d8e812aec3ded9ca`, the merge
 of Pebble PR #27 (the `sandbox_driver` module that replaces Fabro's
 `fabro-pebble-sandbox` crate, behind Pebble's `sandbox-driver` feature,
 pinning sandbox-driver at `583a1646` as Petri does) on top of Pebble
@@ -788,7 +788,7 @@ fails when any of them disagree. The row names are the keys of a record's
 
 | Pin | Revision | Repository | Role |
 |---|---|---|---|
-| `pebble` | `eb08b70337a650cde8a94e920a83c56537657f8f` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
+| `pebble` | `13a7798eddd8e248e0bbdb65d8e812aec3ded9ca` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
 | `lithos_llm` | `43a42ac28e9d9bcf40a91abc02be4f12ca274ebb` | `lithoscomputer/lithos-llm` (public) | provider transport, request retries, and the `Usage` type every usage takes |
 | `sandbox_driver` | `583a16463320966e8f5c88bedd1d759e93fbd05f` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `ca45f0e50a6716d716aa2f638ca3cf767e88f613` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
