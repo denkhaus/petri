@@ -149,7 +149,7 @@ async fn a_kind_without_a_factory_fails_at_acquire_instead_of_launching_its_plug
     let host = Arc::new(HostFactory::default());
     let runtime = Runtime::standard()
         .options(retained(&directory))
-        .in_process_providers(InProcessProviders::new().with_host(host.clone()));
+        .in_process_providers(InProcessProviders::new().with(host.clone()));
     let run = runtime.prepare_run(directory.path());
     let router = run.sandbox_router().expect("standard router").clone();
     let mut scope = ScopeSpec::new(ScopeId::new(0), "scope-0");

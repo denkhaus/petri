@@ -265,15 +265,20 @@ async fn a_shutdown_racing_the_connection_wins() {
 }
 
 #[test]
-fn a_missing_or_mismatched_factory_is_a_configuration_error() {
+fn factories_serve_the_kind_they_build() {
     let providers = InProcessProviders::new()
-        .with_docker(Arc::new(ScriptedFactory::new("daytona", vec![healthy(
+        .with(Arc::new(ScriptedFactory::new("daytona", vec![healthy(
             None,
         )])));
-    let missing = providers.factory("host").err().expect("no host factory");
+    let missing = providers
+        .factory("docker")
+        .err()
+        .expect("no docker factory");
     assert!(missing.contains("not configured"), "{missing}");
-    let mismatched = providers.factory("docker").err().expect("wrong kind");
-    assert!(mismatched.contains("`daytona`"), "{mismatched}");
+    assert_eq!(
+        providers.factory("daytona").expect("daytona").kind(),
+        "daytona"
+    );
 }
 
 #[test]

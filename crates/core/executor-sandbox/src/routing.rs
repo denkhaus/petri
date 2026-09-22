@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use executor::{
@@ -18,9 +19,9 @@ use sandbox_driver::SandboxId;
 use tokio::fs;
 use tokio::sync::OnceCell;
 
-use crate::actions::{ActionHost, ActionHostRunner, has_recorded, remove_recorded};
+use crate::actions::{ActionHost, ActionHostRunner, remove_recorded};
 use crate::gate::{DRAIN_BUDGET, RunGate};
-use crate::in_process::{InProcessProviders, InProcessSource, ProviderContext};
+use crate::in_process::{InProcessProviders, InProcessSource, ProviderContext, ProviderNetwork};
 use crate::lease::{LeaseLedger, MemoryLedger, ReconcileReport, RecordedLease};
 use crate::plugin::{FixedProvider, PluginSettings, PluginSource, ProviderSource};
 use crate::run::{RunIdentity, workspace_dir};
@@ -83,7 +84,7 @@ pub struct RoutingExecutor {
     /// Every scope goes to the simulated provider: a dry run.
     simulated:    bool,
     /// Built-in providers to use instead of launching plugins.
-    in_process:   Option<Arc<InProcessProviders>>,
+    in_process:   Option<InProcessProviders>,
     /// Admission to every environment this router hands out; closed at
     /// shutdown, so a retained environment cannot outlive the run.
     gate:         RunGate,
@@ -170,7 +171,7 @@ impl RoutingExecutor {
     /// routably at acquire; no plugin is launched in its place. A router
     /// over a supplied or simulated source ignores this.
     #[must_use]
-    pub fn with_in_process(mut self, providers: Arc<InProcessProviders>) -> Self {
+    pub fn with_in_process(mut self, providers: InProcessProviders) -> Self {
         self.in_process = Some(providers);
         self
     }
@@ -204,7 +205,14 @@ impl RoutingExecutor {
     /// source belongs to its caller and can be shared. Durable sandbox
     /// records and retained workspaces remain available.
     pub async fn shutdown(&self) {
-        if !self.gate.close(DRAIN_BUDGET).await {
+        // A plugin's closing transport ends its in-flight work; only a
+        // provider in this process needs admitted work to settle first.
+        let budget = if self.in_process.is_some() {
+            DRAIN_BUDGET
+        } else {
+            Duration::ZERO
+        };
+        if !self.gate.close(budget).await && !budget.is_zero() {
             tracing::warn!(
                 budget_secs = DRAIN_BUDGET.as_secs(),
                 "sandbox operations were still running when the run closed its sandboxes"
@@ -265,18 +273,11 @@ impl RoutingExecutor {
                 }),
                 ContainerSource::Env => {
                     if let Some(providers) = &self.in_process {
-                        let factory = providers.factory(self.plugin_kind())?;
-                        let network = factory.network();
-                        let context = ProviderContext::new(
-                            self.identity.run_id(),
-                            self.identity.run_dir(),
-                            None,
-                        );
+                        let (source, network) =
+                            self.in_process_source(providers, self.plugin_kind(), None)?;
                         return Ok(ProviderConfig {
-                            source:                  Arc::new(InProcessSource::new(
-                                factory, context,
-                            )),
-                            host_address:            network.host_address(),
+                            source,
+                            host_address: network.host_address(),
                             supports_host_workspace: network.supports_host_workspace(),
                         });
                     }
@@ -313,17 +314,9 @@ impl RoutingExecutor {
                     .map_err(|e| e.to_string())?;
                 let (source, host_address): (Arc<dyn ProviderSource>, _) =
                     if let Some(providers) = &self.in_process {
-                        let factory = providers.factory("host")?;
-                        let host_address = factory.network().host_address()?;
-                        let context = ProviderContext::new(
-                            self.identity.run_id(),
-                            self.identity.run_dir(),
-                            Some(directory),
-                        );
-                        (
-                            Arc::new(InProcessSource::new(factory, context)),
-                            host_address,
-                        )
+                        let (source, network) =
+                            self.in_process_source(providers, "host", Some(directory))?;
+                        (source, network.host_address()?)
                     } else {
                         let settings = PluginSettings::from_env("host", self.options.plugin_dev)
                             .map_err(|e| e.to_string())?
@@ -353,6 +346,24 @@ impl RoutingExecutor {
             .await
             .clone()
             .map_err(|message| EnvError::backend("host", "configure", message))
+    }
+
+    /// `kind`'s built-in provider for this run, and how its sandboxes reach
+    /// this machine.
+    fn in_process_source(
+        &self,
+        providers: &InProcessProviders,
+        kind: &str,
+        host_registry: Option<PathBuf>,
+    ) -> Result<(Arc<dyn ProviderSource>, ProviderNetwork), String> {
+        let factory = providers.factory(kind)?;
+        let network = factory.network();
+        let context = ProviderContext::new(
+            self.identity.run_id(),
+            self.identity.run_dir(),
+            host_registry,
+        );
+        Ok((Arc::new(InProcessSource::new(factory, context)), network))
     }
 
     /// The provider kind a lease is recorded on, when the ledger knows it.
@@ -576,18 +587,11 @@ impl RoutingExecutor {
         // An action host has its own marker and Docker resource. Remove it
         // before the Host provider deletes the workspace, even if an earlier
         // cleanup left a tombstone for the Host lease itself.
+        // The container provider is only needed when a marker says one
+        // created an action host.
         let mut deleted = if executor.manager().source().kind() == "host" {
-            match self.provider() {
-                Ok(provider) => {
-                    remove_recorded(&*provider.source, &self.identity, workspace_id, None).await?
-                }
-                // No container provider can be configured, so none can
-                // have created an action host unless a marker says so.
-                Err(error) if has_recorded(&self.identity, workspace_id).await => {
-                    return Err(error);
-                }
-                Err(_) => Vec::new(),
-            }
+            let source = self.provider().map(|provider| &*provider.source);
+            remove_recorded(source, &self.identity, workspace_id, None).await?
         } else {
             Vec::new()
         };

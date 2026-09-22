@@ -105,7 +105,7 @@ pub fn host_providers() -> (InProcessProviders, Arc<HostFactory>, Arc<UnusedFact
     let host = Arc::new(HostFactory::default());
     let docker = Arc::new(UnusedFactory::new("docker"));
     let providers = InProcessProviders::new()
-        .with_host(host.clone())
-        .with_docker(docker.clone());
+        .with(host.clone())
+        .with(docker.clone());
     (providers, host, docker)
 }
