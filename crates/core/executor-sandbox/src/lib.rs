@@ -66,7 +66,7 @@ use crate::env::{OneShotRunner, SandboxEnv};
 use crate::gate::RunGate;
 pub use crate::host::HostExecutor;
 pub use crate::in_process::{
-    InProcessProviders, InProcessSource, ProviderContext, ProviderFactory, ProviderNetwork,
+    InProcessProviders, ProviderContext, ProviderFactory, ProviderNetwork,
 };
 pub use crate::lease::{
     LeaseLedger, LeaseRecord, LeaseState, LedgerError, MemoryLedger, PendingIntent,

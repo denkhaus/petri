@@ -11,73 +11,43 @@
 //! The gate stops access, not sandboxes. Lease release still ends the
 //! sandboxes by retention before the run closes its gate.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use executor::EnvError;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::timeout;
+use tokio_util::task::TaskTracker;
+use tokio_util::task::task_tracker::TaskTrackerToken;
 
 use crate::BACKEND;
-
-/// Far more concurrent operations than one run makes; draining takes them
-/// all, so it completes exactly when no admitted operation remains.
-const PERMITS: u32 = 1 << 20;
 
 /// How long closing waits for admitted operations before giving up on them.
 pub(crate) const DRAIN_BUDGET: Duration = Duration::from_secs(10);
 
 /// Admission to one run's sandboxes. Clones share the gate.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct RunGate {
-    inner: Arc<Inner>,
-}
-
-struct Inner {
-    closed:  AtomicBool,
-    permits: Arc<Semaphore>,
+    admitted: TaskTracker,
 }
 
 /// One admitted operation. The gate cannot finish closing while it lives.
 pub(crate) struct Admission {
-    _permit: OwnedSemaphorePermit,
-}
-
-impl Default for RunGate {
-    fn default() -> Self {
-        Self {
-            inner: Arc::new(Inner {
-                closed:  AtomicBool::new(false),
-                permits: Arc::new(Semaphore::new(PERMITS as usize)),
-            }),
-        }
-    }
+    _token: TaskTrackerToken,
 }
 
 impl RunGate {
     /// Admits one operation, or refuses once the run has closed its gate.
-    pub(crate) async fn admit(&self, operation: &str) -> Result<Admission, EnvError> {
-        let refused = || {
-            EnvError::backend(
+    pub(crate) fn admit(&self, operation: &str) -> Result<Admission, EnvError> {
+        let token = self.admitted.token();
+        // Checked after taking the token, so a close that began first
+        // refuses this call and one that begins later waits for it.
+        if self.admitted.is_closed() {
+            return Err(EnvError::backend(
                 BACKEND,
                 operation,
                 "the run has finished; its sandbox is no longer reachable",
-            )
-        };
-        if self.inner.closed.load(Ordering::Acquire) {
-            return Err(refused());
+            ));
         }
-        let permit = Arc::clone(&self.inner.permits)
-            .acquire_owned()
-            .await
-            .map_err(|_| refused())?;
-        // Closing may have begun while this call waited; it must not start
-        // work the drain has stopped waiting for.
-        if self.inner.closed.load(Ordering::Acquire) {
-            return Err(refused());
-        }
-        Ok(Admission { _permit: permit })
+        Ok(Admission { _token: token })
     }
 
     /// Stops new admissions and waits up to `budget` for admitted
@@ -85,16 +55,10 @@ impl RunGate {
     /// at the deadline: they finish on their own, and no new one starts. A
     /// second close returns `true` at once.
     pub(crate) async fn close(&self, budget: Duration) -> bool {
-        if self.inner.closed.swap(true, Ordering::AcqRel) {
+        if !self.admitted.close() {
             return true;
         }
-        let drained = timeout(
-            budget,
-            Arc::clone(&self.inner.permits).acquire_many_owned(PERMITS),
-        )
-        .await;
-        self.inner.permits.close();
-        matches!(drained, Ok(Ok(_)))
+        timeout(budget, self.admitted.wait()).await.is_ok()
     }
 }
 
@@ -107,9 +71,9 @@ mod tests {
     #[tokio::test]
     async fn a_closed_gate_refuses_new_work() {
         let gate = RunGate::default();
-        drop(gate.admit("read").await.expect("open gate admits"));
+        drop(gate.admit("read").expect("open gate admits"));
         assert!(gate.close(DRAIN_BUDGET).await);
-        let error = gate.admit("read").await.err().expect("closed gate refuses");
+        let error = gate.admit("read").err().expect("closed gate refuses");
         assert!(error.to_string().contains("finished"), "{error}");
         assert!(gate.close(DRAIN_BUDGET).await, "closing twice is safe");
     }
@@ -117,7 +81,7 @@ mod tests {
     #[tokio::test]
     async fn closing_waits_for_admitted_work() {
         let gate = RunGate::default();
-        let admitted = gate.admit("exec").await.expect("admitted");
+        let admitted = gate.admit("exec").expect("admitted");
         let closing = tokio::spawn({
             let gate = gate.clone();
             async move { gate.close(DRAIN_BUDGET).await }
@@ -128,7 +92,7 @@ mod tests {
             "an admitted operation holds the drain"
         );
         assert!(
-            gate.admit("exec").await.is_err(),
+            gate.admit("exec").is_err(),
             "no new admissions while draining"
         );
         drop(admitted);
@@ -138,8 +102,8 @@ mod tests {
     #[tokio::test]
     async fn closing_gives_up_on_work_past_its_budget() {
         let gate = RunGate::default();
-        let _stuck = gate.admit("exec").await.expect("admitted");
+        let _stuck = gate.admit("exec").expect("admitted");
         assert!(!gate.close(Duration::from_millis(10)).await);
-        assert!(gate.admit("exec").await.is_err());
+        assert!(gate.admit("exec").is_err());
     }
 }

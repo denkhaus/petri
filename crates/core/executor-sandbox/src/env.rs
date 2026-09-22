@@ -301,7 +301,7 @@ fn facet_error(operation: &str, error: &DriverError) -> EnvError {
 #[async_trait]
 impl ExecEnv for SandboxEnv {
     async fn spawn(&self, spec: ProcessSpec) -> Result<Box<dyn ProcessHandle>, EnvError> {
-        let admission = self.gate.admit("exec").await?;
+        let admission = self.gate.admit("exec")?;
         // `docker exec -w` refuses a directory that does not exist yet
         // (`repo/` before the first checkout), so create the step's cwd
         // first, with the one command every image contract provides.
@@ -388,7 +388,7 @@ impl ExecEnv for SandboxEnv {
     /// the daemon), Daytona returns its preview link and token header. A
     /// provider without the facet offers no route.
     async fn preview_url(&self, port: u16) -> Result<Option<PreviewUrl>, EnvError> {
-        let _admission = self.gate.admit("preview_url").await?;
+        let _admission = self.gate.admit("preview_url")?;
         let Some(previews) = self.sandbox.preview_urls() else {
             return Ok(None);
         };
@@ -403,7 +403,7 @@ impl ExecEnv for SandboxEnv {
     }
 
     async fn release_preview_url(&self, port: u16) -> Result<(), EnvError> {
-        let _admission = self.gate.admit("release_preview_url").await?;
+        let _admission = self.gate.admit("release_preview_url")?;
         match self.sandbox.preview_urls() {
             Some(previews) => previews
                 .release_preview_url(port)
@@ -414,7 +414,7 @@ impl ExecEnv for SandboxEnv {
     }
 
     async fn read_file(&self, relative: &Path) -> Result<Option<Vec<u8>>, EnvError> {
-        let _admission = self.gate.admit("read").await?;
+        let _admission = self.gate.admit("read")?;
         match self.sandbox.fs().read(&relative.to_string_lossy()).await {
             Ok(bytes) => Ok(Some(bytes)),
             Err(DriverError::NotFound { .. }) => Ok(None),
@@ -427,7 +427,7 @@ impl ExecEnv for SandboxEnv {
         relative: &Path,
         limit: usize,
     ) -> Result<Option<Vec<u8>>, EnvError> {
-        let _admission = self.gate.admit("read").await?;
+        let _admission = self.gate.admit("read")?;
         // One byte past the limit is enough to know the file is too big,
         // without ever pulling the whole of it across.
         let bounded = limit.saturating_add(1) as u64;
@@ -449,7 +449,7 @@ impl ExecEnv for SandboxEnv {
     }
 
     async fn write_file(&self, relative: &Path, contents: &[u8]) -> Result<(), EnvError> {
-        let _admission = self.gate.admit("write").await?;
+        let _admission = self.gate.admit("write")?;
         self.sandbox
             .fs()
             .write(&relative.to_string_lossy(), contents)
@@ -462,7 +462,7 @@ impl ExecEnv for SandboxEnv {
         path: &Path,
         depth: usize,
     ) -> Result<Vec<DirectoryEntry>, EnvError> {
-        let _admission = self.gate.admit("list_directory").await?;
+        let _admission = self.gate.admit("list_directory")?;
         self.sandbox
             .fs()
             .list_dir(&path.to_string_lossy(), depth)
@@ -635,7 +635,7 @@ impl ContainerRunner for OneShotRunner {
     }
 
     async fn run(&self, spec: OneShotContainer) -> Result<Box<dyn ProcessHandle>, EnvError> {
-        let admission = self.gate.admit("one-shot").await?;
+        let admission = self.gate.admit("one-shot")?;
         self.run_admitted(spec, admission)
     }
 }
@@ -808,7 +808,6 @@ mod tests {
         });
         let admission = RunGate::default()
             .admit("exec")
-            .await
             .expect("an open gate admits");
         let mut process = spawn_streamed(
             sandbox,

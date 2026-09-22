@@ -165,7 +165,7 @@ pub struct Runtime {
     /// a dry run.
     simulated:    bool,
     /// Built-in providers the standard router reaches instead of plugins.
-    in_process:   Option<Arc<InProcessProviders>>,
+    in_process:   Option<InProcessProviders>,
 }
 
 impl Runtime {
@@ -283,7 +283,7 @@ impl Runtime {
     /// and [`Runtime::executor`] still replaces the router outright.
     #[must_use]
     pub fn in_process_providers(mut self, providers: InProcessProviders) -> Self {
-        self.in_process = Some(Arc::new(providers));
+        self.in_process = Some(providers);
         self
     }
 
@@ -864,7 +864,7 @@ impl Runtime {
                 self.options.sandbox.clone(),
             );
             match &self.in_process {
-                Some(providers) => router.with_in_process(Arc::clone(providers)),
+                Some(providers) => router.with_in_process(providers.clone()),
                 None => router,
             }
         };

@@ -51,7 +51,7 @@ pub fn daytona(
      organization must be known before sandbox resources can be created or recovered"
 )]
 pub struct MissingIdentity {
-    pub kind: String,
+    kind: String,
 }
 
 /// The fingerprint a provider serves under: `seed`, plus `:<identity>` when

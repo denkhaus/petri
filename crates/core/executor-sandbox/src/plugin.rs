@@ -249,13 +249,11 @@ impl PluginSettings {
     }
 
     fn effective_fingerprint(&self, health: &ProviderHealth) -> Result<String, PluginError> {
-        fingerprint::verified(self.kind.as_str(), &self.fingerprint, health).map_err(|_| {
+        fingerprint::verified(self.kind.as_str(), &self.fingerprint, health).map_err(|error| {
             PluginError::Unhealthy {
                 kind:    self.kind.to_string(),
                 status:  "without a verified resource identity",
-                message: "the Daytona plugin must report its effective organization before \
-                    sandbox resources can be created or recovered"
-                    .to_owned(),
+                message: error.to_string(),
             }
         })
     }

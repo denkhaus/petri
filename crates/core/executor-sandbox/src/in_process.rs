@@ -12,14 +12,15 @@
 //! kind with no factory fails routably at acquire. A router without them
 //! reaches every provider through its plugin, as before.
 //!
-//! [`InProcessSource`] is one factory's provider for one run: connected on
+//! `InProcessSource` is one factory's provider for one run: connected on
 //! first use and health-checked before it serves, like a plugin's first
 //! generation.
 
+use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -111,10 +112,7 @@ pub struct ProviderNetwork {
 impl ProviderNetwork {
     /// Processes on this machine reach it on the loopback.
     pub fn host() -> Self {
-        Self {
-            host_address:            Ok(Some("127.0.0.1".to_owned())),
-            supports_host_workspace: false,
-        }
+        Self::unmounted("host")
     }
 
     /// A Docker daemon at `docker_host` (`None` for the local default).
@@ -132,8 +130,15 @@ impl ProviderNetwork {
 
     /// A provider with no route back to this machine: Daytona.
     pub fn none() -> Self {
+        Self::unmounted("daytona")
+    }
+
+    /// `kind`'s default route back to this machine, mounting no Host
+    /// workspace.
+    fn unmounted(kind: &str) -> Self {
         Self {
-            host_address:            Ok(None),
+            host_address:            infer_host_address(kind, None, "")
+                .map_err(|error| error.to_string()),
             supports_host_workspace: false,
         }
     }
@@ -147,21 +152,21 @@ impl ProviderNetwork {
     }
 }
 
-/// The built-in providers an embedder links, one optional factory per kind.
+/// The built-in providers an embedder links, at most one factory per kind.
+///
+/// Host-process scopes use the `host` factory; Docker-backend scopes, and
+/// container targets and Docker actions under the Host backend, use the
+/// `docker` factory; Daytona-backend scopes use the `daytona` factory.
 #[derive(Clone, Default)]
 pub struct InProcessProviders {
-    host:    Option<Arc<dyn ProviderFactory>>,
-    docker:  Option<Arc<dyn ProviderFactory>>,
-    daytona: Option<Arc<dyn ProviderFactory>>,
+    factories: BTreeMap<String, Arc<dyn ProviderFactory>>,
 }
 
 impl fmt::Debug for InProcessProviders {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("InProcessProviders")
-            .field("host", &self.host.is_some())
-            .field("docker", &self.docker.is_some())
-            .field("daytona", &self.daytona.is_some())
+            .debug_set()
+            .entries(self.factories.keys())
             .finish()
     }
 }
@@ -171,49 +176,22 @@ impl InProcessProviders {
         Self::default()
     }
 
-    /// The factory Host-process scopes use.
+    /// Reach `factory`'s kind through it, replacing any earlier factory
+    /// for that kind.
     #[must_use]
-    pub fn with_host(mut self, factory: Arc<dyn ProviderFactory>) -> Self {
-        self.host = Some(factory);
+    pub fn with(mut self, factory: Arc<dyn ProviderFactory>) -> Self {
+        self.factories.insert(factory.kind().to_owned(), factory);
         self
     }
 
-    /// The factory Docker-backend scopes, and container targets and Docker
-    /// actions under the Host backend, use.
-    #[must_use]
-    pub fn with_docker(mut self, factory: Arc<dyn ProviderFactory>) -> Self {
-        self.docker = Some(factory);
-        self
-    }
-
-    /// The factory Daytona-backend scopes use.
-    #[must_use]
-    pub fn with_daytona(mut self, factory: Arc<dyn ProviderFactory>) -> Self {
-        self.daytona = Some(factory);
-        self
-    }
-
-    /// The factory for `kind`, checked to build that kind.
+    /// The factory for `kind`.
     pub(crate) fn factory(&self, kind: &str) -> Result<Arc<dyn ProviderFactory>, String> {
-        let slot = match kind {
-            "host" => &self.host,
-            "docker" => &self.docker,
-            "daytona" => &self.daytona,
-            _ => &None,
-        };
-        let factory = slot.clone().ok_or_else(|| {
+        self.factories.get(kind).cloned().ok_or_else(|| {
             format!(
                 "the {kind} provider is not configured in this process, and no provider plugin \
                  is launched when built-in providers are linked in"
             )
-        })?;
-        if factory.kind() != kind {
-            return Err(format!(
-                "the factory configured for {kind} builds `{}` providers",
-                factory.kind()
-            ));
-        }
-        Ok(factory)
+        })
     }
 }
 
@@ -225,52 +203,47 @@ impl InProcessProviders {
 /// resource has been touched. The provider then serves the run as one
 /// generation: nothing in this process replaces it.
 /// [`ProviderSource::shutdown`] closes the source; it never serves again.
-pub struct InProcessSource {
-    factory:     Arc<dyn ProviderFactory>,
-    context:     ProviderContext,
-    kind:        String,
-    seed:        String,
-    connected:   OnceCell<Arc<dyn SandboxProvider>>,
-    /// Filled once the first health report verifies the namespace.
-    fingerprint: OnceLock<String>,
-    closed:      AtomicBool,
+pub(crate) struct InProcessSource {
+    factory:   Arc<dyn ProviderFactory>,
+    context:   ProviderContext,
+    seed:      String,
+    /// The provider and the fingerprint its first health report verified.
+    connected: OnceCell<(Arc<dyn SandboxProvider>, String)>,
+    closed:    AtomicBool,
 }
 
 impl InProcessSource {
-    pub fn new(factory: Arc<dyn ProviderFactory>, context: ProviderContext) -> Self {
-        let kind = factory.kind().to_owned();
+    pub(crate) fn new(factory: Arc<dyn ProviderFactory>, context: ProviderContext) -> Self {
         let seed = factory.fingerprint_seed(&context);
         Self {
             factory,
             context,
-            kind,
             seed,
             connected: OnceCell::new(),
-            fingerprint: OnceLock::new(),
             closed: AtomicBool::new(false),
         }
     }
 
     fn error(&self, operation: &str, message: impl fmt::Display) -> EnvError {
-        EnvError::backend(self.kind.as_str(), operation, message.to_string())
+        EnvError::backend(self.factory.kind(), operation, message.to_string())
     }
 
     fn closed_error(&self) -> EnvError {
         self.error("connect", "the run has finished; its provider is closed")
     }
 
-    async fn connect(&self) -> Result<Arc<dyn SandboxProvider>, EnvError> {
+    async fn connect(&self) -> Result<(Arc<dyn SandboxProvider>, String), EnvError> {
         let provider = self
             .factory
             .connect(&self.context)
             .await
             .map_err(|error| self.error("connect", error))?;
-        if provider.kind().as_str() != self.kind {
+        if provider.kind().as_str() != self.factory.kind() {
             return Err(self.error(
                 "connect",
                 format!(
                     "the {} factory connected a `{}` provider",
-                    self.kind,
+                    self.factory.kind(),
                     provider.kind()
                 ),
             ));
@@ -299,10 +272,9 @@ impl InProcessSource {
                 ),
             ));
         }
-        let verified = fingerprint::verified(&self.kind, &self.seed, &health)
+        let verified = fingerprint::verified(self.factory.kind(), &self.seed, &health)
             .map_err(|error| self.error("health", error))?;
-        let _ = self.fingerprint.set(verified);
-        Ok(provider)
+        Ok((provider, verified))
     }
 }
 
@@ -312,7 +284,7 @@ impl ProviderSource for InProcessSource {
         if self.closed.load(Ordering::Acquire) {
             return Err(self.closed_error());
         }
-        let provider = self
+        let (provider, _) = self
             .connected
             .get_or_try_init(|| async {
                 timeout(CONNECT_TIMEOUT, self.connect())
@@ -341,11 +313,13 @@ impl ProviderSource for InProcessSource {
     }
 
     fn fingerprint(&self) -> &str {
-        self.fingerprint.get().map_or(&self.seed, String::as_str)
+        self.connected
+            .get()
+            .map_or(&self.seed, |(_, verified)| verified)
     }
 
     fn kind(&self) -> &str {
-        &self.kind
+        self.factory.kind()
     }
 
     fn region(&self) -> Option<&str> {
