@@ -69,25 +69,29 @@ wildcard_imports = "warn"
 absolute_paths = "warn"
 
 [workspace.dependencies]
-# Native agent runtime, pinned with the prompt-report and session-scope APIs.
-pebble-coding-agent = { git = "https://github.com/lithoscomputer/pebble.git", rev = "13a7798eddd8e248e0bbdb65d8e812aec3ded9ca" }
+# Internal git dependencies (`lithoscomputer/*`) name exactly `branch = "main"`,
+# never `rev` and never an omitted ref, so Fabro, Pebble, and Petri share one
+# copy of each. `Cargo.lock` chooses the commit; in the shipped application,
+# Fabro's lockfile does. `mise run check:pins` enforces the form.
+# Native agent runtime, with the prompt-report and session-scope APIs.
+pebble-coding-agent = { git = "https://github.com/lithoscomputer/pebble.git", branch = "main" }
 # The tool middleware trait Petri implements for Fabro tool hooks; the coding agent does not re-export it.
-pebble-agent = { git = "https://github.com/lithoscomputer/pebble.git", rev = "13a7798eddd8e248e0bbdb65d8e812aec3ded9ca" }
-lithos-llm = { git = "https://github.com/lithoscomputer/lithos-llm", rev = "43a42ac28e9d9bcf40a91abc02be4f12ca274ebb", default-features = false }
+pebble-agent = { git = "https://github.com/lithoscomputer/pebble.git", branch = "main" }
+lithos-llm = { git = "https://github.com/lithoscomputer/lithos-llm", branch = "main", default-features = false }
 globset = "0.4"
 ir = { package = "petri-ir", path = "crates/core/ir" }
 store = { package = "petri-store", path = "crates/core/store" }
 engine = { package = "petri-engine", path = "crates/core/engine" }
 executor = { package = "petri-executor", path = "crates/core/executor" }
 executor-sandbox = { package = "petri-executor-sandbox", path = "crates/core/executor-sandbox" }
-# sandbox-driver lives in the `lithoscomputer/sandbox-driver` repo, pinned by
-# revision. To develop the two together, point these at the sibling checkout
-# with a `[patch]` section in a local, untracked Cargo config, and move the pin
-# forward once the matching sandbox-driver commit is pushed.
-sandbox-driver = { git = "https://github.com/lithoscomputer/sandbox-driver.git", rev = "583a16463320966e8f5c88bedd1d759e93fbd05f" }
-sandbox-driver-protocol = { git = "https://github.com/lithoscomputer/sandbox-driver.git", rev = "583a16463320966e8f5c88bedd1d759e93fbd05f" }
-sandbox-driver-docker-config = { git = "https://github.com/lithoscomputer/sandbox-driver.git", rev = "583a16463320966e8f5c88bedd1d759e93fbd05f" }
-sandbox-driver-daytona-config = { git = "https://github.com/lithoscomputer/sandbox-driver.git", rev = "583a16463320966e8f5c88bedd1d759e93fbd05f" }
+# sandbox-driver lives in the `lithoscomputer/sandbox-driver` repo. To develop
+# the two together, point these at the sibling checkout with a `[patch]`
+# section in a local, untracked Cargo config, and move `Cargo.lock` forward
+# once the matching sandbox-driver commit is on `main`.
+sandbox-driver = { git = "https://github.com/lithoscomputer/sandbox-driver.git", branch = "main" }
+sandbox-driver-protocol = { git = "https://github.com/lithoscomputer/sandbox-driver.git", branch = "main" }
+sandbox-driver-docker-config = { git = "https://github.com/lithoscomputer/sandbox-driver.git", branch = "main" }
+sandbox-driver-daytona-config = { git = "https://github.com/lithoscomputer/sandbox-driver.git", branch = "main" }
 steps = { package = "petri-steps", path = "crates/core/steps" }
 driver = { package = "petri-driver", path = "crates/core/driver" }
 execution = { package = "petri-execution", path = "crates/core/execution" }

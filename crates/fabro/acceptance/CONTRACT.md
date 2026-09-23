@@ -779,11 +779,15 @@ agent's event stream as `LlmRetry`.
 
 ## Pinned revisions
 
-Every library Petri runs Fabro workflows through is pinned by revision. This
-table is the citation the evidence records and `scripts/check-pins.py`
-compare against the manifests (`Cargo.toml`, `crates/petri/cli/Cargo.toml`,
-`crates/fabro/corpus-pin.txt`, `bundles.lock.json`). `mise run check:pins`
-fails when any of them disagree. The row names are the keys of a record's
+Every library Petri runs Fabro workflows through is locked to one commit.
+The manifests name each internal library by `branch = "main"`, never by
+`rev`; `Cargo.lock` chooses the commit, and in the shipped application
+Fabro's `Cargo.lock` is the one place it is chosen. This table is the
+citation the evidence records and `scripts/check-pins.py` compare against
+`Cargo.lock`, `crates/fabro/corpus-pin.txt`, and `bundles.lock.json`.
+`mise run check:pins` fails when any of them disagree, when an internal
+dependency names anything but `branch = "main"`, or when `Cargo.lock` holds
+two copies of one library. The row names are the keys of a record's
 `pins` block.
 
 | Pin | Revision | Repository | Role |
@@ -796,14 +800,15 @@ fails when any of them disagree. The row names are the keys of a record's
 | `runner_image` | `f8bbbfd81934` | `lithoscomputer/sandbox-images` (public) | the default runner images (`ghcr.io/lithoscomputer/ubuntu-*`) Docker and Daytona scopes start from (`RUNNER_PIN` in `crates/core/executor-sandbox/src/backend.rs`; PyYAML present since `df708f910111`) |
 
 A change to Pebble or lithos-llm runs the owning
-repository's required checks before Petri moves its pin; then this table, the
-manifests, and the affected evidence records move together. The library batch
+repository's required checks before Petri moves its lock; then this table,
+`Cargo.lock`, and the affected evidence records move together. The library batch
 the readiness work asked for is inside the pinned revisions (Pebble `4c00633`,
-sandbox-driver `a92c0db6`); the twins are pinned in both test crates that
+sandbox-driver `a92c0db6`); the twins track `main` in both test crates that
 serve them. Since Pebble `6996942` Pebble's `mcp` feature no longer names
 the sandbox-driver crate; since Pebble PR #27 its `sandbox-driver` feature
 names it again, and Fabro builds that feature beside Petri's crates, so
-Petri's pin and Pebble's pin name one revision. sandbox-driver `583a1646`
+Petri and Pebble both name sandbox-driver by `branch = "main"` and the
+lockfile holds one copy. sandbox-driver `583a1646`
 (the merge of lithoscomputer/sandbox-driver#61, `7cc5d5ba`, into `main` on
 `6eb41d0`) lets a second process attach read-only to a managed host
 workspace with its registry record: `HostProvider::observe_registry` reads

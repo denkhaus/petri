@@ -59,8 +59,9 @@ fn git(args: &[&str]) -> Option<String> {
     command_output("git", &full)
 }
 
-/// A locked git dependency's revision, from `Cargo.lock`.
-fn locked_revision(package: &str) -> Option<String> {
+/// A locked git dependency's revision, from `Cargo.lock`. The manifests
+/// track `branch = "main"`; the lockfile chooses the commit.
+pub(crate) fn locked_revision(package: &str) -> Option<String> {
     let text = fs::read_to_string(repo_root().join("Cargo.lock")).ok()?;
     let mut in_package = false;
     for line in text.lines() {
@@ -85,9 +86,9 @@ fn locked_revision(package: &str) -> Option<String> {
     None
 }
 
-/// The sandbox-driver plugin revision the tests launch, from the
-/// workspace manifest's `sandbox-driver` pin (the plugins are built from
-/// the same revision by `scripts/plugins-build.sh`).
+/// The sandbox-driver plugin revision the tests launch: the locked
+/// `sandbox-driver` commit (`scripts/plugins-build.sh` builds the plugins
+/// from the same commit).
 fn plugin_revision() -> Option<String> {
     locked_revision("sandbox-driver")
 }
