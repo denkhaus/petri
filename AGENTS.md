@@ -34,6 +34,8 @@ style-guide defaults.
 - Use `mise run check` for the complete routine verification gate.
 - Use `mise run check:nightly` for the extended verification gate.
 - Use `mise run fmt` to format Rust with the pinned nightly formatter.
+- Name internal Git dependencies as "Git dependencies" in `DEVELOPING.md`
+  describes.
 - Use `scripts/corpus-fetch.sh` and `scripts/corpus-fetch-actions.sh` to prepare
   the GitHub Actions compatibility corpus.
 - Use `scripts/corpus-fetch-fabro.sh` to prepare the Fabro compatibility corpus,
