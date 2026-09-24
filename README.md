@@ -251,8 +251,8 @@ plugins, and runs
 missing asset, binary, scenario, or backend fails instead of skipping. Every
 required host scenario runs on both runners; the Docker subset runs on Linux,
 which also checks that no `petri-` container is left behind. The provider
-twins are `petri-cli` dev-dependencies pinned by revision in the public
-`lithoscomputer/twins` repository, so a build is their fetch. A second required
+twins are `petri-cli` dev-dependencies from the public
+`lithoscomputer/twins` repository, tracked on `main` and locked in `Cargo.lock`, so a build is their fetch. A second required
 job, `fabro compatibility`, builds the pinned `fabro` binary from the fetched
 corpus (`scripts/fabro-provision.sh`; only the binary is cached, keyed by the pin
 and the toolchain; about three minutes on a miss) and runs the comparison
@@ -283,7 +283,7 @@ record. A pinned-Fabro assertion that a decision record lists under
 record; any other failed assertion fails the cell. CI writes the report into the job summary
 and keeps the full bundles of a failed run and the compact records of a passed
 run as job artifacts. `mise run check:pins` (`scripts/check-pins.py`) fails
-when the manifests, the "Pinned revisions" table in
+when `Cargo.lock`, the "Pinned revisions" table in
 `crates/fabro/acceptance/CONTRACT.md`, and the latest records cite different
 revisions. The readiness checklist with each item's evidence source is the
 "Readiness gate checklist" section of that contract.
@@ -292,13 +292,16 @@ revisions. The readiness checklist with each item's evidence source is the
 
 Pebble owns the agent loop, coding-agent behavior, and the MCP client;
 `lithos-llm` owns provider transport and request retries. A change to either runs the owning repository's required checks
-before Petri moves its pin; then the manifests, the contract's pin table, and
+before Petri moves its lock; then `Cargo.lock`, the contract's pin table, and
 the affected evidence records move together, and the relevant Petri scenarios
 run again through the shipped binary. A library test pass never replaces a
-required Petri scenario. The current pins are in the contract's "Pinned
-revisions" table (Pebble `13a7798`, lithos-llm `43a42ac`, sandbox-driver
-`583a1646`, twins `ca45f0e`, Fabro `05ebd0f`, the runner image
+required Petri scenario. The current locked commits are in the contract's
+"Pinned revisions" table (Pebble `3f969ec`, lithos-llm `43a42ac`, sandbox-driver
+`236196ed`, twins `ca45f0e`, Fabro `05ebd0f`, the runner image
 `f8bbbfd81934`); `mise run check:pins` keeps every citation in agreement.
+The manifests name each internal library by `branch = "main"`, and Fabro's
+`Cargo.lock` chooses the commits the shipped application uses (see
+[git dependencies](DEVELOPING.md#git-dependencies)).
 The library batch the readiness work asked for landed on
 `petri/readiness-batch` in each repository and is pinned: Pebble's
 summary-call usage accounting, `continue_prompt` for a failover with no
@@ -315,7 +318,7 @@ lithos-llm `Usage`; every `usage` Petri records takes that shape
 Host and container scopes use the `sandbox-driver-host` and
 `sandbox-driver-docker` plugins. Petri launches them and communicates over
 JSON-RPC; no provider crate is linked in. `mise run plugins:build` installs
-both from the pinned revision under `target/plugins/bin`. The development
+both from the locked sandbox-driver commit under `target/plugins/bin`. The development
 and test tasks select those binaries. Docker tests skip when no daemon is
 reachable; Host execution requires its plugin and no daemon. A provider that
 lost command output on its own transport (Daytona's encoded exec can tear a
@@ -362,11 +365,11 @@ live Daytona tier (`mise run test:daytona`, see
 credentials and has not yet been run against the hosted service.
 
 Release archives bundle the Docker, Host, and Daytona plugin executables from
-the pinned revision. Petri embeds their SHA-256 digests at release build time.
+the locked sandbox-driver commit. Petri embeds their SHA-256 digests at release build time.
 `scripts/release-verify.sh` checks the archive, runs Host and Docker workflows
 without development mode, and verifies rejection of modified plugins.
-sandbox-driver, Pebble, and lithos-llm are public repositories pinned by
-revision and fetched over HTTPS, so no job needs a deploy key. See
+sandbox-driver, Pebble, and lithos-llm are public repositories tracked on
+`main`, locked in `Cargo.lock`, and fetched over HTTPS, so no job needs a deploy key. See
 [git dependencies](DEVELOPING.md#git-dependencies).
 
 Fabro agent nodes can use Pebble directly as a Rust library. Set

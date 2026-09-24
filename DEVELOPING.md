@@ -27,18 +27,28 @@ The corpus uses the commits in `crates/github/corpus-pins.txt`. Do not use
 
 ## Git dependencies
 
-The workspace pins sandbox-driver, Pebble, and lithos-llm by Git revision.
-All three repositories are public. `Cargo.toml` names them over HTTPS, so a
-build needs no SSH key and no credential, locally or in CI. Pebble's own
-manifest names lithos-llm over SSH at the same revision; a `[patch]` entry in
-`Cargo.toml` redirects that source to the HTTPS URL, so the graph holds one
-lithos-llm. `GIT_SSH_COMMAND=false cargo fetch --locked` must pass; it proves
-no dependency still needs SSH.
+Fabro, Pebble, and Petri share one copy of sandbox-driver, Pebble, and
+lithos-llm. Every internal Git dependency (a `lithoscomputer/*` repository),
+in every repository, names exactly `branch = "main"`: never `rev`, and never an
+omitted ref, which Cargo treats as a different source. The twins
+(`lithoscomputer/twins`) follow the same rule in the two test crates that
+serve them. `mise run check:pins` fails on any other form.
+
+A manifest never chooses a commit; the lockfile does. Fabro's `Cargo.lock` is
+the one place a commit is chosen for the shipped application. Petri's own
+`Cargo.lock` chooses the commits Petri builds and tests with, and should move
+to what Fabro locks. To take a newer library commit, update the lock, for
+example `cargo update -p pebble-agent` or `cargo update -p sandbox-driver`;
+no manifest changes.
+
+All of these repositories are public. `Cargo.toml` names them over HTTPS, so
+a build needs no SSH key and no credential, locally or in CI.
+`GIT_SSH_COMMAND=false cargo fetch --locked` must pass; it proves no
+dependency still needs SSH.
 
 Use a local, untracked Cargo `[patch]` config when working across sibling
-checkouts; commit a pushed revision in `Cargo.toml` and regenerate `Cargo.lock`
-before sharing the integration. The twins (`lithoscomputer/twins`) are pinned
-the same way in the two test crates that serve them.
+checkouts; push the library change to its `main` and update `Cargo.lock`
+before sharing the integration.
 
 ## Attractor and Fabro
 
@@ -76,7 +86,7 @@ bounded output capture, and the Pebble environment contract on Host and Docker.
 | `mise run check:msrv` | Check all targets with Rust 1.89 |
 | `mise run check` | Run the complete routine verification gate |
 | `mise run check:bundles` | Verify the vendored Fabro bundles against `bundles.lock.json`, digest by digest |
-| `mise run check:pins` | Check that the manifests, `CONTRACT.md`, and the latest evidence records cite the same revisions |
+| `mise run check:pins` | Check that internal Git dependencies track `main`, and that `Cargo.lock`, `CONTRACT.md`, and the latest evidence records cite the same revisions |
 | `mise run test:fabro:blackbox` | Run the required Fabro black box scenarios and write their evidence records and coverage report |
 | `mise run test:fabro:blackbox:repeat` | The same set three times, each in fresh processes under a different schedule |
 | `mise run test:fabro:differential` | Compare the shipped binary with the pinned `fabro` binary (built from the corpus on first use, about three minutes) |
@@ -101,9 +111,10 @@ secrets, step output, and environment values are never captured.
 
 ## Library and repository gates
 
-Pebble and `lithos-llm` are pinned by revision; the MCP client is Pebble's
-dependency. A change to one of them runs that repository's required checks first; only then
-does Petri move the pin, update the "Pinned revisions" table in
+Pebble and `lithos-llm` track `main`, and `Cargo.lock` locks their commits;
+the MCP client is Pebble's dependency. A change to one of them runs that
+repository's required checks first; only then does Petri move its lock,
+update the "Pinned revisions" table in
 `crates/fabro/acceptance/CONTRACT.md`, and rerun the affected black box
 scenarios. `mise run check:pins` fails while the citations disagree. A library
 test pass never replaces a required Petri scenario. The pending library batch
@@ -180,13 +191,13 @@ The routine suite runs without Docker or the corpus. It reports skips when those
 resources are absent.
 
 Container scopes run through the `sandbox-driver-docker` plugin. `mise run
-plugins:build` installs it from the pinned sandbox-driver revision under
+plugins:build` installs it from the sandbox-driver commit `Cargo.lock` locks, under
 `target/plugins/bin`; the test tasks depend on it and set
 `PETRI_SANDBOX_DOCKER_PLUGIN` to that path. `mise run plugins:build:daytona`
 adds the `sandbox-driver-daytona` plugin for the live Daytona tier
 (`SANDBOX_DRIVER_PLUGINS` names the kinds the script installs). To test against
 another build of a plugin, set the variable yourself. A plugin this build does
-not pin runs only in dev mode, which debug builds turn on; a release build needs
+not embed runs only in dev mode, which debug builds turn on; a release build needs
 `PETRI_SANDBOX_PLUGIN_DEV=1` or `--sandbox-plugin-dev`.
 
 To build plugins from the sibling sandbox-driver checkout during coordinated
@@ -196,7 +207,7 @@ development, use:
 SANDBOX_DRIVER_SOURCE=../sandbox-driver mise run plugins:build
 ```
 
-Both local and pinned Git builds install the provider packages directly.
+Both local and locked Git builds install the provider packages directly.
 Each package builds its same-named plugin executable.
 
 Nextest is the normal test runner. `mise run test` also uses Cargo to run
@@ -223,7 +234,7 @@ skipped, never as passed.
 
 The live Daytona tier is the one battery CI does not run: no runner has a
 Daytona credential. Run it by hand before a change to the executor's Daytona
-path or to the sandbox-driver pin lands:
+path or to the locked sandbox-driver commit lands:
 
 ```sh
 DAYTONA_API_KEY=... mise run test:daytona

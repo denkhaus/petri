@@ -1225,7 +1225,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 [[package]]
 name = "lithos-llm"
 version = "0.1.0"
-source = "git+https://github.com/lithoscomputer/lithos-llm?rev=43a42ac28e9d9bcf40a91abc02be4f12ca274ebb#43a42ac28e9d9bcf40a91abc02be4f12ca274ebb"
+source = "git+https://github.com/lithoscomputer/lithos-llm?branch=main#43a42ac28e9d9bcf40a91abc02be4f12ca274ebb"
 dependencies = [
  "async-trait",
  "futures-core",
@@ -1476,7 +1476,7 @@ dependencies = [
 [[package]]
 name = "pebble-agent"
 version = "0.1.0"
-source = "git+https://github.com/lithoscomputer/pebble.git?rev=13a7798eddd8e248e0bbdb65d8e812aec3ded9ca#13a7798eddd8e248e0bbdb65d8e812aec3ded9ca"
+source = "git+https://github.com/lithoscomputer/pebble.git?branch=main#3f969ec83531990679733f5f7b82fe99d7100444"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1493,7 +1493,7 @@ dependencies = [
 [[package]]
 name = "pebble-coding-agent"
 version = "0.1.0"
-source = "git+https://github.com/lithoscomputer/pebble.git?rev=13a7798eddd8e248e0bbdb65d8e812aec3ded9ca#13a7798eddd8e248e0bbdb65d8e812aec3ded9ca"
+source = "git+https://github.com/lithoscomputer/pebble.git?branch=main#3f969ec83531990679733f5f7b82fe99d7100444"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2465,7 +2465,7 @@ dependencies = [
 [[package]]
 name = "sandbox-driver"
 version = "0.1.0"
-source = "git+https://github.com/lithoscomputer/sandbox-driver.git?rev=583a16463320966e8f5c88bedd1d759e93fbd05f#583a16463320966e8f5c88bedd1d759e93fbd05f"
+source = "git+https://github.com/lithoscomputer/sandbox-driver.git?branch=main#236196ed134dd594e7678e38ebbe968097f1935c"
 dependencies = [
  "async-trait",
  "globset",
@@ -2482,7 +2482,7 @@ dependencies = [
 [[package]]
 name = "sandbox-driver-daytona-config"
 version = "0.1.0"
-source = "git+https://github.com/lithoscomputer/sandbox-driver.git?rev=583a16463320966e8f5c88bedd1d759e93fbd05f#583a16463320966e8f5c88bedd1d759e93fbd05f"
+source = "git+https://github.com/lithoscomputer/sandbox-driver.git?branch=main#236196ed134dd594e7678e38ebbe968097f1935c"
 dependencies = [
  "sandbox-driver-docker-config",
  "serde",
@@ -2492,7 +2492,7 @@ dependencies = [
 [[package]]
 name = "sandbox-driver-docker-config"
 version = "0.1.0"
-source = "git+https://github.com/lithoscomputer/sandbox-driver.git?rev=583a16463320966e8f5c88bedd1d759e93fbd05f#583a16463320966e8f5c88bedd1d759e93fbd05f"
+source = "git+https://github.com/lithoscomputer/sandbox-driver.git?branch=main#236196ed134dd594e7678e38ebbe968097f1935c"
 dependencies = [
  "serde",
  "serde_json",
@@ -2501,7 +2501,7 @@ dependencies = [
 [[package]]
 name = "sandbox-driver-protocol"
 version = "0.1.0"
-source = "git+https://github.com/lithoscomputer/sandbox-driver.git?rev=583a16463320966e8f5c88bedd1d759e93fbd05f#583a16463320966e8f5c88bedd1d759e93fbd05f"
+source = "git+https://github.com/lithoscomputer/sandbox-driver.git?branch=main#236196ed134dd594e7678e38ebbe968097f1935c"
 dependencies = [
  "async-trait",
  "base64",
@@ -3146,7 +3146,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 [[package]]
 name = "twin-anthropic"
 version = "0.1.5"
-source = "git+https://github.com/lithoscomputer/twins?rev=ca45f0e50a6716d716aa2f638ca3cf767e88f613#ca45f0e50a6716d716aa2f638ca3cf767e88f613"
+source = "git+https://github.com/lithoscomputer/twins?branch=main#ca45f0e50a6716d716aa2f638ca3cf767e88f613"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3164,7 +3164,7 @@ dependencies = [
 [[package]]
 name = "twin-core"
 version = "0.1.5"
-source = "git+https://github.com/lithoscomputer/twins?rev=ca45f0e50a6716d716aa2f638ca3cf767e88f613#ca45f0e50a6716d716aa2f638ca3cf767e88f613"
+source = "git+https://github.com/lithoscomputer/twins?branch=main#ca45f0e50a6716d716aa2f638ca3cf767e88f613"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3179,7 +3179,7 @@ dependencies = [
 [[package]]
 name = "twin-openai"
 version = "0.1.5"
-source = "git+https://github.com/lithoscomputer/twins?rev=ca45f0e50a6716d716aa2f638ca3cf767e88f613#ca45f0e50a6716d716aa2f638ca3cf767e88f613"
+source = "git+https://github.com/lithoscomputer/twins?branch=main#ca45f0e50a6716d716aa2f638ca3cf767e88f613"
 dependencies = [
  "anyhow",
  "async-stream",
