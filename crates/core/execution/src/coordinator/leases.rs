@@ -137,7 +137,9 @@ impl Coordinator {
     /// The takeover step of a resume: before any create, adopt what a lost
     /// create left on a provider and remove what no record names. Runs
     /// with the ledger attached, so an adopted lease is recorded live.
-    pub(super) async fn reconcile_leases(&self) -> Result<(), CoordinatorError> {
+    /// Problems are logged, not returned: a lease it cannot settle keeps its
+    /// record for the run's own release or a later prune.
+    pub(super) async fn reconcile_leases(&self) {
         // A simulated lease (a dry run's) was never on a provider: there is
         // nothing to adopt and nothing to sweep.
         let (host, container): (Vec<_>, Vec<_>) = self
@@ -157,7 +159,7 @@ impl Coordinator {
         let host: Vec<RecordedLease> = host.into_iter().map(|(_, lease)| lease).collect();
         let container: Vec<RecordedLease> = container.into_iter().map(|(_, lease)| lease).collect();
         if host.is_empty() && container.is_empty() {
-            return Ok(());
+            return;
         }
         let report = self.runtime.reconcile_leases(&host, &container).await;
         for (lease, sandbox) in &report.adopted {
@@ -169,7 +171,6 @@ impl Coordinator {
         for problem in &report.problems {
             tracing::warn!(problem, "sandbox lease reconciliation problem");
         }
-        Ok(())
     }
 
     /// Stop a lease's sandbox, then keep or delete it by retention for the

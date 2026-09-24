@@ -25,6 +25,7 @@ use tokio::process::Command;
 use tokio::task::yield_now;
 use tokio::time;
 
+pub mod in_process;
 pub mod run_store;
 
 /// A process-unique counter, for run ids and directory names.

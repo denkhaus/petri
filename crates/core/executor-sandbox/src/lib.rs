@@ -1,15 +1,22 @@
 //! Petri executors over the sandbox-driver provider family.
 //!
 //! [`SandboxExecutor`] maps scopes and durable leases to Host, Docker, or
-//! Daytona sandboxes over the JSON-RPC plugin protocol. Providers own process
-//! execution, files, one-shot containers, and cleanup. [`RoutingExecutor`]
-//! selects the provider from runtime options and the scope's target.
-//! [`HostExecutor`] is a convenience wrapper for standalone Host execution.
+//! Daytona sandboxes. Providers own process execution, files, one-shot
+//! containers, and cleanup. [`RoutingExecutor`] selects the provider from
+//! runtime options and the scope's target. [`HostExecutor`] is a convenience
+//! wrapper for standalone Host execution.
 //!
-//! No provider crate is linked here: every provider is a plugin process
-//! ([`plugin`]), which is the path a third-party provider must take, so
-//! Petri's own take it too. The one in-process provider is the
-//! [`SimulatedProvider`], a dry run's: it creates nothing and runs nothing.
+//! No provider crate is linked here. A provider is reached one of two ways:
+//!
+//! - as a plugin process over sandbox-driver's JSON-RPC protocol ([`plugin`]),
+//!   the default, and the only path a third-party provider has;
+//! - as a built-in the embedding application links and hands over through
+//!   [`InProcessProviders`] ([`in_process`]), in which case no plugin is
+//!   launched.
+//!
+//! Both record the same fingerprints ([`fingerprint`]), so a lease recorded
+//! one way is recoverable the other. The [`SimulatedProvider`] is a dry
+//! run's: it creates nothing and runs nothing.
 
 #[cfg(test)]
 mod acquire_tests;
@@ -18,7 +25,12 @@ mod backend;
 #[cfg(test)]
 mod daytona_tests;
 mod env;
+pub mod fingerprint;
+mod gate;
 mod host;
+pub mod in_process;
+#[cfg(test)]
+mod in_process_tests;
 pub mod lease;
 pub mod plugin;
 #[cfg(test)]
@@ -51,7 +63,11 @@ pub use crate::backend::{
     DaytonaResources, DaytonaSandboxKind, LostSandbox, SandboxBackend, SandboxOptions,
 };
 use crate::env::{OneShotRunner, SandboxEnv};
+use crate::gate::RunGate;
 pub use crate::host::HostExecutor;
+pub use crate::in_process::{
+    InProcessProviders, ProviderContext, ProviderFactory, ProviderNetwork,
+};
 pub use crate::lease::{
     LeaseLedger, LeaseRecord, LeaseState, LedgerError, MemoryLedger, PendingIntent,
     ReconcileReport, RecordedLease, SandboxLeaseManager,
@@ -98,6 +114,8 @@ pub struct SandboxExecutor {
     /// Every scope is realized on the [`SimulatedProvider`], whatever its
     /// target: a bare spec, no host-process semantics, no route back.
     simulated:    bool,
+    /// Admission to the environments this executor hands out.
+    gate:         RunGate,
 }
 
 impl SandboxExecutor {
@@ -122,7 +140,16 @@ impl SandboxExecutor {
             options,
             snapshots: RunnerSnapshots::default(),
             simulated: false,
+            gate: RunGate::default(),
         }
+    }
+
+    /// Admits this executor's environments through the router's gate, so
+    /// closing the run closes them.
+    #[must_use]
+    pub(crate) fn with_gate(mut self, gate: RunGate) -> Self {
+        self.gate = gate;
+        self
     }
 
     /// An executor over the [`SimulatedProvider`] in `source`: what a dry
@@ -213,6 +240,7 @@ impl SandboxExecutor {
             env: env_overrides,
             grace: scope.grace,
             host_address: self.host_address.clone(),
+            gate: self.gate.clone(),
         };
         // Docker actions in this scope run as one-shot containers in the
         // sandbox's world: same workspace, same services, same host alias.
@@ -221,6 +249,7 @@ impl SandboxExecutor {
             workspace,
             host_address: self.host_address.clone(),
             env: scope.env.clone(),
+            gate: self.gate.clone(),
         };
         let teardown = SandboxTeardown {
             host,

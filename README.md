@@ -315,9 +315,13 @@ lithos-llm `Usage`; every `usage` Petri records takes that shape
 (`crates/attractor/FORMAT.md`, "Usage").
 
 Host and container scopes use the `sandbox-driver-host` and
-`sandbox-driver-docker` plugins. Petri launches them and communicates over
-JSON-RPC; no provider crate is linked in. `mise run plugins:build` installs
-both from the locked sandbox-driver commit under `target/plugins/bin`. The development
+`sandbox-driver-docker` plugins by default. Petri launches them and
+communicates over JSON-RPC; no provider crate is linked into Petri itself. An
+embedder that links the built-in providers (Fabro does) passes a factory per
+kind to `Runtime::in_process_providers`; the runtime then uses those providers
+directly and launches no plugin, and leases keep the same fingerprints either
+way (`crates/core/executor-sandbox/src/in_process.rs`). `mise run plugins:build`
+installs both plugins from the locked sandbox-driver commit under `target/plugins/bin`. The development
 and test tasks select those binaries. Docker tests skip when no daemon is
 reachable; Host execution requires its plugin and no daemon. A provider that
 lost command output on its own transport (Daytona's encoded exec can tear a

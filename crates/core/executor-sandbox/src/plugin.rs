@@ -1,10 +1,11 @@
 //! Launching, verifying, and supervising sandbox-driver plugins.
 //!
-//! Petri reaches every sandbox provider through sandbox-driver's JSON-RPC
-//! plugin protocol, its own first-party providers included: a third-party
-//! provider can only ever be a plugin, so Petri's own take the same path
-//! rather than a privileged in-process one. One [`PluginSettings`] per
-//! provider kind says where the executable is, what its checksum must be,
+//! By default Petri reaches every sandbox provider through sandbox-driver's
+//! JSON-RPC plugin protocol, its own first-party providers included; a
+//! third-party provider can only ever be a plugin. An embedder that links the
+//! first-party providers can hand them over in process instead
+//! ([`crate::in_process`]), and no plugin is launched. One [`PluginSettings`]
+//! per provider kind says where the executable is, what its checksum must be,
 //! and what a sandbox uses to reach services on this machine; one
 //! [`PluginSupervisor`] per kind owns the running process.
 //!
@@ -57,7 +58,7 @@ use sandbox_driver_protocol::discovery::PluginConfig;
 use sandbox_driver_protocol::{PluginGeneration, PluginSupervisor};
 use tokio::sync::OnceCell;
 
-use crate::DOCKER_HOST_ALIAS;
+use crate::{DOCKER_HOST_ALIAS, fingerprint};
 
 /// The naming prefix plugin discovery searches `PATH` for:
 /// `sandbox-driver-<kind>`.
@@ -248,22 +249,12 @@ impl PluginSettings {
     }
 
     fn effective_fingerprint(&self, health: &ProviderHealth) -> Result<String, PluginError> {
-        let identity = health
-            .identity
-            .as_deref()
-            .filter(|id| !id.trim().is_empty());
-        if self.kind.as_str() == "daytona" && identity.is_none() {
-            return Err(PluginError::Unhealthy {
+        fingerprint::verified(self.kind.as_str(), &self.fingerprint, health).map_err(|error| {
+            PluginError::Unhealthy {
                 kind:    self.kind.to_string(),
                 status:  "without a verified resource identity",
-                message: "the Daytona plugin must report its effective organization before \
-                    sandbox resources can be created or recovered"
-                    .to_owned(),
-            });
-        }
-        Ok(match identity {
-            Some(identity) => format!("{}:{identity}", self.fingerprint),
-            None => self.fingerprint.clone(),
+                message: error.to_string(),
+            }
         })
     }
 
@@ -326,7 +317,7 @@ fn bundled_sibling(kind: &str) -> Option<PathBuf> {
 /// The host address for `kind`: the configured one when given; else, for
 /// Docker, the local alias when `docker_host` names a daemon on this
 /// machine, and a refusal to guess when it does not.
-fn infer_host_address(
+pub(crate) fn infer_host_address(
     kind: &str,
     configured: Option<&str>,
     docker_host: &str,
@@ -349,28 +340,24 @@ fn infer_host_address(
 
 /// Whether `DOCKER_HOST` names a daemon on this machine: unset, a Unix
 /// socket, or a named pipe.
-fn docker_host_is_local(docker_host: &str) -> bool {
+pub(crate) fn docker_host_is_local(docker_host: &str) -> bool {
     let value = docker_host.trim();
     value.is_empty() || value.starts_with("unix://") || value.starts_with("npipe://")
 }
 
-/// The non-secret backend identity for `kind`, from the environment.
+/// The non-secret backend identity for `kind`, from the environment the
+/// plugin inherits: the same seed an in-process provider records.
 fn fingerprint_for(kind: &str, env: &BTreeMap<String, String>) -> String {
-    let value = |name: &str| env.get(name).map_or("", String::as_str);
+    let value = |name: &str| env.get(name).map(String::as_str);
     match kind {
-        "host" => format!("host:{}", value("SANDBOX_DRIVER_HOST_REGISTRY")),
-        "docker" => {
-            let endpoint = match value("DOCKER_HOST").trim() {
-                "" => "default",
-                configured => configured,
-            };
-            format!("docker:{endpoint}")
-        }
-        "daytona" => format!(
-            "daytona:{}:{}:{}",
+        "host" => fingerprint::host(Path::new(
+            value("SANDBOX_DRIVER_HOST_REGISTRY").unwrap_or_default(),
+        )),
+        "docker" => fingerprint::docker(value("DOCKER_HOST")),
+        "daytona" => fingerprint::daytona(
             value("DAYTONA_API_URL"),
             value("DAYTONA_ORGANIZATION_ID"),
-            value("DAYTONA_TARGET")
+            value("DAYTONA_TARGET"),
         ),
         other => other.to_owned(),
     }
@@ -467,6 +454,13 @@ pub trait ProviderSource: Send + Sync {
     /// Sources backed by a caller-owned provider have no process to stop.
     async fn shutdown(&self) {}
 
+    /// Whether [`ProviderSource::shutdown`] itself ends the work admitted
+    /// on this source, as a plugin's closing transport does. When it does
+    /// not, the router waits for admitted work before shutting down.
+    fn ends_work_on_shutdown(&self) -> bool {
+        false
+    }
+
     /// The non-secret backend fingerprint every lease records. Call
     /// `current` first, so a plugin can verify its effective namespace.
     fn fingerprint(&self) -> &str;
@@ -491,6 +485,10 @@ impl ProviderSource for PluginSource {
 
     async fn shutdown(&self) {
         Self::shutdown(self).await;
+    }
+
+    fn ends_work_on_shutdown(&self) -> bool {
+        true
     }
 
     fn fingerprint(&self) -> &str {
@@ -733,5 +731,59 @@ mod tests {
     #[test]
     fn a_remote_only_provider_never_guesses() {
         assert_eq!(infer_host_address("daytona", None, "").unwrap(), None);
+    }
+
+    /// Leases already record these exact strings; an in-process provider
+    /// must produce the same ones from the same inputs to recover them.
+    #[test]
+    fn plugin_fingerprints_keep_their_recorded_form() {
+        let env = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let cases = [
+            ("host", env(&[]), "host:"),
+            (
+                "host",
+                env(&[("SANDBOX_DRIVER_HOST_REGISTRY", "/runs/a/host-registry")]),
+                "host:/runs/a/host-registry",
+            ),
+            ("docker", env(&[]), "docker:default"),
+            ("docker", env(&[("DOCKER_HOST", "  ")]), "docker:default"),
+            (
+                "docker",
+                env(&[("DOCKER_HOST", " tcp://10.0.0.5:2376 ")]),
+                "docker:tcp://10.0.0.5:2376",
+            ),
+            ("daytona", env(&[]), "daytona:::"),
+            (
+                "daytona",
+                env(&[
+                    ("DAYTONA_API_URL", "https://app.daytona.io/api"),
+                    ("DAYTONA_ORGANIZATION_ID", "org-1"),
+                    ("DAYTONA_TARGET", "us"),
+                    ("DAYTONA_API_KEY", "private"),
+                ]),
+                "daytona:https://app.daytona.io/api:org-1:us",
+            ),
+        ];
+        for (kind, env, expected) in cases {
+            assert_eq!(fingerprint_for(kind, &env), expected, "{kind} {env:?}");
+        }
+        assert_eq!(
+            fingerprint::host(Path::new("/runs/a/host-registry")),
+            "host:/runs/a/host-registry"
+        );
+        assert_eq!(fingerprint::docker(None), "docker:default");
+        assert_eq!(
+            fingerprint::daytona(
+                Some("https://app.daytona.io/api"),
+                Some("org-1"),
+                Some("us")
+            ),
+            "daytona:https://app.daytona.io/api:org-1:us"
+        );
     }
 }

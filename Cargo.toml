@@ -88,6 +88,8 @@ sandbox-driver = { git = "https://github.com/lithoscomputer/sandbox-driver.git",
 sandbox-driver-protocol = { git = "https://github.com/lithoscomputer/sandbox-driver.git", branch = "main" }
 sandbox-driver-docker-config = { git = "https://github.com/lithoscomputer/sandbox-driver.git", branch = "main" }
 sandbox-driver-daytona-config = { git = "https://github.com/lithoscomputer/sandbox-driver.git", branch = "main" }
+# Tests only: the built-in Host provider, linked the way an embedder links it.
+sandbox-driver-host = { git = "https://github.com/lithoscomputer/sandbox-driver.git", branch = "main" }
 steps = { package = "petri-steps", path = "crates/core/steps" }
 driver = { package = "petri-driver", path = "crates/core/driver" }
 execution = { package = "petri-execution", path = "crates/core/execution" }

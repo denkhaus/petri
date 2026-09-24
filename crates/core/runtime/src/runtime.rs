@@ -19,7 +19,7 @@ use engine::{EngineStart, EventLog, ReplayMismatch};
 use executor::{
     DEFAULT_GRACE, Executor, MapSecrets, Masker, ProgressSink, Retention, SecretProvider,
 };
-use executor_sandbox::{LeaseLedger, RoutingExecutor, SandboxOptions};
+use executor_sandbox::{InProcessProviders, LeaseLedger, RoutingExecutor, SandboxOptions};
 use frontend::{CompileInputs, DirFiles, FileSource, Frontend, Lowered, REPOSITORY_VAR, Span};
 use ir::{ExecutionId, Graph, InvocationId};
 use serde_json::Value;
@@ -164,6 +164,8 @@ pub struct Runtime {
     /// The standard router acquires every scope on the simulated provider:
     /// a dry run.
     simulated:    bool,
+    /// Built-in providers the standard router reaches instead of plugins.
+    in_process:   Option<InProcessProviders>,
 }
 
 impl Runtime {
@@ -202,6 +204,7 @@ impl Runtime {
                 env::temp_dir().join(format!("petri-run-{}", process::id())),
             ),
             simulated:    false,
+            in_process:   None,
         }
     }
 
@@ -224,6 +227,7 @@ impl Runtime {
                 env::temp_dir().join(format!("petri-run-{}", process::id())),
             ),
             simulated:    false,
+            in_process:   None,
         }
     }
 
@@ -267,6 +271,19 @@ impl Runtime {
     #[must_use]
     pub fn simulated_sandboxes(mut self) -> Self {
         self.simulated = true;
+        self
+    }
+
+    /// Reach Host, Docker, and Daytona through the built-in providers the
+    /// embedding application links, instead of launching their plugins.
+    /// Every standard router this runtime builds uses them: runs, resumes,
+    /// [`Runtime::sandbox_router_for`], and prune. A kind with no factory
+    /// fails routably at acquire; no plugin is launched in its place. A dry
+    /// run ([`Runtime::simulated_sandboxes`]) still touches no provider,
+    /// and [`Runtime::executor`] still replaces the router outright.
+    #[must_use]
+    pub fn in_process_providers(mut self, providers: InProcessProviders) -> Self {
+        self.in_process = Some(providers);
         self
     }
 
@@ -841,11 +858,15 @@ impl Runtime {
         let router = if self.simulated {
             RoutingExecutor::simulated(run_dir)
         } else {
-            RoutingExecutor::with_options(
+            let router = RoutingExecutor::with_options(
                 run_dir,
                 self.options.retention,
                 self.options.sandbox.clone(),
-            )
+            );
+            match &self.in_process {
+                Some(providers) => router.with_in_process(providers.clone()),
+                None => router,
+            }
         };
         Arc::new(router.with_run_id(key.as_str()))
     }

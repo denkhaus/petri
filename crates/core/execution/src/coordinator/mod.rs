@@ -213,28 +213,62 @@ pub struct Coordinator {
 
 impl Coordinator {
     /// Start a fresh run. `middleware` may be empty; the configured chain's
-    /// keys are recorded durably either way.
+    /// keys are recorded durably either way. A run that cannot start is
+    /// finished: its services and providers are torn down.
     pub async fn create(
         runtime: RunRuntime,
         middleware: Vec<Arc<dyn Middleware>>,
         options: CoordinatorOptions,
     ) -> Result<Self, CoordinatorError> {
+        match Self::open_created(&runtime, &middleware, &options).await {
+            Ok((store, resources)) => Ok(Self::assemble(
+                store, resources, runtime, middleware, options, false,
+            )),
+            Err(error) => {
+                runtime.finish().await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn open_created(
+        runtime: &RunRuntime,
+        middleware: &[Arc<dyn Middleware>],
+        options: &CoordinatorOptions,
+    ) -> Result<(CoordinatorStore, ResourceStore), CoordinatorError> {
         CoordinatorOptions::check_limit(options.max_invocations)?;
         let keys = middleware.iter().map(|item| item.key()).collect();
         let logs = runtime.open(RunAccess::Create).await?;
         let store = CoordinatorStore::create(logs.clone(), runtime.run_key().clone(), keys).await?;
         let resources = ResourceStore::load(&logs).await?;
-        Ok(Self::assemble(
-            store, resources, runtime, middleware, options, false,
-        ))
+        Ok((store, resources))
     }
 
-    /// Resume a crashed run. `middleware` must match the recorded chain.
+    /// Resume a crashed run. `middleware` must match the recorded chain. A
+    /// run that cannot resume is finished: its services and providers are
+    /// torn down, and its leases are left as recorded.
     pub async fn resume(
         runtime: RunRuntime,
         middleware: Vec<Arc<dyn Middleware>>,
         options: CoordinatorOptions,
     ) -> Result<Self, CoordinatorError> {
+        let (store, resources) = match Self::open_resumed(&runtime, &middleware, &options).await {
+            Ok(opened) => opened,
+            Err(error) => {
+                runtime.finish().await;
+                return Err(error);
+            }
+        };
+        let coordinator = Self::assemble(store, resources, runtime, middleware, options, true);
+        coordinator.reconcile_leases().await;
+        Ok(coordinator)
+    }
+
+    async fn open_resumed(
+        runtime: &RunRuntime,
+        middleware: &[Arc<dyn Middleware>],
+        options: &CoordinatorOptions,
+    ) -> Result<(CoordinatorStore, ResourceStore), CoordinatorError> {
         CoordinatorOptions::check_limit(options.max_invocations)?;
         let logs = runtime.open(RunAccess::Write).await?;
         let mut store = CoordinatorStore::resume(logs.clone(), runtime.run_key().clone()).await?;
@@ -267,9 +301,7 @@ impl Coordinator {
         {
             resources.resolve(lease)?;
         }
-        let coordinator = Self::assemble(store, resources, runtime, middleware, options, true);
-        coordinator.reconcile_leases().await?;
-        Ok(coordinator)
+        Ok((store, resources))
     }
 
     fn assemble(
