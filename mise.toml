@@ -121,7 +121,7 @@ description = "Verify the vendored Fabro bundles against bundles.lock.json, dige
 run = "scripts/corpus-fetch-fabro-bundles.sh"
 
 [tasks."check:pins"]
-description = "Check that internal git dependencies track main and that the locked library revisions in Cargo.lock, CONTRACT.md, and the latest evidence records agree"
+description = "Check internal git dependency refs, and that Cargo.lock, CONTRACT.md, and the latest evidence records agree"
 run = "python3 scripts/check-pins.py"
 
 [tasks."check:whitespace"]

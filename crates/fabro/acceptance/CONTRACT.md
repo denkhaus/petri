@@ -780,10 +780,8 @@ agent's event stream as `LlmRetry`.
 
 ## Pinned revisions
 
-Every library Petri runs Fabro workflows through is locked to one commit.
-The manifests name each internal library by `branch = "main"`, never by
-`rev`; `Cargo.lock` chooses the commit, and in the shipped application
-Fabro's `Cargo.lock` is the one place it is chosen. This table is the
+Every library Petri runs Fabro workflows through is locked to one commit
+(see "Git dependencies" in `DEVELOPING.md`). This table is the
 citation the evidence records and `scripts/check-pins.py` compare against
 `Cargo.lock`, `crates/fabro/corpus-pin.txt`, and `bundles.lock.json`.
 `mise run check:pins` fails when any of them disagree, when an internal
