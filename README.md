@@ -296,7 +296,7 @@ before Petri moves its lock; then `Cargo.lock`, the contract's pin table, and
 the affected evidence records move together, and the relevant Petri scenarios
 run again through the shipped binary. A library test pass never replaces a
 required Petri scenario. The current locked commits are in the contract's
-"Pinned revisions" table (Pebble `3f969ec`, lithos-llm `43a42ac`, sandbox-driver
+"Pinned revisions" table (Pebble `ba2928d`, lithos-llm `f40391a`, sandbox-driver
 `236196ed`, twins `ca45f0e`, Fabro `05ebd0f`, the runner image
 `f8bbbfd81934`); `mise run check:pins` keeps every citation in agreement.
 See [git dependencies](DEVELOPING.md#git-dependencies) for how they are
