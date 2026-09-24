@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""Check that every citation of a pinned library revision agrees.
+"""Check that every citation of a locked library revision agrees.
 
     scripts/check-pins.py [--evidence DIR]
 
-Sources compared:
+Every internal git dependency (a `lithoscomputer/*` repository) must name
+exactly `branch = "main"` in its manifest: never `rev`, and never an omitted
+ref, which Cargo treats as a different source. `Cargo.lock` chooses the
+commit. Sources compared:
 
-  Cargo.toml                          pebble-coding-agent, pebble-agent, lithos-llm,
-                                      the four sandbox-driver entries
-  crates/petri/cli/Cargo.toml         twin-openai, twin-anthropic
-  crates/petri/lib/Cargo.toml         twin-openai, twin-anthropic (the embedding proof)
+  Cargo.toml, crates/petri/cli/Cargo.toml, crates/petri/lib/Cargo.toml
+                                      every internal git dependency tracks `main`
+  Cargo.lock                          the locked commit of pebble-coding-agent and
+                                      pebble-agent, lithos-llm, the sandbox-driver
+                                      packages, and the twins (one commit, and one
+                                      copy, per repository)
   crates/core/executor-sandbox/src/backend.rs  RUNNER_PIN, the sandbox-images revision of
                                       the default runner images (cited by the contract
                                       table, not by evidence records)
@@ -27,14 +32,65 @@ import argparse
 import json
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-REV = re.compile(r'^(?P<name>[A-Za-z0-9_-]+)\s*=\s*\{[^}]*\bgit\s*=\s*"(?P<git>[^"]+)"[^}]*\brev\s*=\s*"(?P<rev>[0-9a-f]+)"', re.M)
+INTERNAL = "github.com/lithoscomputer/"
+MANIFESTS = ("Cargo.toml", "crates/petri/cli/Cargo.toml", "crates/petri/lib/Cargo.toml")
+# The locked packages behind each row of the contract table.
+LOCKED = {
+    "pebble": ("pebble-coding-agent", "pebble-agent"),
+    "lithos_llm": ("lithos-llm",),
+    "sandbox_driver": ("sandbox-driver", "sandbox-driver-protocol", "sandbox-driver-docker-config", "sandbox-driver-daytona-config"),
+    "twins": ("twin-openai", "twin-anthropic"),
+}
 
 
-def manifest_revisions(path: Path) -> dict[str, tuple[str, str]]:
-    return {m["name"]: (m["git"], m["rev"]) for m in REV.finditer(path.read_text(encoding="utf-8"))}
+def dependency_tables(manifest: dict) -> list[tuple[str, dict]]:
+    tables = [manifest.get("workspace", {}).get("dependencies", {})]
+    tables += [manifest.get(kind, {}) for kind in ("dependencies", "dev-dependencies", "build-dependencies")]
+    for target in manifest.get("target", {}).values():
+        tables += [target.get(kind, {}) for kind in ("dependencies", "dev-dependencies", "build-dependencies")]
+    return [(name, spec) for table in tables for name, spec in table.items() if isinstance(spec, dict)]
+
+
+def check_manifest_refs(problems: list[str]) -> None:
+    """Every internal git dependency names exactly `branch = "main"`."""
+    for relative in MANIFESTS:
+        manifest = tomllib.loads((ROOT / relative).read_text(encoding="utf-8"))
+        for name, spec in dependency_tables(manifest):
+            if INTERNAL not in spec.get("git", ""):
+                continue
+            refs = {key: spec[key] for key in ("branch", "rev", "tag") if key in spec}
+            if refs != {"branch": "main"}:
+                problems.append(f'{relative}: {name} must name exactly branch = "main", found {refs or "no ref"}')
+
+
+def locked_revisions(problems: list[str]) -> dict[str, str]:
+    """The commit `Cargo.lock` chooses for each internal repository."""
+    lock = tomllib.loads((ROOT / "Cargo.lock").read_text(encoding="utf-8"))
+    sources: dict[str, set[str]] = {}
+    for package in lock.get("package", []):
+        sources.setdefault(package["name"], set()).add(package.get("source", "path"))
+    expected: dict[str, str] = {}
+    for row, names in LOCKED.items():
+        commits: dict[str, str] = {}
+        for name in names:
+            found = sources.get(name, set())
+            if not found:
+                problems.append(f"Cargo.lock: {name} is not locked")
+            elif len(found) > 1:
+                problems.append(f"Cargo.lock: {name} is locked more than once: " + ", ".join(sorted(found)))
+            else:
+                source = next(iter(found))
+                if "?branch=main#" not in source:
+                    problems.append(f"Cargo.lock: {name} is not locked from branch main: {source}")
+                commits[name] = source.rsplit("#", 1)[-1]
+        commit = same(problems, row, commits) if commits else None
+        if commit:
+            expected[row] = commit
+    return expected
 
 
 def same(problems: list[str], label: str, values: dict[str, str]) -> str | None:
@@ -67,31 +123,8 @@ def main() -> int:
     args = parser.parse_args()
     problems: list[str] = []
 
-    workspace = manifest_revisions(ROOT / "Cargo.toml")
-    cli = manifest_revisions(ROOT / "crates/petri/cli/Cargo.toml")
-    lib = manifest_revisions(ROOT / "crates/petri/lib/Cargo.toml")
-    expected: dict[str, str] = {}
-
-    pebble = same(problems, "pebble", {n: workspace[n][1] for n in ("pebble-coding-agent", "pebble-agent") if n in workspace})
-    if pebble:
-        expected["pebble"] = pebble
-    if "lithos-llm" in workspace:
-        expected["lithos_llm"] = workspace["lithos-llm"][1]
-    else:
-        problems.append("Cargo.toml: lithos-llm pin not found")
-    sandbox = same(problems, "sandbox-driver", {n: r for n, (_, r) in workspace.items() if n.startswith("sandbox-driver")})
-    if sandbox:
-        expected["sandbox_driver"] = sandbox
-    twins = same(
-        problems,
-        "twins",
-        {f"{label}:{n}": r for label, manifest in (("cli", cli), ("lib", lib)) for n, (_, r) in manifest.items() if n.startswith("twin-")},
-    )
-    if twins:
-        expected["twins"] = twins
-    for name in ("pebble", "lithos_llm", "sandbox_driver", "twins"):
-        if name not in expected and not any(name in p for p in problems):
-            problems.append(f"the {name} pin was not found in the manifests")
+    check_manifest_refs(problems)
+    expected: dict[str, str] = locked_revisions(problems)
 
     pin_file = ROOT / "crates/fabro/corpus-pin.txt"
     fabro = next((line.split()[0] for line in pin_file.read_text().splitlines() if line.strip() and not line.startswith("#")), None)
@@ -119,7 +152,7 @@ def main() -> int:
         if cited is None:
             problems.append(f"CONTRACT.md: no row for {name}")
         elif not rev.startswith(cited):
-            problems.append(f"CONTRACT.md: {name} is {cited}, the manifest pins {rev}")
+            problems.append(f"CONTRACT.md: {name} is {cited}, Cargo.lock locks {rev}")
 
     evidence = args.evidence or (ROOT / "target/fabro-evidence/latest")
     records = sorted(evidence.glob("records/*.json")) if evidence.is_dir() else []
@@ -136,7 +169,7 @@ def main() -> int:
             if cited is None:
                 problems.append(f"{path.name}: no {name} pin")
             elif cited != rev:
-                problems.append(f"{path.name}: {name} cites {cited}, the manifest pins {rev}")
+                problems.append(f"{path.name}: {name} cites {cited}, Cargo.lock locks {rev}")
 
     for name, rev in sorted(expected.items()):
         print(f"{name:16} {rev}")

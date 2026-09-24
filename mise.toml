@@ -25,7 +25,7 @@ env = { PETRI_SANDBOX_DOCKER_PLUGIN = "{{config_root}}/target/plugins/bin/sandbo
 run = "cargo run --locked -p petri-cli --"
 
 [tasks."plugins:build"]
-description = "Install the sandbox-driver plugins the tests launch, at Petri's pinned revision"
+description = "Install the sandbox-driver plugins the tests launch, at the commit Cargo.lock locks"
 run = "scripts/plugins-build.sh"
 
 [tasks."plugins:build:daytona"]
@@ -121,7 +121,7 @@ description = "Verify the vendored Fabro bundles against bundles.lock.json, dige
 run = "scripts/corpus-fetch-fabro-bundles.sh"
 
 [tasks."check:pins"]
-description = "Check that the pinned library revisions in the manifests, CONTRACT.md, and the latest evidence records agree"
+description = "Check internal git dependency refs, and that Cargo.lock, CONTRACT.md, and the latest evidence records agree"
 run = "python3 scripts/check-pins.py"
 
 [tasks."check:whitespace"]

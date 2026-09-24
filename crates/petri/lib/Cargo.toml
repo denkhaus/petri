@@ -39,11 +39,11 @@ pebble-coding-agent = { workspace = true, features = ["test-util"] }
 smol_str = { workspace = true }
 tokio-util = { workspace = true }
 # The readiness embedding proof serves the provider twins on loopback and
-# builds a model client pointed at them: the same pinned twins the black box
+# builds a model client pointed at them: the same twins the black box
 # harness uses (`crates/petri/cli`), with `lithos-llm`'s credential types.
 lithos-llm = { workspace = true, features = ["runtime"] }
 tokio = { workspace = true, features = ["net"] }
-twin-openai = { git = "https://github.com/lithoscomputer/twins", rev = "ca45f0e50a6716d716aa2f638ca3cf767e88f613" }
-twin-anthropic = { git = "https://github.com/lithoscomputer/twins", rev = "ca45f0e50a6716d716aa2f638ca3cf767e88f613" }
+twin-openai = { git = "https://github.com/lithoscomputer/twins", branch = "main" }
+twin-anthropic = { git = "https://github.com/lithoscomputer/twins", branch = "main" }
 # The twins export Axum routers; the proof serves them on an ephemeral port.
 axum = "0.8"

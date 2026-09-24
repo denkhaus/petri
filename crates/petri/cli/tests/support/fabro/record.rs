@@ -8,7 +8,7 @@
 //! artifacts, the process output, the assertions, the compatibility
 //! decisions, and the cleanup result. `scripts/fabro-coverage-report.py`
 //! folds the records into the coverage report and `scripts/check-pins.py`
-//! checks the pins they cite against the manifests.
+//! checks the pins they cite against `Cargo.lock`.
 //!
 //! Layout under the evidence directory:
 //!
@@ -34,6 +34,7 @@ use std::{env, fs, io, thread};
 
 use serde_json::{Map, Value, json};
 
+use super::evidence::locked_revision;
 use super::launch::Finished;
 use super::require::workspace_root;
 use super::twins::Twin;
@@ -65,18 +66,9 @@ pub(crate) fn directory() -> PathBuf {
     )
 }
 
-/// The `rev` of a git dependency line `name = { git = "...", rev = "..." }`
-/// in a manifest, or `"unpinned"`.
-fn manifest_rev(manifest: &Path, name: &str) -> String {
-    let text = fs::read_to_string(manifest).unwrap_or_default();
-    text.lines()
-        .find(|line| line.trim_start().starts_with(&format!("{name} = {{")))
-        .and_then(|line| {
-            let start = line.find("rev = \"")? + 7;
-            let end = line[start..].find('"')? + start;
-            Some(line[start..end].to_owned())
-        })
-        .unwrap_or_else(|| "unpinned".to_owned())
+/// The commit `Cargo.lock` locks for a git dependency, or `"unpinned"`.
+fn locked_rev(name: &str) -> String {
+    locked_revision(name).unwrap_or_else(|| "unpinned".to_owned())
 }
 
 /// Petri's own commit: `GITHUB_SHA` on a runner, else `git rev-parse HEAD`.
@@ -100,13 +92,11 @@ fn petri_commit(root: &Path) -> String {
         )
 }
 
-/// Every revision a scenario runs through, read from the manifests at record
-/// time. The keys are the rows of the "Pinned revisions" table in
-/// `crates/fabro/acceptance/CONTRACT.md`.
+/// Every revision a scenario runs through, read from `Cargo.lock` and the
+/// Fabro pin file at record time. The keys are the rows of the "Pinned
+/// revisions" table in `crates/fabro/acceptance/CONTRACT.md`.
 pub(crate) fn pins() -> Value {
     let root = workspace_root();
-    let workspace = root.join("Cargo.toml");
-    let cli = root.join("crates/petri/cli/Cargo.toml");
     let fabro = fs::read_to_string(root.join("crates/fabro/corpus-pin.txt"))
         .unwrap_or_default()
         .lines()
@@ -116,10 +106,10 @@ pub(crate) fn pins() -> Value {
         .to_owned();
     json!({
         "petri": { "version": env!("CARGO_PKG_VERSION"), "commit": petri_commit(&root) },
-        "pebble": manifest_rev(&workspace, "pebble-coding-agent"),
-        "lithos_llm": manifest_rev(&workspace, "lithos-llm"),
-        "sandbox_driver": manifest_rev(&workspace, "sandbox-driver"),
-        "twins": manifest_rev(&cli, "twin-openai"),
+        "pebble": locked_rev("pebble-coding-agent"),
+        "lithos_llm": locked_rev("lithos-llm"),
+        "sandbox_driver": locked_rev("sandbox-driver"),
+        "twins": locked_rev("twin-openai"),
         "fabro_reference": fabro,
     })
 }

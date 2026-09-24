@@ -81,6 +81,7 @@ impl Ledger {
         self.projection
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .totals
             .subagent_counts
             .spawned
     }
@@ -90,6 +91,7 @@ impl Ledger {
         self.projection
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .totals
             .descendants
             .clone()
     }
@@ -100,8 +102,9 @@ impl Ledger {
             .projection
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let usage = projection.descendant_usage();
+        let usage = projection.totals.descendant_usage();
         let sessions: serde_json::Map<String, Value> = projection
+            .totals
             .descendants
             .iter()
             .map(|(session, account)| {
@@ -118,7 +121,7 @@ impl Ledger {
                 )
             })
             .collect();
-        let counts = projection.subagent_counts;
+        let counts = projection.totals.subagent_counts;
         json!({
             "spawned": counts.spawned,
             "turns_started": counts.turns_started,

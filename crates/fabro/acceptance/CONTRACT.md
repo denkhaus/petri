@@ -616,13 +616,19 @@ names the decision record under `decisions/`; "gap" names the owner.
 
 ## Library pin
 
-Pebble is pinned at `67c9f486dd28f15c04e8d590a91e6f5563f7605d`, which is
-Pebble `main`. That commit is Pebble PRs #23 and #24 on top of `a39f43e`.
-PR #23 moves Pebble's lithos-llm pin forward and drops the removed
-`openai`, `anthropic`, `gemini`, and `openai-compatible` features; PR #24
-moves it to `43a42ac` and migrates Pebble's catalogs to the `codecs`
-schema. Neither changes a Pebble type Petri uses, so the pin moves with no
-Petri code change. lithos-llm moves with it to
+Pebble is locked at `3f969ec83531990679733f5f7b82fe99d7100444`, the merge
+of Pebble PR #28, which names lithos-llm and sandbox-driver by
+`branch = "main"` as Petri does. It sits on `13a7798`, the merge of Pebble
+PR #27 (the `sandbox_driver` module that replaces Fabro's
+`fabro-pebble-sandbox` crate, behind Pebble's `sandbox-driver` feature) on
+top of Pebble `main` at `b2512a2`. Petri does not use that module; the pin moves because
+Fabro's `fabro-petri` hands Pebble types to Petri's crates and
+sandbox-driver handles to that module, so the two repositories must pin
+one Pebble revision and one sandbox-driver revision. Between `67c9f48` (PRs #23 and #24 on top of `a39f43e`:
+the lithos-llm pin and the `codecs` catalogs) and this pin, Pebble folded
+the session projection's lifetime tallies into
+`SessionProjection::totals`; the subagent metrics read them from there,
+and the serialized shape is unchanged. lithos-llm stays at
 `43a42ac28e9d9bcf40a91abc02be4f12ca274ebb`, lithoscomputer/lithos-llm #8,
 #9, #10, and #13 on top of #7: the four adapter features are gone (each meant
 `runtime`); a catalog provider names one `adapter` (default `http`) and a
@@ -774,30 +780,45 @@ agent's event stream as `LlmRetry`.
 
 ## Pinned revisions
 
-Every library Petri runs Fabro workflows through is pinned by revision. This
-table is the citation the evidence records and `scripts/check-pins.py`
-compare against the manifests (`Cargo.toml`, `crates/petri/cli/Cargo.toml`,
-`crates/fabro/corpus-pin.txt`, `bundles.lock.json`). `mise run check:pins`
-fails when any of them disagree. The row names are the keys of a record's
+Every library Petri runs Fabro workflows through is locked to one commit
+(see "Git dependencies" in `DEVELOPING.md`). This table is the
+citation the evidence records and `scripts/check-pins.py` compare against
+`Cargo.lock`, `crates/fabro/corpus-pin.txt`, and `bundles.lock.json`.
+`mise run check:pins` fails when any of them disagree, when an internal
+dependency names anything but `branch = "main"`, or when `Cargo.lock` holds
+two copies of one library. The row names are the keys of a record's
 `pins` block.
 
 | Pin | Revision | Repository | Role |
 |---|---|---|---|
-| `pebble` | `67c9f486dd28f15c04e8d590a91e6f5563f7605d` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
+| `pebble` | `3f969ec83531990679733f5f7b82fe99d7100444` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
 | `lithos_llm` | `43a42ac28e9d9bcf40a91abc02be4f12ca274ebb` | `lithoscomputer/lithos-llm` (public) | provider transport, request retries, and the `Usage` type every usage takes |
-| `sandbox_driver` | `07600aa5c6695ec4c999da93c05d2cb78fe11b0c` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
+| `sandbox_driver` | `236196ed134dd594e7678e38ebbe968097f1935c` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `ca45f0e50a6716d716aa2f638ca3cf767e88f613` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
 | `fabro_reference` | `05ebd0fd1beec214b558f4b478e36bd08b507dc7` | `fabro-sh/fabro` (public, `main`) | the reference Fabro the corpus, oracle, bundles, and differential matrix use |
 | `runner_image` | `f8bbbfd81934` | `lithoscomputer/sandbox-images` (public) | the default runner images (`ghcr.io/lithoscomputer/ubuntu-*`) Docker and Daytona scopes start from (`RUNNER_PIN` in `crates/core/executor-sandbox/src/backend.rs`; PyYAML present since `df708f910111`) |
 
 A change to Pebble or lithos-llm runs the owning
-repository's required checks before Petri moves its pin; then this table, the
-manifests, and the affected evidence records move together. The library batch
+repository's required checks before Petri moves its lock; then this table,
+`Cargo.lock`, and the affected evidence records move together. The library batch
 the readiness work asked for is inside the pinned revisions (Pebble `4c00633`,
-sandbox-driver `a92c0db6`); the twins are pinned in both test crates that
-serve them. Since Pebble `6996942` the sandbox-driver pin is Petri's alone:
-Pebble's `mcp` feature no longer names the crate, so the two move
-independently. sandbox-driver `07600aa5` (lithoscomputer/sandbox-driver#23,
+sandbox-driver `a92c0db6`); the twins track `main` in both test crates that
+serve them. Since Pebble `6996942` Pebble's `mcp` feature no longer names
+the sandbox-driver crate; since Pebble PR #27 its `sandbox-driver` feature
+names it again, and Fabro builds that feature beside Petri's crates, so
+Petri and Pebble both name sandbox-driver by `branch = "main"` and the
+lockfile holds one copy. sandbox-driver is locked at `236196ed`, which adds
+Daytona's cursor-based sandbox listing (lithoscomputer/sandbox-driver#62) and
+tracks daytona-sdk-rust `main` (#64) on top of `583a1646`. `583a1646`
+(the merge of lithoscomputer/sandbox-driver#61, `7cc5d5ba`, into `main` on
+`6eb41d0`) lets a second process attach read-only to a managed host
+workspace with its registry record: `HostProvider::observe_registry` reads
+the registry another process owns without writing it, `attach_directory`
+resolves a workspace path to that record (id, labels, ownership, state),
+and the handle refuses `start`, `stop`, and `delete` with the new
+`Error::ReadOnly` (wire kind `read_only`), so Fabro's `petri.run`
+ownership check runs on the host as it does on Docker. Petri's own use of
+the driver is unchanged by it. sandbox-driver `07600aa5` (lithoscomputer/sandbox-driver#23,
 on `64c14b89`) lets an idle Host sentinel kill its own process group once
 its owning provider pid is gone, so a provider that is killed rather than
 stopped leaves no sentinel behind; a running workload still survives its

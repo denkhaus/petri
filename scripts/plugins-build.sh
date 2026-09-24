@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Install the sandbox-driver plugin executables the tests launch, from the
-# sandbox-driver revision Petri's workspace manifest pins, under
+# sandbox-driver commit Petri's `Cargo.lock` locks, under
 # `target/plugins/bin`: the host and Docker plugins by default, or the kinds
 # SANDBOX_DRIVER_PLUGINS lists (`mise run plugins:build:daytona` adds the
 # Daytona plugin for the live tier). With a release target, install all three
 # plugins under `target/<target>/plugins/bin` for bundling. Cargo skips a
-# plugin already installed from the same revision. Set SANDBOX_DRIVER_SOURCE
+# plugin already installed from the same commit. Set SANDBOX_DRIVER_SOURCE
 # to a local checkout to build the provider packages during coordinated
 # development.
 set -euo pipefail
@@ -41,16 +41,21 @@ packages=()
 for kind in "${kinds[@]}"; do
   packages+=("sandbox-driver-$kind")
 done
-manifest="$root/Cargo.toml"
-url="$(grep -E '^sandbox-driver = \{ git = "' "$manifest" | sed -E 's/.*git = "([^"]+)".*/\1/')"
-rev="$(grep -E '^sandbox-driver = \{ git = "' "$manifest" | sed -E 's/.*rev = "([^"]+)".*/\1/')"
-if [ -z "$url" ] || [ -z "$rev" ]; then
-  echo "plugins-build: the sandbox-driver pin was not found in $manifest" >&2
+# The manifest tracks `branch = "main"`; the lockfile chooses the commit.
+locked_source="$(awk '
+  $0 == "[[package]]" { name = "" }
+  $0 == "name = \"sandbox-driver\"" { name = "sandbox-driver" }
+  name == "sandbox-driver" && /^source = "git\+/ { print; exit }
+' "$root/Cargo.lock")"
+url="$(sed -E 's/^source = "git\+([^?#"]+).*/\1/' <<<"$locked_source")"
+rev="$(sed -E 's/.*#([0-9a-f]+)"$/\1/' <<<"$locked_source")"
+if [ -z "$locked_source" ] || [ -z "$url" ] || [ -z "$rev" ]; then
+  echo "plugins-build: the locked sandbox-driver commit was not found in $root/Cargo.lock" >&2
   exit 1
 fi
 
 # Replace binaries installed by the old wrapper packages once. Later runs
-# retain Cargo's normal skip when this exact revision is already installed.
+# retain Cargo's normal skip when this exact commit is already installed.
 install_args=()
 installed=$(cargo install --list --root "$install_root")
 for kind in "${kinds[@]}"; do

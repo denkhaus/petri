@@ -34,6 +34,8 @@ style-guide defaults.
 - Use `mise run check` for the complete routine verification gate.
 - Use `mise run check:nightly` for the extended verification gate.
 - Use `mise run fmt` to format Rust with the pinned nightly formatter.
+- Name internal Git dependencies as "Git dependencies" in `DEVELOPING.md`
+  describes.
 - Use `scripts/corpus-fetch.sh` and `scripts/corpus-fetch-actions.sh` to prepare
   the GitHub Actions compatibility corpus.
 - Use `scripts/corpus-fetch-fabro.sh` to prepare the Fabro compatibility corpus,
@@ -41,10 +43,10 @@ style-guide defaults.
   the Fabro pin changes.
 
 Container scopes run through the `sandbox-driver-docker` plugin, which
-`mise run plugins:build` installs from the pinned sandbox-driver revision.
-Docker tests skip when the plugin is missing or no Docker daemon is available.
-CI requires Docker tests on Linux and requires the compatibility corpus on all
-runners.
+`mise run plugins:build` installs from the sandbox-driver commit that
+`Cargo.lock` locks. Docker tests skip when the plugin is missing or no
+Docker daemon is available. CI requires Docker tests on Linux and requires the
+compatibility corpus on all runners.
 
 ## Safety
 

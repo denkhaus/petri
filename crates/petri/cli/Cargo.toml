@@ -31,10 +31,9 @@ testkit = { workspace = true }
 # The in-process client test builds requests and reads error kinds.
 lithos-llm = { workspace = true, features = ["runtime"] }
 tokio = { workspace = true, features = ["net"] }
-# The provider twins the black box harness starts on loopback, pinned by
-# revision. Pebble's own CLI tests pin the same revision.
-twin-openai = { git = "https://github.com/lithoscomputer/twins", rev = "ca45f0e50a6716d716aa2f638ca3cf767e88f613" }
-twin-anthropic = { git = "https://github.com/lithoscomputer/twins", rev = "ca45f0e50a6716d716aa2f638ca3cf767e88f613" }
+# The provider twins the black box harness starts on loopback.
+twin-openai = { git = "https://github.com/lithoscomputer/twins", branch = "main" }
+twin-anthropic = { git = "https://github.com/lithoscomputer/twins", branch = "main" }
 # The twins export Axum routers; the harness serves them and captures request
 # bodies through a middleware layer.
 axum = "0.8"
