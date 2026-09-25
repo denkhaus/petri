@@ -586,6 +586,17 @@ async fn run_session(
                     stage.context_updates.insert(SmolStr::new(key.clone()), item.clone());
                 }
             }
+            // The routing contract survives the schema contract: routing fields
+            // the directive kind applies, a schema response carries too (Fabro's
+            // schema files document "keeps the routing contract" — required routing
+            // fields, label enums). Without this extraction every conditional edge
+            // on preferred_label falls through to the catch-all under a schema.
+            if let Some(label) = value.get("preferred_next_label").and_then(Value::as_str) {
+                stage.output.insert("preferred_label".into(), json!(label));
+            }
+            if let Some(ids) = value.get("suggested_next_ids") {
+                stage.output.insert("suggested_next_ids".into(), ids.clone());
+            }
         }
         Parsed::Plain => {}
     }
