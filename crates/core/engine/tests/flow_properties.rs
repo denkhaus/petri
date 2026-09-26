@@ -258,6 +258,21 @@ fn check_budgets(case: &FlowCase, run: &Run) -> Result<(), TestCaseError> {
         "only a budget can stop a generated run: {:?}",
         state.errors()
     );
+    // Only a key that would run is an error. Once a stop reached an unmarked
+    // node, its keys only complete `Cancelled`, so its budget stops them
+    // quietly (§4, "Budget refusal").
+    for (step, node) in &run.refusals {
+        prop_assert!(
+            case.nodes[node.index()].run_on_cancel
+                || !run
+                    .stops
+                    .iter()
+                    .any(|stop| stop.step <= *step && case.covers(stop.target, node.raw())),
+            "the budget refused unmarked {} with an error in step {}, after a stop reached it",
+            node,
+            step
+        );
+    }
     Ok(())
 }
 

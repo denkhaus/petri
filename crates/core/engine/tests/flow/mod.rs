@@ -458,6 +458,8 @@ pub(crate) struct Run {
     /// Firings a stop settled while they waited on a retry backoff, with the
     /// stop's step.
     pub settled:  BTreeMap<FiringId, usize>,
+    /// Each budget error's node, with the host step that raised it.
+    pub refusals: Vec<(usize, NodeId)>,
     pub harness:  Harness,
 }
 
@@ -860,6 +862,7 @@ pub(crate) fn run(case: &FlowCase) -> Run {
             .copied()
             .unwrap_or(Action::Finish(0));
         let step = host.steps.len();
+        let errors = host.harness.state.errors().len();
         match action {
             Action::Finish(choice) => host.finish(step, choice, true),
             Action::Attempt(choice) => host.finish(step, choice, false),
@@ -867,6 +870,7 @@ pub(crate) fn run(case: &FlowCase) -> Run {
             Action::Kill(target) => host.stop(step, Stop::Kill, target),
         }
         host.take_controls(step);
+        host.take_refusals(step, errors);
     }
     host.into_run()
 }
@@ -890,6 +894,7 @@ struct Host<'a> {
     stops:     Vec<StopAt>,
     controls:  Vec<ControlAt>,
     settled:   BTreeMap<FiringId, usize>,
+    refusals:  Vec<(usize, NodeId)>,
 }
 
 impl<'a> Host<'a> {
@@ -912,6 +917,7 @@ impl<'a> Host<'a> {
             stops: Vec::new(),
             controls: Vec::new(),
             settled: BTreeMap::new(),
+            refusals: Vec::new(),
         };
         let seeded = host.drain_starts(0);
         host.started(seeded);
@@ -1094,6 +1100,15 @@ impl<'a> Host<'a> {
         }
     }
 
+    /// Note the budget errors a step raised, from the error at `from` on.
+    fn take_refusals(&mut self, step: usize, from: usize) {
+        for error in &self.harness.state.errors()[from..] {
+            if let RunError::BudgetExceeded { node, .. } = error {
+                self.refusals.push((step, *node));
+            }
+        }
+    }
+
     /// The attempts entry for a firing that just finished or settled.
     fn record_attempts(&mut self, key: (u32, u32), firing: FiringId) {
         let attempt = self
@@ -1227,6 +1242,7 @@ impl<'a> Host<'a> {
             stops: self.stops,
             controls: self.controls,
             settled: self.settled,
+            refusals: self.refusals,
             harness,
         }
     }
