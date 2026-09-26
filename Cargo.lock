@@ -1225,7 +1225,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 [[package]]
 name = "lithos-llm"
 version = "0.1.0"
-source = "git+https://github.com/lithoscomputer/lithos-llm?branch=main#43a42ac28e9d9bcf40a91abc02be4f12ca274ebb"
+source = "git+https://github.com/lithoscomputer/lithos-llm?branch=main#f40391aa8b3c3871bbac3dced2f4e26ddc46a743"
 dependencies = [
  "async-trait",
  "futures-core",
@@ -1325,6 +1325,18 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "nix"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]
@@ -1476,7 +1488,7 @@ dependencies = [
 [[package]]
 name = "pebble-agent"
 version = "0.1.0"
-source = "git+https://github.com/lithoscomputer/pebble.git?branch=main#3f969ec83531990679733f5f7b82fe99d7100444"
+source = "git+https://github.com/lithoscomputer/pebble.git?branch=main#ba2928d7407a536de817667d5cea02d8595d4167"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1493,7 +1505,7 @@ dependencies = [
 [[package]]
 name = "pebble-coding-agent"
 version = "0.1.0"
-source = "git+https://github.com/lithoscomputer/pebble.git?branch=main#3f969ec83531990679733f5f7b82fe99d7100444"
+source = "git+https://github.com/lithoscomputer/pebble.git?branch=main#ba2928d7407a536de817667d5cea02d8595d4167"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1699,6 +1711,7 @@ dependencies = [
  "sandbox-driver",
  "sandbox-driver-daytona-config",
  "sandbox-driver-docker-config",
+ "sandbox-driver-host",
  "sandbox-driver-protocol",
  "serde",
  "serde_json",
@@ -1949,6 +1962,7 @@ dependencies = [
  "petri-steps",
  "petri-store",
  "sandbox-driver",
+ "sandbox-driver-host",
  "serde",
  "serde_json",
  "smol_str",
@@ -2002,7 +2016,7 @@ checksum = "2e842efad9119158434d193c6682e2ebee4b44d6ad801d7b349623b3f57cdf55"
 dependencies = [
  "futures",
  "indexmap",
- "nix",
+ "nix 0.31.3",
  "tokio",
  "tracing",
  "windows",
@@ -2496,6 +2510,24 @@ source = "git+https://github.com/lithoscomputer/sandbox-driver.git?branch=main#2
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "sandbox-driver-host"
+version = "0.1.0"
+source = "git+https://github.com/lithoscomputer/sandbox-driver.git?branch=main#236196ed134dd594e7678e38ebbe968097f1935c"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "nix 0.30.1",
+ "sandbox-driver",
+ "sandbox-driver-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3121,9 +3153,9 @@ dependencies = [
 
 [[package]]
 name = "tracing-subscriber"
-version = "0.3.23"
+version = "0.3.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
+checksum = "2054a14f5307d601f88daf0553e1cbf472acc4f2c51afab632431cdcd72124d5"
 dependencies = [
  "matchers",
  "nu-ansi-term",

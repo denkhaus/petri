@@ -69,10 +69,6 @@ wildcard_imports = "warn"
 absolute_paths = "warn"
 
 [workspace.dependencies]
-# Internal git dependencies (`lithoscomputer/*`) name exactly `branch = "main"`,
-# never `rev` and never an omitted ref, so Fabro, Pebble, and Petri share one
-# copy of each. `Cargo.lock` chooses the commit; in the shipped application,
-# Fabro's lockfile does. `mise run check:pins` enforces the form.
 # Native agent runtime, with the prompt-report and session-scope APIs.
 pebble-coding-agent = { git = "https://github.com/lithoscomputer/pebble.git", branch = "main" }
 # The tool middleware trait Petri implements for Fabro tool hooks; the coding agent does not re-export it.
@@ -92,6 +88,8 @@ sandbox-driver = { git = "https://github.com/lithoscomputer/sandbox-driver.git",
 sandbox-driver-protocol = { git = "https://github.com/lithoscomputer/sandbox-driver.git", branch = "main" }
 sandbox-driver-docker-config = { git = "https://github.com/lithoscomputer/sandbox-driver.git", branch = "main" }
 sandbox-driver-daytona-config = { git = "https://github.com/lithoscomputer/sandbox-driver.git", branch = "main" }
+# Tests only: the built-in Host provider, linked the way an embedder links it.
+sandbox-driver-host = { git = "https://github.com/lithoscomputer/sandbox-driver.git", branch = "main" }
 steps = { package = "petri-steps", path = "crates/core/steps" }
 driver = { package = "petri-driver", path = "crates/core/driver" }
 execution = { package = "petri-execution", path = "crates/core/execution" }

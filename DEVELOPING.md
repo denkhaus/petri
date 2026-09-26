@@ -27,19 +27,12 @@ The corpus uses the commits in `crates/github/corpus-pins.txt`. Do not use
 
 ## Git dependencies
 
-Fabro, Pebble, and Petri share one copy of sandbox-driver, Pebble, and
-lithos-llm. Every internal Git dependency (a `lithoscomputer/*` repository),
-in every repository, names exactly `branch = "main"`: never `rev`, and never an
-omitted ref, which Cargo treats as a different source. The twins
-(`lithoscomputer/twins`) follow the same rule in the two test crates that
-serve them. `mise run check:pins` fails on any other form.
-
-A manifest never chooses a commit; the lockfile does. Fabro's `Cargo.lock` is
-the one place a commit is chosen for the shipped application. Petri's own
-`Cargo.lock` chooses the commits Petri builds and tests with, and should move
-to what Fabro locks. To take a newer library commit, update the lock, for
-example `cargo update -p pebble-agent` or `cargo update -p sandbox-driver`;
-no manifest changes.
+Internal Git dependencies (`lithoscomputer/*`, the twins included) name
+exactly `branch = "main"`: not `rev`, and not an omitted ref, which Cargo
+treats as a different source. Pick up a newer commit with
+`cargo update -p <crate>` and let CI decide; whoever breaks an API another
+Lithos repository uses fixes that repository promptly. Fabro's `Cargo.lock`
+decides what ships. `mise run check:pins` enforces the form.
 
 All of these repositories are public. `Cargo.toml` names them over HTTPS, so
 a build needs no SSH key and no credential, locally or in CI.
@@ -111,9 +104,8 @@ secrets, step output, and environment values are never captured.
 
 ## Library and repository gates
 
-Pebble and `lithos-llm` track `main`, and `Cargo.lock` locks their commits;
-the MCP client is Pebble's dependency. A change to one of them runs that
-repository's required checks first; only then does Petri move its lock,
+The MCP client is Pebble's dependency. A change to Pebble or `lithos-llm`
+runs that repository's required checks first; only then does Petri move its lock,
 update the "Pinned revisions" table in
 `crates/fabro/acceptance/CONTRACT.md`, and rerun the affected black box
 scenarios. `mise run check:pins` fails while the citations disagree. A library

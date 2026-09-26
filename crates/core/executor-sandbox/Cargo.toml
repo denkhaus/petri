@@ -28,11 +28,13 @@ sha2.workspace = true
 smol_str.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 
 [dev-dependencies]
 testkit.workspace = true
+# The in-process source's shutdown is tested against the real Host provider.
+sandbox-driver-host.workspace = true
 # The Daytona battery fetches a preview URL the provider signs for a port.
 reqwest.workspace = true
 

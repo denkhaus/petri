@@ -688,11 +688,20 @@ error, never an arbitrary choice. A fresh create happens only when
 reconciliation finds no match. The run id is the run's store key, carried
 by the run declaration and handed to every executor of the run, so any
 executor over the same run computes the same labels; a driver with no
-coordinator names its run after its run directory. Every provider is reached
-through sandbox-driver's JSON-RPC plugin, including Host, Docker, and Daytona: a plugin
-process that dies fails every in-flight call routably, is never asked to
-replay an ambiguous call, and is relaunched single-flight by the next call, and
-a generation change forces the recovery fence before any holder resumes. The
+coordinator names its run after its run directory. A provider is reached one
+of two ways. By default every provider, Host, Docker, and Daytona included, is
+a sandbox-driver JSON-RPC plugin: a plugin process that dies fails every
+in-flight call routably, is never asked to replay an ambiguous call, and is
+relaunched single-flight by the next call, and a generation change forces the
+recovery fence before any holder resumes. An embedder that links the built-in
+providers instead hands the runtime a factory per kind
+(`Runtime::in_process_providers`); the router then reaches those providers in
+its own process, launches no plugin (a kind without a factory fails at
+acquire), connects each one once per run and checks its health before any lease
+uses it. Both ways record the same fingerprint for the same backend, so a lease
+recorded one way is recovered or pruned the other. Finishing a run closes its
+admission to every environment it handed out, so a retained environment
+refuses work afterwards whichever way its provider is reached. The
 durable resource record (one line per transition in the run's resource log,
 the latest per lease current) is the crash-safe authority:
 it carries the allocation state (`allocating`, `live`, `stopped`, `deleted`),
@@ -705,15 +714,15 @@ covers the workspace only: side effects outside it may have happened in the
 crashed attempt and happen again — resume is **at-least-once for external side
 effects**, exactly-once only for the log and the workspace fence.
 
-Host plugin: one sandbox per lease and a workspace under the run directory;
+Host provider: one sandbox per lease and a workspace under the run directory;
 retention defaults to keep-on-failure (`always|on_failure|never`). Petri passes
-its private registry directory to the plugin and includes the canonical path
-in the provider fingerprint. The provider owns the registry, process groups,
+its private registry directory to the plugin, or to the in-process factory,
+and includes the canonical path in the provider fingerprint. The provider owns the registry, process groups,
 and workspace lifecycle. Petri explicitly marks its workspace as managed;
 other callers' designated directories remain untouched by delete. Stopped
 sandboxes can be attached and pruned after a plugin restart. Successful stop
 removes drained generation records. Container executor
-(`executor-sandbox` over a sandbox-driver plugin, Docker or Daytona): one sandbox
+(`executor-sandbox` over the Docker or Daytona provider, a plugin or in process): one sandbox
 per lease — pull if-not-present, an init process, **the workspace inside the
 sandbox** (Docker: a volume the sandbox owns at `/workspace`; nothing is bound
 from Petri's machine, so a remote daemon works and file I/O goes through the

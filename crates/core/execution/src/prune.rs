@@ -5,7 +5,7 @@
 //! run — leaves a stopped or running sandbox and its workspace on the
 //! provider. The run's resource records say exactly which. Prune opens the
 //! run for writing, so no coordinator can resume it meanwhile, checks each
-//! record's provider fingerprint against the plugin it launches (a changed
+//! record's provider fingerprint against the provider it reaches (a changed
 //! daemon or account is a configuration error, never a delete on another
 //! backend), writes the delete intent before the provider call, and leaves
 //! a tombstone after. Each provider deletes its sandbox's managed workspace,
@@ -13,7 +13,8 @@
 
 use std::sync::Arc;
 
-use runtime::{RunAccess, Runtime};
+use runtime::{RunAccess, RunRuntime, Runtime};
+use store::RunLogs;
 use tokio::sync::Mutex;
 
 use crate::resource::{ResourceLedger, ResourceStore};
@@ -57,14 +58,34 @@ pub enum PruneError {
 pub async fn prune(rt: &Runtime) -> Result<PruneReport, PruneError> {
     let run_dir = rt.run_options().run_dir.clone();
     let run = rt.prepare_run(&run_dir);
-    let logs = run
-        .open(RunAccess::Write)
+    // Every path tears the run's services and providers down, a refused
+    // one included: preparing the run already started its services.
+    let logs = match open_for_prune(&run).await {
+        Ok(logs) => logs,
+        Err(error) => {
+            run.finish().await;
+            return Err(error);
+        }
+    };
+    let result = prune_open(&run, &logs).await;
+    // The run's write lease is held until teardown is done, so no
+    // coordinator resumes the run under it.
+    run.finish().await;
+    drop(logs);
+    result
+}
+
+async fn open_for_prune(run: &RunRuntime) -> Result<Arc<dyn RunLogs>, PruneError> {
+    run.open(RunAccess::Write)
         .await
         .map_err(|error| match error {
             store::StoreError::Leased { locator, .. } => PruneError::RunHeld(locator),
             other => PruneError::Store(other.into()),
-        })?;
-    let store = Arc::new(Mutex::new(ResourceStore::load(&logs).await?));
+        })
+}
+
+async fn prune_open(run: &RunRuntime, logs: &Arc<dyn RunLogs>) -> Result<PruneReport, PruneError> {
+    let store = Arc::new(Mutex::new(ResourceStore::load(logs).await?));
     let router = run.sandbox_router().cloned().ok_or(PruneError::NoRouter)?;
     router.set_ledger(Arc::new(ResourceLedger::new(store.clone())));
 
@@ -84,7 +105,5 @@ pub async fn prune(rt: &Runtime) -> Result<PruneReport, PruneError> {
             Err(error) => report.problems.push((lease, error.to_string())),
         }
     }
-    run.finish().await;
-    drop(logs);
     Ok(report)
 }

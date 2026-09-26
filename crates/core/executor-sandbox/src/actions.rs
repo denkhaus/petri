@@ -20,6 +20,7 @@ use tokio::fs;
 use tokio::sync::Mutex;
 
 use crate::env::OneShotRunner;
+use crate::gate::RunGate;
 use crate::lease::{LiveSandbox, delete_sandbox};
 use crate::plugin::ProviderSource;
 use crate::run::{RUN_LABEL, RunIdentity, scope_dir, write_record};
@@ -49,9 +50,10 @@ fn host_name(prefix: &str, workspace_id: &str) -> String {
 }
 
 /// Delete an action host, reconciling an uncertain create by its marker and
-/// label.
+/// label. `source` is only needed, and its error only returned, when there
+/// may be an action host to delete.
 pub(crate) async fn remove_recorded(
-    source: &dyn ProviderSource,
+    source: Result<&dyn ProviderSource, EnvError>,
     identity: &RunIdentity,
     workspace_id: &str,
     known: Option<&SandboxId>,
@@ -64,6 +66,7 @@ pub(crate) async fn remove_recorded(
         }
         Err(error) => return Err(EnvError::workspace("read", marker.display(), error)),
     };
+    let source = source?;
     let (provider, _) = source.current().await?;
     if fingerprint != source.fingerprint() {
         return Err(EnvError::backend(
@@ -138,7 +141,7 @@ impl ActionHost {
     /// shares this state and cannot sweep its caller's live action host.
     async fn prepare_locked(&self, state: &mut HostState) -> Result<(), EnvError> {
         if !state.prepared {
-            remove_recorded(&*self.source, &self.identity, &self.workspace_id, None).await?;
+            remove_recorded(Ok(&*self.source), &self.identity, &self.workspace_id, None).await?;
             state.prepared = true;
         }
         Ok(())
@@ -231,7 +234,7 @@ impl ActionHost {
             return Ok(false);
         }
         let removed = remove_recorded(
-            &*self.source,
+            Ok(&*self.source),
             &self.identity,
             &self.workspace_id,
             state.sandbox.as_ref().map(|live| live.sandbox.id()),
@@ -247,13 +250,19 @@ impl ActionHost {
 pub(crate) struct ActionHostRunner {
     host: Result<Arc<ActionHost>, String>,
     env:  BTreeMap<SmolStr, SmolStr>,
+    gate: RunGate,
 }
 
 impl ActionHostRunner {
-    pub(crate) fn new(host: Result<Arc<ActionHost>, EnvError>, scope: &ScopeSpec) -> Self {
+    pub(crate) fn new(
+        host: Result<Arc<ActionHost>, EnvError>,
+        scope: &ScopeSpec,
+        gate: RunGate,
+    ) -> Self {
         Self {
             host: host.map_err(|error| error.to_string()),
-            env:  scope.env.clone(),
+            env: scope.env.clone(),
+            gate,
         }
     }
 
@@ -276,14 +285,18 @@ impl ContainerRunner for ActionHostRunner {
 
     async fn run(&self, spec: OneShotContainer) -> Result<Box<dyn ProcessHandle>, EnvError> {
         let host = self.host()?;
+        // Admitted before the action host is created, so a finished run
+        // creates none.
+        let admission = self.gate.admit("one-shot")?;
         let sandbox = host.sandbox().await?;
         let runner = OneShotRunner {
             sandbox,
             workspace: CONTAINER_WORKSPACE.to_owned(),
             host_address: Some(host.host_address.clone()),
             env: self.env.clone(),
+            gate: self.gate.clone(),
         };
-        runner.run(spec).await
+        runner.run_admitted(spec, admission)
     }
 }
 
@@ -379,7 +392,7 @@ mod tests {
             .unwrap();
         let id = SandboxId::try_new("late-host").unwrap();
         for known in [None, Some(&id)] {
-            let error = remove_recorded(&source, &identity, "scope-0", known)
+            let error = remove_recorded(Ok(&source), &identity, "scope-0", known)
                 .await
                 .expect_err("changed provider must not touch the resource");
             assert!(error.to_string().contains("fingerprint"), "{error}");
@@ -391,7 +404,7 @@ mod tests {
         }
         fs::write(&marker, source.fingerprint()).await.unwrap();
         assert_eq!(
-            remove_recorded(&source, &identity, "scope-0", None)
+            remove_recorded(Ok(&source), &identity, "scope-0", None)
                 .await
                 .unwrap(),
             [id]
