@@ -124,8 +124,10 @@ real core's:
   the model has it too.
 
 `crates/core/engine/tests/flow_properties.rs` checks the join, generation,
-budget and retry rules on the same generator without Lean, so it runs in
-every `mise run test`.
+budget, retry, cancel and kill rules on the same generator without Lean, so
+it runs in every `mise run test`. The model has no stops yet, so the
+comparison uses only the cases whose host finishes firings and does nothing
+else.
 
 ## Commands
 

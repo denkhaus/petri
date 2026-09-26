@@ -114,9 +114,10 @@ proptest! {
     /// Which (node, generation) firings start after each host step, the order
     /// they finish in, the tokens left waiting, the budget refusals, the run
     /// status, each firing's attempts and recorded status, and each retry's
-    /// base delay, bit for bit, all match the model.
+    /// base delay, bit for bit, all match the model. The model has no stops
+    /// yet, so the host only finishes firings.
     #[test]
-    fn flow_runs_match_the_lean_model(case in flow::flow_case()) {
+    fn flow_runs_match_the_lean_model(case in flow::flow_case_without_stops()) {
         let Some(answer) = ask(&json!({ "flow": &case })) else {
             return Ok(());
         };
