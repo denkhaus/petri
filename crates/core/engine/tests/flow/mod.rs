@@ -374,6 +374,10 @@ pub(crate) struct Observed {
     /// firing, in order.
     #[serde(default)]
     pub controls:        Vec<(u32, u32, String)>,
+    /// `(node, generation)` keys that completed `Cancelled` without running,
+    /// in the order they recorded.
+    #[serde(default)]
+    pub completed:       Vec<(u32, u32)>,
 }
 
 impl Observed {
@@ -1205,6 +1209,14 @@ impl<'a> Host<'a> {
                 (node, generation, control.stop.tag().to_owned())
             })
             .collect();
+        let started: BTreeSet<FiringId> = self.starts.iter().map(|start| start.firing).collect();
+        let completed = harness
+            .state
+            .history()
+            .iter()
+            .filter(|record| !started.contains(&record.firing))
+            .map(|record| (record.node.raw(), record.generation.raw()))
+            .collect();
         let parked = harness
             .state
             .pending_tokens()
@@ -1237,6 +1249,7 @@ impl<'a> Host<'a> {
                 attempts: self.attempts,
                 retries,
                 controls,
+                completed,
             },
             starts: self.starts,
             stops: self.stops,
