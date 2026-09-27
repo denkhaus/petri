@@ -205,6 +205,18 @@ impl SimHost {
             .decision_seed(self.seed)
     }
 
+    /// [`Self::stored`], or nothing when the run was never stored.
+    pub(crate) async fn stored_or_empty(&self) -> StoredLogs {
+        match self.store.open(&run_key(), Access::Read).await {
+            Ok(_) => self.stored().await,
+            Err(_) => StoredLogs {
+                coordinator: Vec::new(),
+                resources:   Vec::new(),
+                executions:  BTreeMap::new(),
+            },
+        }
+    }
+
     /// Every log the store holds, each record as the line the store keeps.
     pub(crate) async fn stored(&self) -> StoredLogs {
         let logs = self
