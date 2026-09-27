@@ -62,7 +62,7 @@ use serde_json::json;
 use steps::{Answer, Question};
 use store::RunKey;
 use support::RunDir;
-use support::world::{
+use testkit::sim::{
     Dice, Faults, HOOK_BLOCK, MemoryLogs, PREPARATION_FAILURE, SANDBOXED, World, WorldHooks,
     sandboxed_registry,
 };
