@@ -75,6 +75,12 @@ pub struct Faults {
 #[derive(Clone, Debug)]
 pub struct Acquired {
     pub scope:      ScopeId,
+    /// The sandbox: its lease under a coordinator, else its scope.
+    pub key:        SmolStr,
+    /// The execution that acquired it, as its environment names it; empty
+    /// for a driver on its own.
+    pub execution:  SmolStr,
+    /// Counts this sandbox's acquisitions.
     pub generation: u32,
     pub lifetime:   u32,
     /// The acquisition failed, and left nothing behind.
@@ -90,7 +96,8 @@ pub struct Acquired {
 /// One process a step ran.
 #[derive(Clone, Debug)]
 pub struct Ran {
-    pub scope:      ScopeId,
+    pub key:        SmolStr,
+    pub execution:  SmolStr,
     pub generation: u32,
     pub lifetime:   u32,
     pub firing:     u64,
@@ -142,14 +149,15 @@ struct WorldState {
     dice:          Dice,
     faults:        Faults,
     lifetime:      u32,
-    generations:   BTreeMap<ScopeId, u32>,
+    generations:   BTreeMap<SmolStr, u32>,
     acquisitions:  Vec<Acquired>,
     processes:     Vec<Ran>,
-    /// `(firing, attempt)` whose finish was in the log the current lifetime
-    /// resumed from.
-    finished:      BTreeSet<(u64, u32)>,
-    /// Firings a stop had reached, still stopping, in that log.
-    stopping:      BTreeSet<u64>,
+    /// `(execution, firing, attempt)` whose finish was in the logs the
+    /// current lifetime resumed from.
+    finished:      BTreeSet<(SmolStr, u64, u32)>,
+    /// `(execution, firing)` a stop had reached, still stopping, in those
+    /// logs.
+    stopping:      BTreeSet<(SmolStr, u64)>,
     /// A sibling execution holds the attempt slot the driver shares with it.
     sibling:       bool,
     /// How often the sibling took the slot.
@@ -192,9 +200,15 @@ impl World {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// A driver resumes after a crash, from a log in which `finished`
-    /// attempts had finished and `stopping` firings were still stopping.
-    pub fn begin_lifetime(&self, finished: BTreeSet<(u64, u32)>, stopping: BTreeSet<u64>) {
+    /// The drivers resume after a crash, from logs in which `finished`
+    /// attempts had finished and `stopping` firings were still stopping. A
+    /// firing is named by its execution, as its environment names it (empty
+    /// for a driver on its own), and its id.
+    pub fn begin_lifetime(
+        &self,
+        finished: BTreeSet<(SmolStr, u64, u32)>,
+        stopping: BTreeSet<(SmolStr, u64)>,
+    ) {
         let mut state = self.lock();
         state.lifetime += 1;
         state.finished = finished;
@@ -254,8 +268,16 @@ impl World {
 /// What a release finds: the acquisition it ends.
 #[derive(Debug)]
 struct Lease {
-    scope:      ScopeId,
+    key:        SmolStr,
     generation: u32,
+}
+
+/// The execution an environment belongs to: the prefix a coordinator puts
+/// before `-scope-<n>`, empty for a driver on its own.
+fn execution_of(environment: &str) -> SmolStr {
+    environment
+        .rsplit_once("-scope-")
+        .map_or_else(SmolStr::default, |(prefix, _)| SmolStr::new(prefix))
 }
 
 /// The world's sandbox provider, as one driver lifetime reaches it.
@@ -269,41 +291,47 @@ impl Executor for WorldExecutor {
     async fn acquire(
         &self,
         scope: &ScopeSpec,
-        _ctx: &AcquireContext,
+        ctx: &AcquireContext,
     ) -> Result<EnvHandle, EnvError> {
+        let key: SmolStr = ctx.lease().map_or_else(
+            || format!("scope-{}", scope.id.raw()).into(),
+            |lease| format!("lease-{}", lease.raw()).into(),
+        );
+        let execution = execution_of(scope.environment.as_str());
+        let lifetime = self.lifetime;
         let (generation, delay, fail) = {
             let mut state = self.world.lock();
             let generation = {
-                let next = state.generations.entry(scope.id).or_insert(0);
+                let next = state.generations.entry(key.clone()).or_insert(0);
                 *next += 1;
                 *next
             };
-            // The fence: nothing from an earlier acquisition of this scope
-            // runs on once this one starts.
+            // The fence: nothing a dead driver left in this sandbox runs on
+            // once a live one acquires it. A second acquisition in the same
+            // lifetime (a restarted execution, a child that inherits the
+            // sandbox) shares it.
             let now = time::Instant::now();
             let mut fenced = 0;
             for process in &state.processes {
-                if process.scope == scope.id
-                    && process.generation < generation
-                    && process.running(now)
-                {
+                if process.key == key && process.lifetime < lifetime && process.running(now) {
                     process.state.kill(9);
                     fenced += 1;
                 }
             }
             state.fenced += fenced;
             for earlier in &mut state.acquisitions {
-                if earlier.scope == scope.id && earlier.generation < generation {
+                if earlier.key == key && earlier.lifetime < lifetime {
                     earlier.fenced = true;
                 }
             }
             let faults = state.faults;
             let delay = state.dice.roll(faults.acquire_ms + 1);
             let fail = state.dice.chance(faults.acquire_failure);
-            let lifetime = self.lifetime;
             // The sandbox exists from here, whether or not the call returns.
             state.acquisitions.push(Acquired {
                 scope: scope.id,
+                key: key.clone(),
+                execution: execution.clone(),
                 generation,
                 lifetime,
                 failed: fail,
@@ -315,9 +343,9 @@ impl Executor for WorldExecutor {
         };
         let mut creating = Creating {
             world: Arc::clone(&self.world),
-            scope: scope.id,
+            key: key.clone(),
             generation,
-            lifetime: self.lifetime,
+            lifetime,
             returned: false,
         };
         time::sleep(Duration::from_millis(delay)).await;
@@ -342,13 +370,11 @@ impl Executor for WorldExecutor {
             },
             Arc::new(WorldEnv {
                 world: Arc::clone(&self.world),
-                scope: scope.id,
+                key: key.clone(),
+                execution,
                 generation,
             }),
-            Lease {
-                scope: scope.id,
-                generation,
-            },
+            Lease { key, generation },
         ))
     }
 
@@ -377,24 +403,22 @@ impl Executor for WorldExecutor {
         let mut state = self.world.lock();
         // A release ends whatever still runs in the environment.
         for process in &state.processes {
-            if process.scope == lease.scope && process.generation == lease.generation {
+            if process.key == lease.key && process.generation == lease.generation {
                 process.state.kill(9);
             }
         }
         let released = state
             .acquisitions
             .iter_mut()
-            .find(|acquired| {
-                acquired.scope == lease.scope && acquired.generation == lease.generation
-            })
+            .find(|acquired| acquired.key == lease.key && acquired.generation == lease.generation)
             .map(|acquired| {
                 acquired.releases += 1;
                 acquired.releases
             });
         if released != Some(1) {
-            let (scope, generation) = (lease.scope, lease.generation);
+            let (key, generation) = (&lease.key, lease.generation);
             state.violations.push(format!(
-                "{scope} generation {generation} released {released:?} times"
+                "{key} generation {generation} released {released:?} times"
             ));
         }
         ReleaseReport::default()
@@ -411,7 +435,7 @@ impl WorldExecutor {
 /// it removes the sandbox it was creating; a dead driver runs no cleanup.
 struct Creating {
     world:      Arc<World>,
-    scope:      ScopeId,
+    key:        SmolStr,
     generation: u32,
     lifetime:   u32,
     returned:   bool,
@@ -429,7 +453,7 @@ impl Drop for Creating {
         if let Some(acquired) = state
             .acquisitions
             .iter_mut()
-            .find(|a| a.scope == self.scope && a.generation == self.generation)
+            .find(|a| a.key == self.key && a.generation == self.generation)
         {
             acquired.abandoned = true;
         }
@@ -440,7 +464,8 @@ impl Drop for Creating {
 #[derive(Debug)]
 struct WorldEnv {
     world:      Arc<World>,
-    scope:      ScopeId,
+    key:        SmolStr,
+    execution:  SmolStr,
     generation: u32,
 }
 
@@ -459,18 +484,20 @@ impl ExecEnv for WorldEnv {
         let mut state = self.world.lock();
         let lifetime = state.lifetime;
         let now = time::Instant::now();
-        let current = state.generations.get(&self.scope) == Some(&self.generation);
+        let execution = self.execution.clone();
+        let current = !state
+            .acquisitions
+            .iter()
+            .any(|a| a.key == self.key && a.generation == self.generation && a.fenced);
         if current
             && state.processes.iter().any(|earlier| {
-                earlier.scope == self.scope
-                    && earlier.generation < self.generation
-                    && earlier.running(now)
+                earlier.key == self.key && earlier.lifetime < lifetime && earlier.running(now)
             })
         {
             state.violations.push(format!(
                 "firing {firing} attempt {attempt} ran in {} generation {} beside an unfenced \
-                 earlier process",
-                self.scope, self.generation
+                 process a dead driver left",
+                self.key, self.generation
             ));
         }
         if state.sibling {
@@ -478,23 +505,33 @@ impl ExecEnv for WorldEnv {
                 "firing {firing} attempt {attempt} ran while a sibling execution held the slot"
             ));
         }
-        if lifetime > 0 && state.stopping.contains(&firing) {
+        let at = if execution.is_empty() {
+            String::new()
+        } else {
+            format!(" of {execution}")
+        };
+        if lifetime > 0 && state.stopping.contains(&(execution.clone(), firing)) {
             state.violations.push(format!(
-                "firing {firing} was stopping at the crash and ran again (attempt {attempt})"
+                "firing {firing}{at} was stopping at the crash and ran again (attempt {attempt})"
             ));
         }
-        if lifetime > 0 && state.finished.contains(&(firing, attempt)) {
-            state.violations.push(format!(
-                "firing {firing} attempt {attempt} finished before the crash and ran again"
-            ));
-        }
-        if state
-            .processes
-            .iter()
-            .any(|ran| ran.lifetime == lifetime && ran.firing == firing && ran.attempt == attempt)
+        if lifetime > 0
+            && state
+                .finished
+                .contains(&(execution.clone(), firing, attempt))
         {
             state.violations.push(format!(
-                "firing {firing} attempt {attempt} ran twice in driver lifetime {lifetime}"
+                "firing {firing}{at} attempt {attempt} finished before the crash and ran again"
+            ));
+        }
+        if state.processes.iter().any(|ran| {
+            ran.lifetime == lifetime
+                && ran.execution == execution
+                && ran.firing == firing
+                && ran.attempt == attempt
+        }) {
+            state.violations.push(format!(
+                "firing {firing}{at} attempt {attempt} ran twice in driver lifetime {lifetime}"
             ));
         }
         let process = Arc::new(ProcessState {
@@ -509,7 +546,8 @@ impl ExecEnv for WorldEnv {
             process.kill(9);
         }
         state.processes.push(Ran {
-            scope: self.scope,
+            key: self.key.clone(),
+            execution,
             generation: self.generation,
             lifetime,
             firing,
