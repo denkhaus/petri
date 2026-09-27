@@ -480,16 +480,23 @@ impl Coordinator {
             }
             self.last_root_report = Some(report);
             self.run_invocations().await?;
+            // A crash can land between the root's result and the run's end:
+            // the resumed run ends it.
+            self.finish_run(result.status).await?;
             return Ok(result);
         }
         let result = self.run_invocations().await?;
-        if self.store.state().run_status.is_none() {
-            self.append(CoordinatorEvent::RunFinished {
-                status: result.status,
-            })
-            .await?;
-        }
+        self.finish_run(result.status).await?;
         Ok(result)
+    }
+
+    /// Append the run's end, unless the log already has it.
+    async fn finish_run(&mut self, status: RunStatus) -> Result<(), CoordinatorError> {
+        if self.store.state().run_status.is_none() {
+            self.append(CoordinatorEvent::RunFinished { status })
+                .await?;
+        }
+        Ok(())
     }
 
     /// End the run: release every lease still holding a sandbox — an
