@@ -357,8 +357,17 @@ pub async fn stored_state(logs: &dyn RunLogs) -> Result<CoordinatorState, HostEr
 }
 
 /// The root invocation's registered graph, read without taking the run
-/// lease. `None` when the log has no root invocation yet.
+/// lease. `None` when the log has no root invocation yet, or no record at
+/// all: a crash can cut a run's creation short before `run.started`.
 pub async fn stored_root_graph(logs: &dyn RunLogs) -> Result<Option<Graph>, HostError> {
+    if logs
+        .read(&store::LogId::Coordinator)
+        .await
+        .map_err(CoordinatorError::from)?
+        .is_empty()
+    {
+        return Ok(None);
+    }
     let state = stored_state(logs).await?;
     let Some(root) = state.invocations.get(&InvocationId::ROOT) else {
         return Ok(None);

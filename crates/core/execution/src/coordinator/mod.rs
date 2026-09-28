@@ -18,7 +18,7 @@ use engine::{EngineExit, EngineStart, EntryPoint, Event, MiddlewareKey};
 use ir::{Graph, RunStatus, Value};
 use runtime::{RunAccess, RunRuntime};
 use smol_str::SmolStr;
-use store::{RunLogs, execution_relative_dir};
+use store::{LogId, RunLogs, execution_relative_dir};
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard, OwnedSemaphorePermit, mpsc, watch};
 use tokio::task::{JoinError, JoinSet};
 
@@ -242,7 +242,18 @@ impl Coordinator {
     ) -> Result<(CoordinatorStore, ResourceStore), CoordinatorError> {
         CoordinatorOptions::check_limit(options.max_invocations)?;
         let keys = middleware.iter().map(|item| item.key()).collect();
-        let logs = runtime.open(RunAccess::Create).await?;
+        // A crash can cut a creation short before `run.started`: the key is
+        // stored with an empty log, and creating under it takes it over.
+        let logs = match runtime.open(RunAccess::Create).await {
+            Err(exists @ store::StoreError::Exists { .. }) => {
+                let logs = runtime.open(RunAccess::Write).await?;
+                if !logs.read(&LogId::Coordinator).await?.is_empty() {
+                    return Err(exists.into());
+                }
+                logs
+            }
+            created => created?,
+        };
         let clock = runtime.recording_clock();
         let store = CoordinatorStore::create_with_clock(
             logs.clone(),
