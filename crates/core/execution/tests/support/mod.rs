@@ -18,9 +18,10 @@ use std::time::Duration;
 use std::{fmt, fs};
 
 use execution::{
-    AttemptAdmission, CallSite, CoordinatorInvocationClient, GraphDigest, InvocationClient as _,
-    InvocationRequest, InvocationResult, LeaseState, LogId, MemoryRunStore, PendingIntent,
-    ResourceLogRecord, RunKey, RunStore as _, SandboxMode, SandboxResourceRecord, SecretBindings,
+    AttemptAdmission, CallSite, CoordinatorInvocationClient, GraphDigest, InterviewReply,
+    InterviewRequest, Interviewer, InvocationClient as _, InvocationRequest, InvocationResult,
+    LeaseState, LogId, MemoryRunStore, PendingIntent, ResourceLogRecord, RunKey, RunStore as _,
+    SandboxMode, SandboxResourceRecord, SecretBindings,
 };
 use executor::Retention;
 use executor_sandbox::{InProcessProviders, LostSandbox, SandboxBackend, SandboxOptions};
@@ -28,13 +29,14 @@ use ir::{FailureInfo, Graph, Outcome, RunStatus, Status, StepKindId};
 use runtime::{RunOptions, Runtime};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use steps::{Step, StepCtx};
+use steps::{Answer, Step, StepCtx};
 use store::{Access, Digest, Record, RunLogs, StoreError};
 use testkit::RunDir;
 use testkit::sim::{Faults, LeaseRecords, LeaseView, MemoryLogs, World, sandboxed_registry};
 use tokio::runtime::Builder;
 use tokio::sync::Notify;
 use tokio::time::{self, Instant};
+use tokio_util::sync::CancellationToken;
 
 /// The recording clock's reading at the simulation's start, in milliseconds
 /// since the Unix epoch.
@@ -287,6 +289,37 @@ impl SimHost {
             coordinator,
             resources,
             executions,
+        }
+    }
+}
+
+/// The host's person, as the seed plays them: an answer after a short
+/// delay, or, for a question with a deadline, sometimes none at all, so the
+/// step's deadline expires. The roll is per execution, question and ask, so
+/// it does not depend on the order questions arrive in, and a question asked
+/// again after a crash is treated the same way.
+pub(crate) struct SimInterviewer {
+    pub seed: u64,
+}
+
+#[async_trait::async_trait]
+impl Interviewer for SimInterviewer {
+    async fn reply(&self, request: InterviewRequest, cancel: CancellationToken) -> InterviewReply {
+        let mut roll = self.seed ^ request.execution.raw().wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        for byte in request.question.id.bytes() {
+            roll = (roll ^ u64::from(byte)).wrapping_mul(0x0100_0000_01B3);
+        }
+        let roll = testkit::sim::Dice(roll ^ u64::from(request.ask)).roll(100);
+        if request.question.timeout_ms.is_some() && roll < 20 {
+            cancel.cancelled().await;
+            return InterviewReply::Cancelled;
+        }
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => InterviewReply::Cancelled,
+            () = time::sleep(Duration::from_millis(roll % 60)) => {
+                InterviewReply::Answered(Answer::text("go"))
+            }
         }
     }
 }

@@ -58,6 +58,7 @@ use std::future::{self, Future};
 use std::num::NonZeroU32;
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -70,8 +71,9 @@ use execution::host::{self, HostError, HostRun};
 use execution::watchdog::{StallWatchdog, WatchdogTask};
 use execution::{
     CoordinatorEvent, CoordinatorHandle, CoordinatorRecord, CoordinatorState, ExecutionId,
-    ExecutionObserver, GraphDigest, InvocationId, LeaseState, LogId, ResourceLogRecord,
-    RunStore as _, SandboxResourceRecord, read_coordinator_log, read_execution_log,
+    ExecutionObserver, GraphDigest, InterviewDispatcher, InterviewReceipt, InvocationId,
+    LeaseState, LogId, ResourceLogRecord, RunStore as _, SandboxResourceRecord,
+    read_coordinator_log, read_execution_log,
 };
 use executor::Retention;
 use executor_sandbox::LostSandbox;
@@ -81,9 +83,11 @@ use ir::{
 };
 use serde_json::{Value, json};
 use smol_str::SmolStr;
+use steps::{Answer, Question, QuestionExpired};
 use store::Access;
 use support::{
-    Call, INVOKE, Leases, SIMULATED_EPOCH_MS, SimHost, digest_of, received, run_key, run_paused,
+    Call, INVOKE, Leases, SIMULATED_EPOCH_MS, SimHost, SimInterviewer, digest_of, received,
+    run_key, run_paused,
 };
 use testkit::sim::{self, CallCrash, Dice, Faults, Moment, SANDBOXED, SandboxState, WorldSandbox};
 use tokio::sync::Notify;
@@ -138,6 +142,10 @@ fn sandboxed(dice: &mut Dice) -> StepRef {
     };
     let work_ms = [work(), work(), work()];
     let exits: Vec<i32> = (0..3).map(|_| i32::from(dice.chance(25))).collect();
+    // Some steps ask the host first; most of those give up waiting after a
+    // while.
+    let asks = dice.chance(12);
+    let ask_ms = dice.chance(70).then(|| 30 + dice.roll(90));
     StepRef::new(
         SANDBOXED,
         json!({
@@ -146,6 +154,8 @@ fn sandboxed(dice: &mut Dice) -> StepRef {
             "honor_term": !dice.chance(30),
             "wedged": wedged,
             "lines": dice.roll(3),
+            "asks": asks,
+            "ask_ms": ask_ms,
         }),
     )
 }
@@ -479,7 +489,6 @@ fn kind_of(record: &CoordinatorRecord) -> &'static str {
         CoordinatorEvent::RunNoteRecorded { .. } => "run.note.recorded",
         CoordinatorEvent::RunPaused => "run.paused",
         CoordinatorEvent::RunUnpaused => "run.unpaused",
-        _ => "other",
     }
 }
 
@@ -813,6 +822,9 @@ fn simulate_world(seed: u64) -> Outcome {
         let mut lifetime = 0_u32;
         let mut stored_at_start = BTreeMap::new();
         let mut started_at = BTreeMap::new();
+        // The interview receipt as the CLI keeps it on disk: written at each
+        // outcome, continued by the next lifetime.
+        let receipt: Arc<Mutex<Option<InterviewReceipt>>> = Arc::new(Mutex::new(None));
         let result = loop {
             let crash = plan.next();
             let notify = Arc::new(Notify::new());
@@ -844,9 +856,30 @@ fn simulate_world(seed: u64) -> Outcome {
             *controls_now.lock().unwrap_or_else(PoisonError::into_inner) = Some(controls.clone());
             let watchdog = workload.stall.map(StallWatchdog::new);
             let watchdog_task: Arc<Mutex<Option<WatchdogTask>>> = Arc::new(Mutex::new(None));
+            let alive = Arc::new(AtomicBool::new(true));
+            let earlier = receipt
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            let dispatcher =
+                InterviewDispatcher::continuing(Arc::new(SimInterviewer { seed }), earlier);
+            {
+                let receipt = Arc::clone(&receipt);
+                let alive = Arc::clone(&alive);
+                dispatcher.publish_to(Arc::new(move |published: &InterviewReceipt| {
+                    // A dead process writes nothing.
+                    if alive.load(Ordering::Acquire) {
+                        *receipt.lock().unwrap_or_else(PoisonError::into_inner) =
+                            Some(published.clone());
+                    }
+                }));
+            }
             let runtime = sim.runtime().hooks(controls.hooks(None));
-            let mut observers: Vec<Arc<dyn ExecutionObserver>> =
-                vec![watch, Arc::new(controls.clone())];
+            let mut observers: Vec<Arc<dyn ExecutionObserver>> = vec![
+                watch,
+                Arc::new(controls.clone()),
+                Arc::new(dispatcher.clone()),
+            ];
             if let Some(watchdog) = &watchdog {
                 observers.push(Arc::new(watchdog.clone()));
             }
@@ -855,9 +888,11 @@ fn simulate_world(seed: u64) -> Outcome {
                 let controls = controls.clone();
                 let watchdog = watchdog.clone();
                 let watchdog_task = Arc::clone(&watchdog_task);
-                move |handle: CoordinatorHandle, _| {
+                let dispatcher = dispatcher.clone();
+                move |handle: CoordinatorHandle, secrets| {
                     *current.lock().unwrap_or_else(PoisonError::into_inner) = Some(handle.clone());
                     controls.wire(handle.clone());
+                    dispatcher.wire(handle.clone(), secrets);
                     if let Some(watchdog) = &watchdog {
                         *watchdog_task.lock().unwrap_or_else(PoisonError::into_inner) =
                             Some(watchdog.start(handle));
@@ -920,6 +955,8 @@ fn simulate_world(seed: u64) -> Outcome {
                 if watchdog.as_ref().and_then(StallWatchdog::tripped).is_some() {
                     *stats.entry("stall cancels").or_default() += 1;
                 }
+                let finished = dispatcher.shutdown().await;
+                *receipt.lock().unwrap_or_else(PoisonError::into_inner) = Some(finished);
                 break result;
             }
             // The crash: the lifetime is dead before its drivers drop, so no
@@ -944,6 +981,7 @@ fn simulate_world(seed: u64) -> Outcome {
             sim.world.begin_lifetime(finished, stopping);
             *current.lock().unwrap_or_else(PoisonError::into_inner) = None;
             *controls_now.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            alive.store(false, Ordering::Release);
             // The process died: its watchdog with it.
             drop(
                 watchdog_task
@@ -970,12 +1008,17 @@ fn simulate_world(seed: u64) -> Outcome {
         if let Err(error) = &result {
             violations.push(format!("the run ended with an error: {error}"));
         }
+        let receipt = receipt
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         check(
             &sim,
             &workload,
             &seen,
             &stored_at_start,
             &started_at,
+            receipt.as_ref(),
             &mut stats,
             &mut violations,
         )
@@ -1041,6 +1084,7 @@ async fn check(
     seen: &Mutex<Vec<(u32, u64, &'static str)>>,
     stored_at_start: &BTreeMap<u32, u64>,
     started_at: &BTreeMap<u32, u64>,
+    receipt: Option<&InterviewReceipt>,
     stats: &mut BTreeMap<&'static str, u64>,
     violations: &mut Vec<String>,
 ) {
@@ -1396,10 +1440,74 @@ async fn check(
     let paused_at = |at: u64| windows.iter().any(|(from, to)| at > *from && at < *to);
     let mut activity: Vec<u64> = records.iter().map(|record| record.recorded_at).collect();
     activity.extend(started_at.values().copied());
+    // Questions: each answer names a question its firing asked, no question
+    // is answered more often than it was asked, and the times a question
+    // waited on the host park the watchdog.
+    let mut waiting: Vec<(u64, u64)> = Vec::new();
     for execution in state.executions.keys() {
         let Ok(decoded) = read_execution_log(&*logs, *execution).await else {
             continue;
         };
+        let mut open: BTreeMap<(u64, String), u64> = BTreeMap::new();
+        let mut asks: BTreeMap<(u64, String), usize> = BTreeMap::new();
+        let mut answers: BTreeMap<(u64, String), usize> = BTreeMap::new();
+        for (record, at) in decoded.log.records().iter().zip(&decoded.recorded_at) {
+            match &record.event {
+                Event::StepProgressRecorded { firing, ev } => {
+                    if let Some(question) = Question::from_event(ev) {
+                        let key = (firing.raw(), question.id);
+                        *asks.entry(key.clone()).or_default() += 1;
+                        open.entry(key).or_insert(*at);
+                        *stats.entry("questions").or_default() += 1;
+                    } else if let Some(expired) = QuestionExpired::from_event(ev) {
+                        *stats.entry("expired questions").or_default() += 1;
+                        if let Some(from) = open.remove(&(firing.raw(), expired.question)) {
+                            waiting.push((from, *at));
+                        }
+                    }
+                }
+                Event::ControlRequested {
+                    firing,
+                    ctl: ir::Control::Deliver(value),
+                } => {
+                    if let Some(id) = Answer::from_value(value).and_then(|answer| answer.question) {
+                        let key = (firing.raw(), id);
+                        *stats.entry("answers").or_default() += 1;
+                        if !asks.contains_key(&key) {
+                            violations.push(format!(
+                                "execution {execution} answered {key:?}, which it never asked"
+                            ));
+                        }
+                        *answers.entry(key.clone()).or_default() += 1;
+                        if let Some(from) = open.remove(&key) {
+                            waiting.push((from, *at));
+                        }
+                    }
+                }
+                Event::StepFinished { firing, .. } => {
+                    let ended: Vec<_> = open
+                        .keys()
+                        .filter(|(asker, _)| *asker == firing.raw())
+                        .cloned()
+                        .collect();
+                    for key in ended {
+                        if let Some(from) = open.remove(&key) {
+                            waiting.push((from, *at));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (key, count) in &answers {
+            let asked = asks.get(key).copied().unwrap_or_default();
+            if *count > asked {
+                violations.push(format!(
+                    "execution {execution} answered {key:?} {count} times, asked {asked} times"
+                ));
+            }
+        }
+        waiting.extend(open.values().map(|from| (*from, u64::MAX)));
         for (record, at) in decoded.log.records().iter().zip(&decoded.recorded_at) {
             activity.push(*at);
             if let Event::AdmissionDecided {
@@ -1444,6 +1552,58 @@ async fn check(
             }
             if paused_at(at) {
                 violations.push(format!("the watchdog cancelled at {at}, while paused"));
+            }
+            if waiting.iter().any(|(from, to)| at > *from && at < *to) {
+                violations.push(format!(
+                    "the watchdog cancelled at {at}, while a question waited on the host"
+                ));
+            }
+        }
+    }
+
+    // The receipt: every question is filed under the invocation that asked
+    // it, at that invocation's path, through every resume.
+    if let Some(receipt) = receipt {
+        let mut paths: BTreeMap<InvocationId, String> = BTreeMap::new();
+        paths.insert(InvocationId::ROOT, "/".to_owned());
+        for (invocation, declared) in &state.invocations {
+            if let Some(call) = &declared.declaration.call {
+                let parent = state
+                    .executions
+                    .get(&call.parent)
+                    .and_then(|parent| paths.get(&parent.declaration.invocation))
+                    .cloned()
+                    .unwrap_or_else(|| "/".to_owned());
+                let path = if parent == "/" {
+                    format!("/{}", call.slot)
+                } else {
+                    format!("{parent}/{}", call.slot)
+                };
+                paths.insert(*invocation, path);
+            }
+        }
+        for question in &receipt.questions {
+            let invocation = state
+                .executions
+                .get(&question.execution)
+                .map(|declared| declared.declaration.invocation);
+            if invocation != Some(question.invocation)
+                || paths.get(&question.invocation) != Some(&question.invocation_path)
+            {
+                violations.push(format!(
+                    "the receipt files `{}` of execution {} under invocation {} at {}; it \
+                     belongs to {invocation:?} at {:?}",
+                    question.question,
+                    question.execution,
+                    question.invocation,
+                    question.invocation_path,
+                    invocation.and_then(|invocation| paths.get(&invocation))
+                ));
+            }
+            if question.lifetime < receipt.lifetime {
+                *stats
+                    .entry("receipt questions kept across a resume")
+                    .or_default() += 1;
             }
         }
     }
@@ -1715,6 +1875,10 @@ fn seeded_runs_keep_the_execution_rules() {
             "pauses",
             "crashes while paused",
             "stall cancels",
+            "questions",
+            "answers",
+            "expired questions",
+            "receipt questions kept across a resume",
         ] {
             assert!(
                 totals.get(key).copied().unwrap_or_default() > 0,
