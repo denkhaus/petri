@@ -8,8 +8,13 @@
 //! retention says, and refuses or replaces a sandbox lost from outside. It
 //! plans the host's cancels (the root, a second root cancel that kills, a
 //! child invocation) and up to three crashes: at a virtual time, right
-//! after a chosen coordinator record or resource record, or at a provider
-//! call, before its effect or after it. Then it runs the real coordinator
+//! after a chosen coordinator record or resource record, at a provider
+//! call, before its effect or after it, or at a store fault: one append to
+//! the coordinator, resource or an engine log fails, before its records are
+//! stored or after (a lost reply), and sometimes the store stays down for
+//! the rest of the lifetime. A store fault ends the lifetime with the run's
+//! error, and the host resumes; a run whose creation it cut short is started
+//! again under its key. Then it runs the real coordinator
 //! through the host wrappers on a single-threaded runtime whose clock
 //! starts paused, with the runtime's own lease router in front of the
 //! world's sandbox provider. A crash drops the host future: the
@@ -20,7 +25,8 @@
 //! its router reconciles, fences and releases what the last one left. The
 //! oracles:
 //!
-//! - the run ends, well within a bound, with a result, not an error;
+//! - the run ends, well within a bound, with a result, not an error (a store
+//!   fault's error ends only its lifetime);
 //! - the coordinator log replays, and `run.finished` appears once, with the
 //!   root result's status;
 //! - every declared execution finishes, its engine log replays byte for byte,
@@ -86,8 +92,8 @@ use smol_str::SmolStr;
 use steps::{Answer, Question, QuestionExpired};
 use store::Access;
 use support::{
-    Call, INVOKE, Leases, SIMULATED_EPOCH_MS, SimHost, SimInterviewer, digest_of, received,
-    run_key, run_paused,
+    Call, FaultLog, INVOKE, Leases, SIMULATED_EPOCH_MS, SimHost, SimInterviewer, StoreFault,
+    digest_of, received, run_key, run_paused,
 };
 use testkit::sim::{self, CallCrash, Dice, Faults, Moment, SANDBOXED, SandboxState, WorldSandbox};
 use tokio::sync::Notify;
@@ -417,6 +423,9 @@ enum Crash {
     /// Right after the `nth` resource record of this kind the lifetime
     /// appends.
     Resource { kind: &'static str, nth: usize },
+    /// A store fault: one append fails, and the host resumes when the run
+    /// ends with the error.
+    Store(StoreFault),
 }
 
 fn pick<T: Copy>(dice: &mut Dice, choices: &[T]) -> T {
@@ -428,7 +437,7 @@ fn crashes(dice: &mut Dice) -> Vec<Crash> {
     (0..count)
         .map(|_| {
             let nth = usize::try_from(dice.roll(3)).expect("small");
-            match dice.roll(10) {
+            match dice.roll(12) {
                 0..=2 => Crash::At(Duration::from_millis(dice.roll(200))),
                 3..=5 => Crash::After {
                     kind: pick(dice, &RECORD_KINDS),
@@ -443,13 +452,29 @@ fn crashes(dice: &mut Dice) -> Vec<Crash> {
                         Moment::After
                     },
                 }),
-                _ => Crash::Resource {
+                8 | 9 => Crash::Resource {
                     kind: pick(dice, &RESOURCE_KINDS),
                     nth,
                 },
+                _ => Crash::Store(store_fault(dice)),
             }
         })
         .collect()
+}
+
+/// A store fault: one append of a log's kind fails, before its records are
+/// stored or after (a lost reply), and sometimes the store stays down.
+fn store_fault(dice: &mut Dice) -> StoreFault {
+    StoreFault {
+        log:        pick(dice, &[
+            FaultLog::Coordinator,
+            FaultLog::Resources,
+            FaultLog::Execution,
+        ]),
+        nth:        usize::try_from(dice.roll(4)).expect("small"),
+        lost_reply: dice.chance(50),
+        down:       dice.chance(30),
+    }
 }
 
 /// How the seed's run keeps its sandboxes, and how often someone outside
@@ -802,6 +827,10 @@ fn simulate_world(seed: u64) -> Outcome {
             nth:  0,
         });
     }
+    // A store fault is worth planning first: the first lifetime reaches it.
+    if dice.chance(25) {
+        crashes.insert(0, Crash::Store(store_fault(&mut dice)));
+    }
     let (leases, lose) = leases(&mut dice);
     trace(|| {
         format!(
@@ -859,6 +888,10 @@ fn simulate_world(seed: u64) -> Outcome {
                     _ => None,
                 },
                 Arc::clone(&notify),
+                match crash {
+                    Some(Crash::Store(fault)) => Some(fault),
+                    _ => None,
+                },
             );
             // The host services a CLI process installs, one set per
             // lifetime.
@@ -924,20 +957,32 @@ fn simulate_world(seed: u64) -> Outcome {
             // A crash before the run was stored leaves nothing to resume: the
             // host starts it again.
             let created = lifetime > 0 && sim.store.open(&run_key(), Access::Read).await.is_ok();
-            let mut run: HostRunFuture<'_> = if created {
-                Box::pin(host::resume_configured(
-                    &runtime,
-                    Vec::new(),
-                    observers,
-                    hand,
-                ))
-            } else {
-                let mut run =
-                    HostRun::new(workload.root.clone()).with_children(workload.children.clone());
-                for observer in observers {
-                    run = run.observe(observer);
+            // A run whose creation was cut short is refused as never
+            // started: the host starts it again under the same key.
+            let start = {
+                let runtime = &runtime;
+                let observers = observers.clone();
+                let hand = hand.clone();
+                let workload = &workload;
+                move || {
+                    let mut run = HostRun::new(workload.root.clone())
+                        .with_children(workload.children.clone());
+                    for observer in observers {
+                        run = run.observe(observer);
+                    }
+                    host::run_configured(runtime, run, hand)
                 }
-                Box::pin(host::run_configured(&runtime, run, hand))
+            };
+            let mut run: HostRunFuture<'_> = if created {
+                let resumed = host::resume_configured(&runtime, Vec::new(), observers, hand);
+                Box::pin(async move {
+                    match resumed.await {
+                        Err(HostError::NotStarted) => start().await,
+                        resumed => resumed,
+                    }
+                })
+            } else {
+                Box::pin(start())
             };
             let crash_now = async {
                 match crash {
@@ -945,7 +990,7 @@ fn simulate_world(seed: u64) -> Outcome {
                     Some(Crash::After { .. } | Crash::Call(_) | Crash::Resource { .. }) => {
                         notify.notified().await;
                     }
-                    None => future::pending().await,
+                    Some(Crash::Store(_)) | None => future::pending().await,
                 }
             };
             let ended: Option<Result<RunStatus, String>> = tokio::select! {
@@ -960,7 +1005,22 @@ fn simulate_world(seed: u64) -> Outcome {
                     Some(Err(format!("the run did not end within {DEADLINE:?}")))
                 }
             };
-            if let Some(result) = ended {
+            // A store fault ends a lifetime with the run's error: the host
+            // process exits, and the next one resumes the run.
+            let faulted = sim.watched.fault_fired();
+            if faulted {
+                *stats.entry("store faults").or_default() += 1;
+                if let Some(Crash::Store(fault)) = crash {
+                    if fault.lost_reply {
+                        *stats.entry("lost replies").or_default() += 1;
+                    }
+                    if fault.down {
+                        *stats.entry("stores down").or_default() += 1;
+                    }
+                }
+            }
+            let fault_ended = faulted && matches!(ended, Some(Err(_)));
+            if let Some(result) = ended.clone().filter(|_| !fault_ended) {
                 let task = watchdog_task
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -975,16 +1035,21 @@ fn simulate_world(seed: u64) -> Outcome {
                 *receipt.lock().unwrap_or_else(PoisonError::into_inner) = Some(finished);
                 break result;
             }
-            // The crash: the lifetime is dead before its drivers drop, so no
-            // release of theirs reaches the world.
-            *stats.entry("crashes").or_default() += 1;
+            // The crash, or the fault's end: the lifetime is dead before its
+            // drivers drop, so no release of theirs reaches the world.
+            if fault_ended {
+                *stats.entry("lifetimes a store fault ended").or_default() += 1;
+                trace(|| format!("store fault ended the lifetime: {ended:?}"));
+            } else {
+                *stats.entry("crashes").or_default() += 1;
+            }
             match crash {
                 Some(Crash::After { kind, .. }) => *stats.entry(kind).or_default() += 1,
                 Some(Crash::Call(_)) => *stats.entry("crashes at provider calls").or_default() += 1,
                 Some(Crash::Resource { .. }) => {
                     *stats.entry("crashes after resource records").or_default() += 1;
                 }
-                _ => {}
+                Some(Crash::Store(_) | Crash::At(_)) | None => {}
             }
             let progress = stored_progress(&sim, &workload).await.unwrap_or_default();
             if progress.root_done {
@@ -1960,6 +2025,10 @@ fn seeded_runs_keep_the_execution_rules() {
             "receipt questions kept across a resume",
             "run notes",
             "repeated run notes",
+            "store faults",
+            "lifetimes a store fault ended",
+            "lost replies",
+            "stores down",
         ] {
             assert!(
                 totals.get(key).copied().unwrap_or_default() > 0,
