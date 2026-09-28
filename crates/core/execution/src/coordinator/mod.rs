@@ -135,6 +135,10 @@ pub enum CoordinatorError {
     },
     #[error("execution task failed: {0}")]
     ExecutionTask(#[from] JoinError),
+    /// A write to the run's store failed: this lifetime ends, recording
+    /// nothing more, and the next resumes from what the store holds.
+    #[error("the run's store failed: {0}")]
+    StoreFailed(String),
     #[error("a resolved secret appears in durable invocation data")]
     SecretInDurableData,
     #[error("could not inspect durable invocation data: {0}")]
@@ -268,6 +272,12 @@ impl Coordinator {
         };
         let coordinator = Self::assemble(store, resources, runtime, middleware, options, true);
         coordinator.reconcile_leases().await;
+        // A lease record reconciliation could not write ends the lifetime
+        // before anything runs.
+        if let Err(error) = coordinator.check_store() {
+            coordinator.runtime.finish().await;
+            return Err(error);
+        }
         Ok(coordinator)
     }
 
@@ -329,9 +339,9 @@ impl Coordinator {
         let (admit_tx, admit_rx) = mpsc::unbounded_channel();
         // The records are the executor's ledger from here on: every
         // container scope it allocates is written here before it exists.
-        let resources = Arc::new(AsyncMutex::new(resources));
-        runtime.attach_lease_ledger(Arc::new(ResourceLedger::new(resources.clone())));
         let writer = StoreWriter::start(store.logs());
+        let resources = Arc::new(AsyncMutex::new(resources.with_failure(writer.failure())));
+        runtime.attach_lease_ledger(Arc::new(ResourceLedger::new(resources.clone())));
         Self {
             store,
             writer,
@@ -591,6 +601,7 @@ impl Coordinator {
             self.start_invocation(InvocationId::ROOT, running).await?;
         }
 
+        let failure = self.writer.failure();
         loop {
             if self.live.is_empty()
                 && let Some(result) = self.store.state().invocations[&InvocationId::ROOT]
@@ -599,10 +610,14 @@ impl Coordinator {
             {
                 return Ok(result);
             }
-            // In a fixed order, so the same inputs append the same records:
-            // the host's commands first, then what ended, then new work.
+            // In a fixed order, so the same inputs append the same records: a
+            // failed store write first, since it ends the lifetime, then the
+            // host's commands, then what ended, then new work.
             tokio::select! {
                 biased;
+                first = failure.wait() => {
+                    return Err(CoordinatorError::StoreFailed(first.to_owned()));
+                }
                 cancelled = self.cancel_rx.recv() => {
                     if let Some(cancelled) = cancelled {
                         self.handle_cancel(cancelled).await?;
@@ -905,6 +920,9 @@ impl Coordinator {
         execution: ExecutionId,
         report: &driver::ExecutionReport,
     ) -> Result<(), CoordinatorError> {
+        if let Some(message) = &report.store_failure {
+            return Err(CoordinatorError::StoreFailed(message.clone()));
+        }
         if let Some(error) = report.observer_errors.first() {
             return Err(CoordinatorError::EventWriter {
                 execution,
@@ -1064,7 +1082,7 @@ impl Coordinator {
         let fold = Arc::new(pipeline.fold_observer());
         let mut driver = driver
             .with_run_owner(invocation == InvocationId::ROOT)
-            .observe(writer.clone())
+            .observe_run_log(writer.clone())
             .observe(fold)
             .with_decision_resolver(pipeline.clone())
             .with_capability(client)
@@ -1137,15 +1155,34 @@ impl Coordinator {
         }
     }
 
+    /// Append a record, unless a write to the run's store has failed: the
+    /// lifetime ends at the first failure, and records nothing after it.
     async fn append(
         &mut self,
         event: CoordinatorEvent,
     ) -> Result<CoordinatorRecord, CoordinatorError> {
-        let record = self.store.append(event).await?;
+        self.check_store()?;
+        let record = match self.store.append(event).await {
+            Ok(record) => record,
+            Err(error) => {
+                self.writer
+                    .failure()
+                    .trip(format!("could not append to the coordinator log: {error}"));
+                return Err(error.into());
+            }
+        };
         for observer in &self.observers {
             observer.on_lifecycle(&record);
         }
         Ok(record)
+    }
+
+    /// The run's first failed write, as the error that ends the lifetime.
+    fn check_store(&self) -> Result<(), CoordinatorError> {
+        match self.writer.failure().get() {
+            Some(first) => Err(CoordinatorError::StoreFailed(first.to_owned())),
+            None => Ok(()),
+        }
     }
 
     fn refuse_secret<T: serde::Serialize>(&self, value: &T) -> Result<(), CoordinatorError> {

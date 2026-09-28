@@ -308,8 +308,12 @@ impl SandboxLeaseManager {
         )
     }
 
+    /// A lease record the ledger could not write: the run's store failed,
+    /// not the provider.
     fn ledger_failed(error: &LedgerError) -> EnvError {
-        EnvError::backend(BACKEND, "lease", error.to_string())
+        EnvError::Store {
+            message: error.to_string(),
+        }
     }
 
     /// The sandbox for `request.lease`, allocating, attaching, or reusing

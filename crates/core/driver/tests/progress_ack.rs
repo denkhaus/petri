@@ -19,7 +19,7 @@ use serde_json::json;
 use steps::{ProgressError, Registry};
 use support::*;
 use tokio::sync::watch;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
 // ── A durable store whose writer can lag the driver ────────────────────────
 
@@ -107,6 +107,28 @@ impl GatedStore {
             .expect("not poisoned")
             .iter()
             .any(|record| marker_of(&record.event) == Some(n))
+    }
+
+    /// Whether a pending (appended, not persisted) record matches.
+    fn has_pending_event(&self, matches: impl Fn(&Event) -> bool) -> bool {
+        self.pending
+            .lock()
+            .expect("not poisoned")
+            .iter()
+            .any(|record| matches(&record.event))
+    }
+
+    /// Wait until the driver has handed the store a record that matches,
+    /// which the store holds unwritten.
+    async fn wait_pending_event(&self, matches: impl Fn(&Event) -> bool) {
+        let mut pending = self.pending_len.subscribe();
+        timeout(
+            Duration::from_secs(10),
+            pending.wait_for(|_| self.has_pending_event(&matches)),
+        )
+        .await
+        .expect("the driver appends within the deadline")
+        .expect("the store outlives the wait");
     }
 
     /// Wait until the driver has appended the record with marker `n` and
@@ -473,4 +495,75 @@ async fn without_observers_the_append_is_the_acknowledgement() {
     );
     assert_eq!(markers(&report.state.log), vec![1]);
     assert_eq!(output_of(&report, "work"), Value::from("acked"));
+}
+
+/// The run log gates a scope: its first attempt starts only once the run
+/// log holds the scope's `scope.acquired`, so a `scope_released` point
+/// that runs later is always found again on resume.
+#[tokio::test]
+async fn a_scope_starts_nothing_before_the_run_log_holds_its_acquisition() {
+    let dir = RunDir::new("ack-scope-stored");
+    let store = GatedStore::new(false);
+    let step = Arc::new(AckingStep {
+        store:            store.clone(),
+        persisted_at_ack: Arc::new(Mutex::new(Vec::new())),
+    });
+    let driver = host_driver_full(
+        one_node(ACKING),
+        &dir,
+        MapSecrets::empty(),
+        RunConfig::new(dir.path()),
+        registry_with(step),
+    )
+    .observe_run_log(store.clone() as Arc<dyn EventObserver>);
+    let run = tokio::spawn(driver.run());
+
+    store
+        .wait_pending_event(|event| matches!(event, Event::ScopeAcquired { .. }))
+        .await;
+    sleep(Duration::from_millis(50)).await;
+    assert!(
+        !store.has_pending_event(|event| matches!(event, Event::StepStarted { .. })),
+        "no attempt started before the run log held the acquisition"
+    );
+
+    store.open();
+    let report = timeout(Duration::from_secs(10), run)
+        .await
+        .expect("the run ends once the store writes")
+        .expect("the run task finished");
+    assert_eq!(report.status, RunStatus::Success);
+    assert_eq!(report.store_failure, None);
+}
+
+/// A run log that cannot store the scope's acquisition stops the run there:
+/// nothing starts in the scope, and nothing fails for it.
+#[tokio::test]
+async fn a_run_log_that_cannot_store_the_acquisition_stops_the_run() {
+    let dir = RunDir::new("ack-scope-unstored");
+    let store = GatedStore::failing();
+    let step = Arc::new(AckingStep {
+        store:            store.clone(),
+        persisted_at_ack: Arc::new(Mutex::new(Vec::new())),
+    });
+    let report = host_driver_full(
+        one_node(ACKING),
+        &dir,
+        MapSecrets::empty(),
+        RunConfig::new(dir.path()),
+        registry_with(step),
+    )
+    .observe_run_log(store.clone() as Arc<dyn EventObserver>)
+    .await_run()
+    .await;
+
+    let failure = report.store_failure.expect("the run stopped for its store");
+    assert!(failure.contains("the write failed"), "{failure}");
+    assert!(
+        !report.state.log.events().any(|event| matches!(
+            event,
+            Event::StepStarted { .. } | Event::StepFinished { .. } | Event::ScopeFailed { .. }
+        )),
+        "nothing started or failed after the store failed"
+    );
 }
