@@ -343,7 +343,11 @@ against.
    in `RunOptions::run_key`, or the run directory) and reacquires held
    sandboxes, reconciling every lease with the provider by label before any
    create; Fabro restores what it owns (a Git-backed workspace, pending
-   questions in its UI) from the identities above, then resumes. Known limits: a retained
+   questions in its UI) from the identities above, then resumes. A run whose
+   creation a crash cut short (stored, with no root invocation declared) is
+   refused as `HostError::NotStarted`; start it again with
+   `host::run_configured` under the same key, which finishes the creation.
+   Known limits: a retained
    thread is not durable across resume (the node starts a fresh session with
    Fabro's discarded-session rule), a pause does not survive resume (a
    resumed run starts unpaused), a model request in flight at the crash may
