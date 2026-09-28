@@ -297,11 +297,12 @@ impl SimHost {
     }
 }
 
-/// The host's person, as the seed plays them: an answer after a short
-/// delay, or, for a question with a deadline, sometimes none at all, so the
-/// step's deadline expires. The roll is per execution, question and ask, so
-/// it does not depend on the order questions arrive in, and a question asked
-/// again after a crash is treated the same way.
+/// The host's person, as the seed plays them. Most answer after a short
+/// delay. Some take longer than the stall budget, so the watchdog must stay
+/// parked. For a question with a deadline, some never answer, so the step's
+/// deadline expires. The roll is per execution, question and ask, so it does
+/// not depend on the order questions arrive in, and a question asked again
+/// after a crash is treated the same way.
 pub(crate) struct SimInterviewer {
     pub seed: u64,
 }
@@ -318,10 +319,15 @@ impl Interviewer for SimInterviewer {
             cancel.cancelled().await;
             return InterviewReply::Cancelled;
         }
+        let delay = if roll >= 75 {
+            150 + (roll - 75) * 8
+        } else {
+            roll % 60
+        };
         tokio::select! {
             biased;
             () = cancel.cancelled() => InterviewReply::Cancelled,
-            () = time::sleep(Duration::from_millis(roll % 60)) => {
+            () = time::sleep(Duration::from_millis(delay)) => {
                 InterviewReply::Answered(Answer::text("go"))
             }
         }

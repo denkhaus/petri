@@ -129,8 +129,10 @@ the interview dispatcher carries questions to an interviewer that answers or
 lets them expire, and run-level hooks note the run's end and each release.
 
 `mise run test` runs 128 and 64 seeds, each in a few seconds at most, and
-`mise run test:dst`, part of the nightly gate, runs 50,000 and 20,000. To
-run another number, or to replay a failing seed with a trace of what it did:
+`mise run test:dst`, part of the nightly gate, runs 50,000 and 20,000. The
+execution layer also runs a tenth of its seeds, at least 128, twice, and
+compares their logs byte for byte. To run another number, or to replay a
+failing seed with a trace of what it did:
 
 ```sh
 PETRI_DST_SEEDS=2000 cargo nextest run -p petri-driver --test simulation

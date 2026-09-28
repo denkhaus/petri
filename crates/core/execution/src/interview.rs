@@ -701,7 +701,10 @@ impl Inner {
             lifetime:        self.lifetime,
         };
         let question = request.question.clone();
+        // A reply ready in the same poll as the close wins, and is recorded
+        // below as late: the same way on every run.
         let reply = tokio::select! {
+            biased;
             reply = self.interviewer.reply(request, cancel.clone()) => Some(reply),
             () = cancel.cancelled() => None,
         };

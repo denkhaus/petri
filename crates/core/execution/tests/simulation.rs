@@ -46,9 +46,9 @@
 //!   lifetime, again after it finished, or while it was stopping;
 //! - observers see each lifetime's coordinator records in order, without gaps.
 //!
-//! `PETRI_DST_SEEDS` sets how many seeds run (64 by default);
-//! `PETRI_DST_SEED` runs one, to replay a failure, and `PETRI_DST_TRACE=1`
-//! prints what it did.
+//! `PETRI_DST_SEEDS` sets how many seeds run (64 by default), and a tenth as
+//! many, at least 128, run twice to compare their logs; `PETRI_DST_SEED`
+//! runs one, to replay a failure, and `PETRI_DST_TRACE=1` prints what it did.
 
 mod support;
 
@@ -1458,9 +1458,10 @@ async fn check(
     let paused_at = |at: u64| windows.iter().any(|(from, to)| at > *from && at < *to);
     let mut activity: Vec<u64> = records.iter().map(|record| record.recorded_at).collect();
     activity.extend(started_at.values().copied());
-    // Questions: each answer names a question its firing asked, no question
-    // is answered more often than it was asked, and the times a question
-    // waited on the host park the watchdog.
+    // Questions: each answer names a question its firing asked, reaches the
+    // log no later than the firing's end (the same instant is a race the
+    // driver refuses), no question is answered more often than it was
+    // asked, and the times a question waited on the host park the watchdog.
     let mut waiting: Vec<(u64, u64)> = Vec::new();
     for execution in state.executions.keys() {
         let Ok(decoded) = read_execution_log(&*logs, *execution).await else {
@@ -1469,8 +1470,12 @@ async fn check(
         let mut open: BTreeMap<(u64, String), u64> = BTreeMap::new();
         let mut asks: BTreeMap<(u64, String), usize> = BTreeMap::new();
         let mut answers: BTreeMap<(u64, String), usize> = BTreeMap::new();
+        let mut ended: BTreeMap<u64, u64> = BTreeMap::new();
         for (record, at) in decoded.log.records().iter().zip(&decoded.recorded_at) {
             match &record.event {
+                Event::StepStarted { firing, .. } => {
+                    ended.remove(&firing.raw());
+                }
                 Event::StepProgressRecorded { firing, ev } => {
                     if let Some(question) = Question::from_event(ev) {
                         let key = (firing.raw(), question.id);
@@ -1496,6 +1501,14 @@ async fn check(
                                 "execution {execution} answered {key:?}, which it never asked"
                             ));
                         }
+                        if let Some(end) = ended.get(&key.0)
+                            && end < at
+                        {
+                            violations.push(format!(
+                                "execution {execution} answered {key:?} at {at}, after the \
+                                 firing ended at {end}"
+                            ));
+                        }
                         *answers.entry(key.clone()).or_default() += 1;
                         if let Some(from) = open.remove(&key) {
                             waiting.push((from, *at));
@@ -1503,12 +1516,13 @@ async fn check(
                     }
                 }
                 Event::StepFinished { firing, .. } => {
-                    let ended: Vec<_> = open
+                    ended.insert(firing.raw(), *at);
+                    let asked: Vec<_> = open
                         .keys()
                         .filter(|(asker, _)| *asker == firing.raw())
                         .cloned()
                         .collect();
-                    for key in ended {
+                    for key in asked {
                         if let Some(from) = open.remove(&key) {
                             waiting.push((from, *at));
                         }
@@ -1955,10 +1969,16 @@ fn seeded_runs_keep_the_execution_rules() {
     }
 }
 
-/// A seed's run, crashes included, stores the same logs twice.
+/// A seed's run, crashes included, stores the same logs twice. Enough seeds
+/// that some hold several attempts at a pause, whose wake order must not
+/// vary.
 #[test]
 fn a_seeded_run_replays_byte_for_byte() {
-    for seed in 0..32 {
+    let count = env::var("PETRI_DST_SEEDS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(128, |count| (count / 10).max(128));
+    for seed in 0..count {
         assert_eq!(
             simulate_world(seed),
             simulate_world(seed),
