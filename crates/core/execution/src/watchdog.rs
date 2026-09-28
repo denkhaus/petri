@@ -109,7 +109,7 @@ impl StallWatchdog {
         });
         WatchdogTask {
             stop: self.stop.clone(),
-            task,
+            task: Some(task),
         }
     }
 
@@ -151,13 +151,23 @@ impl StallWatchdog {
 /// The running monitor. Stop it after the run; dropping it aborts the task.
 pub struct WatchdogTask {
     stop: CancellationToken,
-    task: JoinHandle<()>,
+    task: Option<JoinHandle<()>>,
 }
 
 impl WatchdogTask {
-    pub async fn stop(self) {
+    pub async fn stop(mut self) {
         self.stop.cancel();
-        let _ = self.task.await;
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for WatchdogTask {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
     }
 }
 
@@ -364,6 +374,28 @@ mod tests {
         watchdog.stop.cancel();
         task.await.expect("stopped");
         advance(Duration::from_secs(600)).await;
+        assert_eq!(fired.load(Ordering::SeqCst), 0);
+        assert!(watchdog.tripped().is_none());
+    }
+
+    /// A monitor whose task handle is dropped (a crashed host) ends with
+    /// it: it never fires into a run it no longer watches.
+    #[tokio::test(start_paused = true)]
+    async fn dropping_the_task_ends_the_monitor() {
+        let watchdog = StallWatchdog::new(Duration::from_secs(60));
+        let fired = Arc::new(AtomicUsize::new(0));
+        let task = WatchdogTask {
+            stop: watchdog.stop.clone(),
+            task: Some(run_monitor(
+                watchdog.inner.clone(),
+                watchdog.stop.clone(),
+                fired.clone(),
+            )),
+        };
+        yield_now().await;
+        drop(task);
+        advance(Duration::from_secs(600)).await;
+        yield_now().await;
         assert_eq!(fired.load(Ordering::SeqCst), 0);
         assert!(watchdog.tripped().is_none());
     }
