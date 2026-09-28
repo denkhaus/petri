@@ -56,7 +56,10 @@
 //! - the world's rules hold: no process outlives the run, none runs beside an
 //!   unfenced one a dead lifetime left, and no attempt runs twice in a
 //!   lifetime, again after it finished, or while it was stopping;
-//! - observers see each lifetime's coordinator records in order, without gaps.
+//! - observers see each lifetime's coordinator records in order, without gaps;
+//! - the store keeps its contract: every log reads back gapless, and no
+//!   coordinator record comes from two lifetimes (a zombie's writes are
+//!   refused).
 //!
 //! `PETRI_DST_SEEDS` sets how many seeds run (64 by default), and a tenth as
 //! many, at least 128, run twice to compare their logs; `PETRI_DST_SEED`
@@ -1597,6 +1600,47 @@ async fn check(
                     "lifetime {lifetime} observed {seqs:?}, from {start} in the store"
                 ));
             }
+        }
+    }
+
+    // The store's contract: every log reads back gapless, each record's seq
+    // its position, and no coordinator seq was observed from two lifetimes,
+    // as a write a zombie landed after its takeover would be.
+    {
+        let seen = seen.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut writers: BTreeMap<u64, u32> = BTreeMap::new();
+        for (lifetime, seq, _) in seen.iter() {
+            if let Some(earlier) = writers.insert(*seq, *lifetime)
+                && earlier != *lifetime
+            {
+                violations.push(format!(
+                    "coordinator seq {seq} was observed from lifetimes {earlier} and {lifetime}"
+                ));
+            }
+        }
+    }
+    let mut stored_logs = vec![LogId::Coordinator, LogId::Resources];
+    stored_logs.extend(
+        state
+            .executions
+            .keys()
+            .map(|execution| LogId::Execution(*execution)),
+    );
+    for log in stored_logs {
+        match logs.read(&log).await {
+            Ok(stored) => {
+                if let Some((at, record)) = stored
+                    .iter()
+                    .enumerate()
+                    .find(|(at, record)| record.seq != *at as u64)
+                {
+                    violations.push(format!(
+                        "the {log} log holds seq {} at position {at}",
+                        record.seq
+                    ));
+                }
+            }
+            Err(error) => violations.push(format!("the {log} log does not read: {error}")),
         }
     }
 
