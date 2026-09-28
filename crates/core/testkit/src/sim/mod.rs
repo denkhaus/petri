@@ -159,45 +159,48 @@ impl ProcessState {
 
 #[derive(Debug)]
 struct WorldState {
-    dice:          Dice,
-    faults:        Faults,
-    lifetime:      u32,
-    generations:   BTreeMap<SmolStr, u32>,
-    acquisitions:  Vec<Acquired>,
-    processes:     Vec<Ran>,
+    dice:           Dice,
+    faults:         Faults,
+    lifetime:       u32,
+    generations:    BTreeMap<SmolStr, u32>,
+    acquisitions:   Vec<Acquired>,
+    processes:      Vec<Ran>,
     /// `(execution, firing, attempt)` whose finish was in the logs the
     /// current lifetime resumed from.
-    finished:      BTreeSet<(SmolStr, u64, u32)>,
+    finished:       BTreeSet<(SmolStr, u64, u32)>,
     /// `(execution, firing)` a stop had reached, still stopping, in those
     /// logs.
-    stopping:      BTreeSet<(SmolStr, u64)>,
+    stopping:       BTreeSet<(SmolStr, u64)>,
     /// A sibling execution holds the attempt slot the driver shares with it.
-    sibling:       bool,
+    sibling:        bool,
     /// How often the sibling took the slot.
-    sibling_turns: usize,
+    sibling_turns:  usize,
     /// `(firing, attempt)` whose result preparation the host failed, fatally.
-    fatal:         BTreeSet<(u64, u32)>,
+    fatal:          BTreeSet<(u64, u32)>,
     /// Processes a fence ended.
-    fenced:        usize,
-    violations:    Vec<String>,
+    fenced:         usize,
+    violations:     Vec<String>,
     /// The provider's sandboxes, every one ever created, in creation order.
-    sandboxes:     Vec<WorldSandbox>,
+    sandboxes:      Vec<WorldSandbox>,
     /// Every provider call that changed a sandbox.
-    calls:         Vec<CallRecord>,
+    calls:          Vec<CallRecord>,
     /// Calls of each kind this lifetime, for the crash plan.
-    counts:        BTreeMap<Call, usize>,
+    counts:         BTreeMap<Call, usize>,
     /// Crash the lifetime at the `nth` call of a kind.
-    crash_at:      Option<(CallCrash, Arc<Notify>)>,
+    crash_at:       Option<(CallCrash, Arc<Notify>)>,
     /// Where provider calls read the run's lease records.
-    records:       Option<Arc<dyn LeaseRecords>>,
+    records:        Option<Arc<dyn LeaseRecords>>,
     /// Earlier lifetimes still running after their successor took the run:
     /// their calls go through. What a zombie does after the takeover is the
     /// documented hazard of releasing a live owner's lease: counted, not a
     /// violation.
-    zombies:       BTreeSet<u32>,
+    zombies:        BTreeSet<u32>,
     /// Provider calls and process starts a zombie made after the takeover.
-    zombie_calls:  usize,
-    zombie_starts: usize,
+    zombie_calls:   usize,
+    zombie_starts:  usize,
+    /// Sandboxes a zombie changed after the takeover: what the successor
+    /// finds in them is the zombie's doing.
+    zombie_touched: BTreeSet<String>,
 }
 
 /// The world a simulated run's drivers share.
@@ -231,6 +234,7 @@ impl World {
                 zombies: BTreeSet::new(),
                 zombie_calls: 0,
                 zombie_starts: 0,
+                zombie_touched: BTreeSet::new(),
             }),
         })
     }

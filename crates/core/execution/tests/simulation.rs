@@ -85,9 +85,9 @@ use execution::controls::ControlService;
 use execution::host::{self, HostError, HostRun};
 use execution::watchdog::{StallWatchdog, WatchdogTask};
 use execution::{
-    CoordinatorEvent, CoordinatorHandle, CoordinatorRecord, CoordinatorState, ExecutionId,
-    ExecutionObserver, GraphDigest, InterviewDispatcher, InterviewReceipt, InvocationId,
-    LeaseState, LogId, ResourceLogRecord, RunStore as _, SandboxResourceRecord,
+    CoordinatorEvent, CoordinatorHandle, CoordinatorRecord, CoordinatorState, Delivery,
+    ExecutionId, ExecutionObserver, GraphDigest, InterviewDispatcher, InterviewReceipt,
+    InvocationId, LeaseState, LogId, ResourceLogRecord, RunStore as _, SandboxResourceRecord,
     read_coordinator_log, read_execution_log,
 };
 use executor::Retention;
@@ -1683,8 +1683,20 @@ async fn check(
     activity.extend(started_at.values().copied());
     // Questions: each answer names a question its firing asked, reaches the
     // log no later than the firing's end (the same instant is a race the
-    // driver refuses), no question is answered more often than it was
-    // asked, and the times a question waited on the host park the watchdog.
+    // driver refuses; a later one is an answer the dispatcher sent while the
+    // firing lived, which a slow store held up, and the receipt says it was
+    // not live), no question is answered more often than it was asked, and
+    // the times a question waited on the host park the watchdog.
+    let not_live: BTreeSet<(ExecutionId, String)> = receipt
+        .map(|receipt| {
+            receipt
+                .questions
+                .iter()
+                .filter(|question| question.delivery == Delivery::NotLive)
+                .map(|question| (question.execution, question.question.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
     let mut waiting: Vec<(u64, u64)> = Vec::new();
     for execution in state.executions.keys() {
         let Ok(decoded) = read_execution_log(&*logs, *execution).await else {
@@ -1748,6 +1760,7 @@ async fn check(
                         }
                         if let Some(end) = ended.get(&key.0)
                             && end < at
+                            && !not_live.contains(&(*execution, key.1.clone()))
                         {
                             violations.push(format!(
                                 "execution {execution} answered {key:?} at {at}, after the \
@@ -1799,6 +1812,18 @@ async fn check(
                      while the run was paused ({windows:?})"
                 ));
             }
+        }
+    }
+    // A question waits on the host only while its lifetime lives: a resumed
+    // run that does not ask it again has nothing waiting.
+    for window in &mut waiting {
+        if let Some(next) = started_at
+            .values()
+            .copied()
+            .filter(|start| *start > window.0)
+            .min()
+        {
+            window.1 = window.1.min(next);
         }
     }
     // The watchdog: a stall cancel only after a whole budget with no
