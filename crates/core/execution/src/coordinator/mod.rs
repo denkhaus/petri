@@ -1176,12 +1176,14 @@ impl Coordinator {
         self.check_store()?;
         let record = match self.store.append(event).await {
             Ok(record) => record,
-            Err(error) => {
-                self.writer
-                    .failure()
-                    .trip(format!("could not append to the coordinator log: {error}"));
-                return Err(error.into());
+            // The backend failed the write: the lifetime ends, as at any
+            // failed store write. Any other refusal is the record's own.
+            Err(StoreError::Store(error)) => {
+                let message = format!("could not append to the coordinator log: {error}");
+                self.writer.failure().trip(message.clone());
+                return Err(CoordinatorError::StoreFailed(message));
             }
+            Err(error) => return Err(error.into()),
         };
         for observer in &self.observers {
             observer.on_lifecycle(&record);

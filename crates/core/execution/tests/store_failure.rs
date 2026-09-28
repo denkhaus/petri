@@ -4,7 +4,7 @@
 //! lease layer once turned a failed lease write into an acquire failure, so
 //! a store glitch failed the workflow.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use engine::Event;
@@ -16,12 +16,14 @@ use runtime::{RunOptions, Runtime};
 use store::{Access, Digest, LogId, MemoryRunStore, Record, RunKey, RunLogs, RunStore, StoreError};
 use testkit::{RunDir, add_script};
 
-/// The in-memory store, failing the first append to the resources log: the
-/// lease's reservation. A lost reply stores the record, then fails.
+/// The in-memory store, failing one append to `log`: the one at `fail_at`,
+/// counting from 0. A lost reply stores the record, then fails.
 struct FailingStore {
     inner:      Arc<MemoryRunStore>,
+    log:        LogId,
+    fail_at:    usize,
     lost_reply: bool,
-    failed:     Arc<AtomicBool>,
+    appended:   Arc<AtomicUsize>,
 }
 
 #[async_trait::async_trait]
@@ -29,16 +31,20 @@ impl RunStore for FailingStore {
     async fn open(&self, key: &RunKey, access: Access) -> Result<Arc<dyn RunLogs>, StoreError> {
         Ok(Arc::new(FailingLogs {
             inner:      self.inner.open(key, access).await?,
+            log:        self.log,
+            fail_at:    self.fail_at,
             lost_reply: self.lost_reply,
-            failed:     Arc::clone(&self.failed),
+            appended:   Arc::clone(&self.appended),
         }))
     }
 }
 
 struct FailingLogs {
     inner:      Arc<dyn RunLogs>,
+    log:        LogId,
+    fail_at:    usize,
     lost_reply: bool,
-    failed:     Arc<AtomicBool>,
+    appended:   Arc<AtomicUsize>,
 }
 
 #[async_trait::async_trait]
@@ -48,7 +54,8 @@ impl RunLogs for FailingLogs {
     }
 
     async fn append(&self, log: &LogId, records: &[Record]) -> Result<(), StoreError> {
-        let fails = *log == LogId::Resources && !self.failed.swap(true, Ordering::SeqCst);
+        let fails =
+            *log == self.log && self.appended.fetch_add(1, Ordering::SeqCst) == self.fail_at;
         if fails && !self.lost_reply {
             return Err(StoreError::backend(
                 self.locator(),
@@ -86,14 +93,18 @@ fn one_step() -> ir::Graph {
     b.build()
 }
 
-async fn a_failed_lease_write_ends_the_lifetime(lost_reply: bool) {
-    let key = RunKey::new("lease-write");
-    let dir = RunDir::new("store-failure-lease");
+/// A write to `log` fails at its `fail_at`th append: the lifetime ends with
+/// the store's failure, nothing fails for it, and a resume finishes the run.
+async fn a_failed_write_ends_the_lifetime(log: LogId, fail_at: usize, lost_reply: bool) {
+    let key = RunKey::new("failed-write");
+    let dir = RunDir::new("store-failure-write");
     let memory = Arc::new(MemoryRunStore::new());
     let store = Arc::new(FailingStore {
         inner: Arc::clone(&memory),
+        log,
+        fail_at,
         lost_reply,
-        failed: Arc::new(AtomicBool::new(false)),
+        appended: Arc::new(AtomicUsize::new(0)),
     });
     let mut options = RunOptions::new(dir.path());
     options.run_key = Some(key.clone());
@@ -111,7 +122,7 @@ async fn a_failed_lease_write_ends_the_lifetime(lost_reply: bool) {
         ),
     }
 
-    // Nothing failed for the store: no scope failure, no step outcome, no
+    // Nothing failed for the store: no scope failure, no failed step, no
     // invocation result.
     let logs = memory.open(&key, Access::Read).await.expect("reads");
     let records = read_coordinator_log(&*logs).await.expect("decodes");
@@ -125,10 +136,11 @@ async fn a_failed_lease_write_ends_the_lifetime(lost_reply: bool) {
         .await
         .expect("the engine log reads");
     assert!(
-        !engine.log.events().any(|event| matches!(
-            event,
-            Event::ScopeFailed { .. } | Event::StepFinished { .. }
-        )),
+        !engine.log.events().any(|event| match event {
+            Event::ScopeFailed { .. } => true,
+            Event::StepFinished { outcome, .. } => outcome.status.failure_info().is_some(),
+            _ => false,
+        }),
         "no firing failed for the store: {:?}",
         failure.lock().unwrap_or_else(PoisonError::into_inner)
     );
@@ -142,12 +154,21 @@ async fn a_failed_lease_write_ends_the_lifetime(lost_reply: bool) {
     );
 }
 
+/// The lease's reservation, the first resource record.
 #[tokio::test]
 async fn a_lease_write_that_fails_ends_the_lifetime_and_the_run_resumes() {
-    a_failed_lease_write_ends_the_lifetime(false).await;
+    a_failed_write_ends_the_lifetime(LogId::Resources, 0, false).await;
 }
 
 #[tokio::test]
 async fn a_lease_write_whose_reply_is_lost_ends_the_lifetime_and_the_run_resumes() {
-    a_failed_lease_write_ends_the_lifetime(true).await;
+    a_failed_write_ends_the_lifetime(LogId::Resources, 0, true).await;
+}
+
+/// The coordinator's own append after the run's creation (`run.started`,
+/// the graph, the root's declarations): the lifetime ends with the store's
+/// failure too, not the record's.
+#[tokio::test]
+async fn a_coordinator_write_that_fails_ends_the_lifetime_and_the_run_resumes() {
+    a_failed_write_ends_the_lifetime(LogId::Coordinator, 4, false).await;
 }
