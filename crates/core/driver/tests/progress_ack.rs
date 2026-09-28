@@ -7,16 +7,21 @@
 mod support;
 
 use std::error::Error;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use driver::lifecycle::{ExecutionHooks, HookContext, Note, ScopeReleased};
 use driver::{Driver, EventObserver, ObserveError, RunConfig};
 use engine::{EngineState, Event, EventLog, EventRecord, LOG_VERSION};
 use executor::MapSecrets;
-use ir::{GraphBuilder, Outcome, RunStatus, ScopeId, StepEvent, Value};
+use ir::{
+    CancelScopeId, ExecutionId, GraphBuilder, InvocationId, Outcome, RunStatus, ScopeId, StepEvent,
+    Value,
+};
 use serde_json::json;
 use steps::{ProgressError, Registry};
+use store::RunKey;
 use support::*;
 use tokio::sync::watch;
 use tokio::time::{sleep, timeout};
@@ -566,4 +571,64 @@ async fn a_run_log_that_cannot_store_the_acquisition_stops_the_run() {
         )),
         "nothing started or failed after the store failed"
     );
+}
+
+/// Counts the `scope_released` points it is asked for.
+#[derive(Default)]
+struct CountingHooks(AtomicUsize);
+
+#[async_trait::async_trait]
+impl ExecutionHooks for CountingHooks {
+    async fn scope_released(&self, _context: &HookContext, _released: ScopeReleased) -> Vec<Note> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Vec::new()
+    }
+}
+
+/// A scope released while its acquisition waits on the run log runs its
+/// `scope_released` point only once the run log holds it: the point runs
+/// only for a scope a resume can find.
+#[tokio::test]
+async fn a_scope_released_while_storing_runs_its_point_once_stored() {
+    let dir = RunDir::new("ack-release-storing");
+    let store = GatedStore::new(false);
+    let step = Arc::new(AckingStep {
+        store:            store.clone(),
+        persisted_at_ack: Arc::new(Mutex::new(Vec::new())),
+    });
+    let hooks = Arc::new(CountingHooks::default());
+    let driver = host_driver_full(
+        one_node(ACKING),
+        &dir,
+        MapSecrets::empty(),
+        RunConfig::new(dir.path()),
+        registry_with(step),
+    )
+    .observe_run_log(store.clone() as Arc<dyn EventObserver>)
+    .with_hooks(
+        hooks.clone(),
+        HookContext::new(RunKey::new("ack"), InvocationId::ROOT, ExecutionId::new(0)),
+    );
+    let handle = driver.handle();
+    let run = tokio::spawn(driver.run());
+
+    store
+        .wait_pending_event(|event| matches!(event, Event::ScopeAcquired { .. }))
+        .await;
+    // The cancel settles the waiting attempt, and the scope is released.
+    handle.cancel(CancelScopeId::ROOT).await;
+    sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        hooks.0.load(Ordering::SeqCst),
+        0,
+        "no point before the run log holds the acquisition"
+    );
+
+    store.open();
+    let report = timeout(Duration::from_secs(10), run)
+        .await
+        .expect("the run ends once the store writes")
+        .expect("the run task finished");
+    assert_eq!(report.status, RunStatus::Cancelled);
+    assert_eq!(hooks.0.load(Ordering::SeqCst), 1, "the point ran once");
 }

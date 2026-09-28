@@ -602,10 +602,11 @@ provider, and the driver stops without recording anything more
 hook runs after the failure; the coordinator returns
 `CoordinatorError::StoreFailed`. A run-directory handle refuses every write
 after its first failed append, and the next writer truncates a partial line
-and counts one that landed. Before any attempt starts in a scope, the driver
-waits for the run log to hold the scope's `scope.acquired`, so the
-`scope_released` point of a scope an earlier lifetime acquired is always
-found again on resume (`Driver::observe_run_log`).
+and counts one that landed. Before any attempt starts in a scope, and before
+a scope is released, the driver waits for the run log to hold the scope's
+`scope.acquired`, so the `scope_released` point of a scope an earlier
+lifetime acquired is always found again on resume
+(`Driver::observe_run_log`).
 
 **Resume.** `engine::resume(graph, &log)` rebuilds a crashed run by replay and
 reconciles what is still owed. The loaded log must be a **byte-prefix** of the
