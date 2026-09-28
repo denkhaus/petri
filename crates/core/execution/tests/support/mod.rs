@@ -551,8 +551,10 @@ impl Plan {
 /// the lifetime that opened it, so a lifetime still running after its
 /// successor took the run does not share the successor's.
 pub(crate) struct WatchedStore {
-    inner: Arc<MemoryRunStore>,
-    plan:  Mutex<Arc<Mutex<Plan>>>,
+    inner:   Arc<MemoryRunStore>,
+    plan:    Mutex<Arc<Mutex<Plan>>>,
+    /// Each append waits up to this long, from these draws.
+    latency: Arc<Mutex<Option<(Dice, u64)>>>,
 }
 
 impl WatchedStore {
@@ -560,7 +562,15 @@ impl WatchedStore {
         Self {
             inner,
             plan: Mutex::new(Arc::new(Mutex::new(Plan::default()))),
+            latency: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Make every append wait up to `most` milliseconds, as a store under
+    /// load does.
+    pub(crate) fn slow(&self, seed: u64, most: u64) {
+        *self.latency.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some((Dice(seed ^ 0x5_10E5), most));
     }
 
     /// The next lifetime's plan: crash it right after the `nth` record of a
@@ -600,13 +610,18 @@ impl store::RunStore for WatchedStore {
     async fn open(&self, key: &RunKey, access: Access) -> Result<Arc<dyn RunLogs>, StoreError> {
         let inner = self.inner.open(key, access).await?;
         let plan = Arc::clone(&self.plan.lock().unwrap_or_else(PoisonError::into_inner));
-        Ok(Arc::new(WatchedLogs { inner, plan }))
+        Ok(Arc::new(WatchedLogs {
+            inner,
+            plan,
+            latency: Arc::clone(&self.latency),
+        }))
     }
 }
 
 struct WatchedLogs {
-    inner: Arc<dyn RunLogs>,
-    plan:  Arc<Mutex<Plan>>,
+    inner:   Arc<dyn RunLogs>,
+    plan:    Arc<Mutex<Plan>>,
+    latency: Arc<Mutex<Option<(Dice, u64)>>>,
 }
 
 impl WatchedLogs {
@@ -626,6 +641,15 @@ impl RunLogs for WatchedLogs {
     }
 
     async fn append(&self, log: &LogId, records: &[Record]) -> Result<(), StoreError> {
+        let delay = self
+            .latency
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
+            .map(|(dice, most)| dice.roll(*most + 1));
+        if let Some(delay) = delay {
+            time::sleep(Duration::from_millis(delay)).await;
+        }
         let landing = self.plan().landing(log, records);
         if landing == Some(Landing::Before) {
             return Err(self.failure("append"));

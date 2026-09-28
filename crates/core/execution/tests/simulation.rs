@@ -829,6 +829,10 @@ async fn stored_progress(sim: &SimHost, workload: &Workload) -> Option<Progress>
     let records = read_coordinator_log(&*logs)
         .await
         .expect("the coordinator log decodes");
+    // A crash before `run.started` was stored leaves nothing to resume from.
+    if records.is_empty() {
+        return None;
+    }
     let state = CoordinatorState::replay(&records).expect("the stored log replays");
     let mut finished = BTreeSet::new();
     let mut stopping = BTreeSet::new();
@@ -883,6 +887,9 @@ fn simulate_world(seed: u64) -> Outcome {
     if dice.chance(25) {
         crashes.insert(0, Crash::Store(store_fault(&mut dice)));
     }
+    // Some stores are slow: each append waits up to this long, so records
+    // queue behind the writer.
+    let slow = dice.chance(30).then(|| 1 + dice.roll(20));
     // Some crashes leave a zombie: the lifetime runs on for a while after
     // its successor took the run.
     let lingers: Vec<Option<Duration>> = crashes
@@ -896,7 +903,7 @@ fn simulate_world(seed: u64) -> Outcome {
     trace(|| {
         format!(
             "seed {seed}: {} graphs, breaker {:?}, limit {:?}, stops {stops:?}, crashes \
-             {crashes:?}, lingers {lingers:?}, leases {leases:?}, lose {lose}%",
+             {crashes:?}, lingers {lingers:?}, slow {slow:?}, leases {leases:?}, lose {lose}%",
             workload.graphs.len(),
             workload.breaker,
             workload.max_calls
@@ -905,6 +912,9 @@ fn simulate_world(seed: u64) -> Outcome {
     run_paused(async move {
         let mut sim = SimHost::new("execution-simulation", seed, FAULTS);
         sim.leases = leases;
+        if let Some(most) = slow {
+            sim.watched.slow(seed, most);
+        }
         let epoch = sim.epoch;
         let current = Arc::new(Mutex::new(None));
         let controls_now = Arc::new(Mutex::new(None));
@@ -917,6 +927,9 @@ fn simulate_world(seed: u64) -> Outcome {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let shared = Arc::new(Mutex::new(Shared::default()));
         let mut stats: BTreeMap<&'static str, u64> = BTreeMap::new();
+        if slow.is_some() {
+            *stats.entry("slow stores").or_default() += 1;
+        }
         let mut violations = Vec::new();
         let mut plan = crashes.iter().copied().zip(lingers.iter().copied());
         let mut zombie: Option<Zombie<'_>> = None;
@@ -1140,6 +1153,9 @@ fn simulate_world(seed: u64) -> Outcome {
             let run_status = progress.run_status;
             sim.world
                 .begin_lifetime(progress.finished, progress.stopping);
+            // The process is gone, and its lease with it, as a file lock ends
+            // with its process: a write it still had in flight is refused.
+            sim.store.release(&run_key());
             *current.lock().unwrap_or_else(PoisonError::into_inner) = None;
             *controls_now.lock().unwrap_or_else(PoisonError::into_inner) = None;
             alive.store(false, Ordering::Release);
@@ -1155,7 +1171,6 @@ fn simulate_world(seed: u64) -> Outcome {
                 if let Some(earlier) = zombie.take() {
                     lay_to_rest(&sim, earlier, &mut stats);
                 }
-                sim.store.release(&run_key());
                 sim.world.haunt(lifetime);
                 *stats.entry("zombie lifetimes").or_default() += 1;
                 zombie = Some(Zombie {
@@ -1675,6 +1690,28 @@ async fn check(
         let Ok(decoded) = read_execution_log(&*logs, *execution).await else {
             continue;
         };
+        // No firing fails for the store: a failed write ends the lifetime
+        // instead.
+        for record in decoded.log.records() {
+            let message = match &record.event {
+                Event::ScopeFailed { error, causes, .. } => {
+                    Some(format!("{error}: {}", causes.join(": ")))
+                }
+                Event::StepFinished { outcome, .. } => outcome
+                    .status
+                    .failure_info()
+                    .map(|failure| failure.message.clone()),
+                _ => None,
+            };
+            if let Some(message) = message
+                && (message.contains("simulated store failure")
+                    || message.contains("an earlier write to the run's store failed"))
+            {
+                violations.push(format!(
+                    "execution {execution} recorded a store failure as a firing's: {message}"
+                ));
+            }
+        }
         let mut open: BTreeMap<(u64, String), u64> = BTreeMap::new();
         let mut asks: BTreeMap<(u64, String), usize> = BTreeMap::new();
         let mut answers: BTreeMap<(u64, String), usize> = BTreeMap::new();
@@ -2174,7 +2211,7 @@ fn seeded_runs_keep_the_execution_rules() {
             "lost replies",
             "stores down",
             "zombie lifetimes",
-            "zombie hook calls",
+            "slow stores",
         ] {
             assert!(
                 totals.get(key).copied().unwrap_or_default() > 0,
