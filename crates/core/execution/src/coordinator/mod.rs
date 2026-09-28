@@ -592,6 +592,7 @@ impl Coordinator {
         releasing: &mut JoinSet<InvocationReleased>,
     ) -> Result<InvocationResult, CoordinatorError> {
         let mut completed = BTreeMap::new();
+        self.finish_cut_off_cancels().await?;
         if self.store.state().invocations[&InvocationId::ROOT]
             .result
             .is_some()
@@ -1175,6 +1176,40 @@ impl Coordinator {
             observer.on_lifecycle(&record);
         }
         Ok(record)
+    }
+
+    /// A crash can cut a cancel's cascade short: the cancelled invocation is
+    /// recorded, some of its descendants are not. Record the rest before
+    /// anything runs, so no descendant of a cancelled invocation resumes
+    /// uncancelled.
+    async fn finish_cut_off_cancels(&mut self) -> Result<(), CoordinatorError> {
+        let state = self.store.state();
+        let cancelled: Vec<InvocationId> = state
+            .invocations
+            .iter()
+            .filter(|(_, invocation)| invocation.cancelled)
+            .map(|(id, _)| *id)
+            .collect();
+        let cut_off: Vec<InvocationId> = state
+            .invocations
+            .iter()
+            .filter(|(id, invocation)| {
+                invocation.result.is_none()
+                    && !invocation.cancelled
+                    && cancelled
+                        .iter()
+                        .any(|ancestor| self.is_descendant_or_same(**id, *ancestor))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for invocation in cut_off {
+            self.append(CoordinatorEvent::InvocationCancelRequested {
+                invocation,
+                reason: None,
+            })
+            .await?;
+        }
+        Ok(())
     }
 
     /// The run's first failed write, as the error that ends the lifetime.
