@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use std::{fmt, fs};
 
+use driver::lifecycle::{ExecutionHooks, HookContext, Note, RunFinished, ScopeReleased};
 use execution::{
     AttemptAdmission, CallSite, CoordinatorInvocationClient, GraphDigest, InterviewReply,
     InterviewRequest, Interviewer, InvocationClient as _, InvocationRequest, InvocationResult,
@@ -32,7 +33,7 @@ use serde_json::{Value, json};
 use steps::{Answer, Step, StepCtx};
 use store::{Access, Digest, Record, RunLogs, StoreError};
 use testkit::RunDir;
-use testkit::sim::{Faults, LeaseRecords, LeaseView, MemoryLogs, World, sandboxed_registry};
+use testkit::sim::{Dice, Faults, LeaseRecords, LeaseView, MemoryLogs, World, sandboxed_registry};
 use tokio::runtime::Builder;
 use tokio::sync::Notify;
 use tokio::time::{self, Instant};
@@ -179,6 +180,8 @@ pub(crate) struct SimHost {
     pub logs:    Arc<MemoryLogs>,
     pub seed:    u64,
     pub leases:  Leases,
+    /// The host's run-level hooks, shared by every lifetime.
+    pub hooks:   Arc<SimHooks>,
     /// The runtime's clock at the simulation's start.
     pub epoch:   Instant,
 }
@@ -199,6 +202,7 @@ impl SimHost {
             logs: Arc::new(MemoryLogs::default()),
             seed,
             leases: Leases::default(),
+            hooks: Arc::new(SimHooks::default()),
             epoch: Instant::now(),
         }
     }
@@ -309,7 +313,7 @@ impl Interviewer for SimInterviewer {
         for byte in request.question.id.bytes() {
             roll = (roll ^ u64::from(byte)).wrapping_mul(0x0100_0000_01B3);
         }
-        let roll = testkit::sim::Dice(roll ^ u64::from(request.ask)).roll(100);
+        let roll = Dice(roll ^ u64::from(request.ask)).roll(100);
         if request.question.timeout_ms.is_some() && roll < 20 {
             cancel.cancelled().await;
             return InterviewReply::Cancelled;
@@ -321,6 +325,54 @@ impl Interviewer for SimInterviewer {
                 InterviewReply::Answered(Answer::text("go"))
             }
         }
+    }
+}
+
+/// One run-level hook call: the point, the execution that ran it, and the
+/// scope it released.
+pub(crate) type HookCall = (&'static str, u64, Option<u64>);
+
+/// The host's run-level hooks: `run_finished` and `scope_released` each
+/// return one note naming its execution (and scope), and every call is
+/// counted, across lifetimes.
+#[derive(Default)]
+pub(crate) struct SimHooks {
+    calls: Mutex<Vec<HookCall>>,
+}
+
+impl SimHooks {
+    pub(crate) fn calls(&self) -> Vec<HookCall> {
+        self.calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn note(&self, call: HookCall) -> Vec<Note> {
+        self.calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(call);
+        let (kind, execution, scope) = call;
+        vec![Note::new(
+            kind,
+            json!({"execution": execution, "scope": scope}),
+        )]
+    }
+}
+
+#[async_trait::async_trait]
+impl ExecutionHooks for SimHooks {
+    async fn run_finished(&self, context: &HookContext, _finished: RunFinished) -> Vec<Note> {
+        self.note(("sim.run", context.execution.raw(), None))
+    }
+
+    async fn scope_released(&self, context: &HookContext, released: ScopeReleased) -> Vec<Note> {
+        self.note((
+            "sim.scope",
+            context.execution.raw(),
+            Some(u64::from(released.scope.raw())),
+        ))
     }
 }
 

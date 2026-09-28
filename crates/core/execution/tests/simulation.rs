@@ -731,19 +731,23 @@ struct Outcome {
 
 type HostRunFuture<'a> = Pin<Box<dyn Future<Output = Result<ExecutionReport, HostError>> + 'a>>;
 
-/// The attempts whose finish the stored logs hold, and the firings still
-/// stopping in them, by execution: what the world checks a resumed lifetime
-/// against. And whether the root's result was stored, so the resume replays
-/// it.
-async fn stored_progress(
-    sim: &SimHost,
-    workload: &Workload,
-) -> Option<(
-    BTreeSet<(SmolStr, u64, u32)>,
-    BTreeSet<(SmolStr, u64)>,
-    bool,
-    bool,
-)> {
+/// What the store holds at a crash, for the next lifetime.
+#[derive(Default)]
+struct Progress {
+    /// The attempts whose finish the stored logs hold, by execution: what
+    /// the world checks the resumed lifetime against.
+    finished:   BTreeSet<(SmolStr, u64, u32)>,
+    /// The firings still stopping in them.
+    stopping:   BTreeSet<(SmolStr, u64)>,
+    /// The root's result was stored, so the resume replays it.
+    root_done:  bool,
+    /// The last recorded control is a pause.
+    paused:     bool,
+    /// The run's end was stored: there is nothing to resume.
+    run_status: Option<RunStatus>,
+}
+
+async fn stored_progress(sim: &SimHost, workload: &Workload) -> Option<Progress> {
     let logs = sim.store.open(&run_key(), Access::Read).await.ok()?;
     let records = read_coordinator_log(&*logs)
         .await
@@ -777,7 +781,13 @@ async fn stored_progress(
         .invocations
         .get(&InvocationId::ROOT)
         .is_some_and(|root| root.result.is_some());
-    Some((finished, stopping, root_done, state.paused))
+    Some(Progress {
+        finished,
+        stopping,
+        root_done,
+        paused: state.paused,
+        run_status: state.run_status,
+    })
 }
 
 fn simulate_world(seed: u64) -> Outcome {
@@ -874,7 +884,9 @@ fn simulate_world(seed: u64) -> Outcome {
                     }
                 }));
             }
-            let runtime = sim.runtime().hooks(controls.hooks(None));
+            let runtime = sim
+                .runtime()
+                .hooks(controls.hooks(Some(Arc::clone(&sim.hooks) as _)));
             let mut observers: Vec<Arc<dyn ExecutionObserver>> = vec![
                 watch,
                 Arc::new(controls.clone()),
@@ -936,10 +948,14 @@ fn simulate_world(seed: u64) -> Outcome {
                     None => future::pending().await,
                 }
             };
-            let ended: Option<Result<ExecutionReport, String>> = tokio::select! {
+            let ended: Option<Result<RunStatus, String>> = tokio::select! {
                 biased;
                 () = crash_now => None,
-                result = &mut run => Some(result.map_err(|error| error.to_string())),
+                result = &mut run => Some(
+                    result
+                        .map(|report| report.status)
+                        .map_err(|error| error.to_string()),
+                ),
                 () = time::sleep_until(epoch + DEADLINE) => {
                     Some(Err(format!("the run did not end within {DEADLINE:?}")))
                 }
@@ -970,15 +986,16 @@ fn simulate_world(seed: u64) -> Outcome {
                 }
                 _ => {}
             }
-            let (finished, stopping, root_done, paused) =
-                stored_progress(&sim, &workload).await.unwrap_or_default();
-            if root_done {
+            let progress = stored_progress(&sim, &workload).await.unwrap_or_default();
+            if progress.root_done {
                 *stats.entry("terminal replays").or_default() += 1;
             }
-            if paused {
+            if progress.paused {
                 *stats.entry("crashes while paused").or_default() += 1;
             }
-            sim.world.begin_lifetime(finished, stopping);
+            let run_status = progress.run_status;
+            sim.world
+                .begin_lifetime(progress.finished, progress.stopping);
             *current.lock().unwrap_or_else(PoisonError::into_inner) = None;
             *controls_now.lock().unwrap_or_else(PoisonError::into_inner) = None;
             alive.store(false, Ordering::Release);
@@ -995,16 +1012,17 @@ fn simulate_world(seed: u64) -> Outcome {
                     sim.world.lose_sandboxes(lose) as u64;
             }
             trace(|| format!("crash at {:?} ({crash:?})", epoch.elapsed()));
+            // The crash came after the run's end was stored: the run is over,
+            // and a host reads its result instead of resuming it.
+            if let Some(status) = run_status {
+                *stats.entry("crashes after the run's end").or_default() += 1;
+                break Ok(status);
+            }
             lifetime += 1;
         };
         host.abort();
         let ended = epoch.elapsed();
-        trace(|| {
-            format!(
-                "ended at {ended:?}: {:?}",
-                result.as_ref().map(|r| r.status)
-            )
-        });
+        trace(|| format!("ended at {ended:?}: {:?}", result.as_ref()));
         if let Err(error) = &result {
             violations.push(format!("the run ended with an error: {error}"));
         }
@@ -1608,6 +1626,53 @@ async fn check(
         }
     }
 
+    // Run notes, recorded at least once: every run-level hook call's note is
+    // in the log, a note is recorded no more often than its point ran, and it
+    // names the execution that ran it.
+    let mut called: BTreeMap<(String, u64, Option<u64>), usize> = BTreeMap::new();
+    for (kind, execution, scope) in sim.hooks.calls() {
+        *called
+            .entry((kind.to_owned(), execution, scope))
+            .or_default() += 1;
+    }
+    let mut noted: BTreeMap<(String, u64, Option<u64>), usize> = BTreeMap::new();
+    for record in &records {
+        if let CoordinatorEvent::RunNoteRecorded {
+            execution,
+            kind,
+            payload,
+        } = &record.body
+        {
+            let key = (
+                kind.to_string(),
+                payload["execution"].as_u64().unwrap_or(u64::MAX),
+                payload["scope"].as_u64(),
+            );
+            if execution.map(ExecutionId::raw) != Some(key.1) {
+                violations.push(format!("the note {key:?} names execution {execution:?}"));
+            }
+            *noted.entry(key).or_default() += 1;
+        }
+    }
+    for (key, count) in &noted {
+        *stats.entry("run notes").or_default() += *count as u64;
+        if *count > 1 {
+            *stats.entry("repeated run notes").or_default() += 1;
+        }
+        if *count > called.get(key).copied().unwrap_or_default() {
+            violations.push(format!(
+                "the note {key:?} is recorded {count} times, its point ran fewer"
+            ));
+        }
+    }
+    for key in called.keys() {
+        if !noted.contains_key(key) {
+            violations.push(format!(
+                "the {key:?} hook ran, and its note was never recorded"
+            ));
+        }
+    }
+
     // The leases: each ends settled, with its sandbox as its record says,
     // kept only as the run's retention keeps it, and released with a
     // `scope.released` before the run's end. A release that failed at the
@@ -1879,6 +1944,8 @@ fn seeded_runs_keep_the_execution_rules() {
             "answers",
             "expired questions",
             "receipt questions kept across a resume",
+            "run notes",
+            "repeated run notes",
         ] {
             assert!(
                 totals.get(key).copied().unwrap_or_default() > 0,

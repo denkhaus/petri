@@ -122,7 +122,11 @@ provider call), and runs the coordinator through the host wrappers over one
 in-memory store, resuming after each crash. The runtime's own lease router
 reaches the world as a Docker-kind provider (`testkit::sim::WorldFactory`),
 so lease records, reconcile, fencing, retention and release all run, and the
-world checks each provider call against the lease's recorded intent.
+world checks each provider call against the lease's recorded intent. The host
+services run as a CLI or Fabro host runs them, one set per lifetime: the
+control service pauses and unpauses the run, the stall watchdog watches it,
+the interview dispatcher carries questions to an interviewer that answers or
+lets them expire, and run-level hooks note the run's end and each release.
 
 `mise run test` runs 128 and 64 seeds, each in a few seconds at most, and
 `mise run test:dst`, part of the nightly gate, runs 50,000 and 20,000. To
