@@ -62,8 +62,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use driver::ExecutionReport;
-use engine::{Admission, EngineExit, EngineState, Event, EventLog, EventRecord, RouteDecision};
+use engine::{
+    Admission, DecisionId, EngineExit, EngineState, Event, EventLog, EventRecord, RouteDecision,
+};
+use execution::controls::ControlService;
 use execution::host::{self, HostError, HostRun};
+use execution::watchdog::{StallWatchdog, WatchdogTask};
 use execution::{
     CoordinatorEvent, CoordinatorHandle, CoordinatorRecord, CoordinatorState, ExecutionId,
     ExecutionObserver, GraphDigest, InvocationId, LeaseState, LogId, ResourceLogRecord,
@@ -78,7 +82,9 @@ use ir::{
 use serde_json::{Value, json};
 use smol_str::SmolStr;
 use store::Access;
-use support::{Call, INVOKE, Leases, SimHost, digest_of, received, run_key, run_paused};
+use support::{
+    Call, INVOKE, Leases, SIMULATED_EPOCH_MS, SimHost, digest_of, received, run_key, run_paused,
+};
 use testkit::sim::{self, CallCrash, Dice, Faults, Moment, SANDBOXED, SandboxState, WorldSandbox};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -272,6 +278,8 @@ struct Workload {
     graphs:    BTreeMap<GraphDigest, Graph>,
     breaker:   Option<u32>,
     max_calls: Option<u32>,
+    /// The root's stall budget, which the host's watchdog enforces.
+    stall:     Option<Duration>,
 }
 
 /// The graphs, built from the deepest child up so every caller knows its
@@ -299,6 +307,10 @@ fn workload(dice: &mut Dice) -> Workload {
         .then(|| u32::try_from(dice.roll(4) + 2).expect("small"));
     root.graph.policy.loop_restart_signature_limit = breaker.and_then(NonZeroU32::new);
     root.graph.policy.max_invocations = max_calls.and_then(NonZeroU32::new);
+    let stall = dice
+        .chance(30)
+        .then(|| Duration::from_millis(60 + dice.roll(140)));
+    root.graph.policy.stall_timeout = stall;
     let graphs = built
         .iter()
         .map(|child| (child.digest, child.graph.clone()))
@@ -310,6 +322,7 @@ fn workload(dice: &mut Dice) -> Workload {
         graphs,
         breaker,
         max_calls,
+        stall,
     }
 }
 
@@ -322,6 +335,8 @@ struct Stops {
     cancel:       Option<Duration>,
     kill:         Option<Duration>,
     cancel_child: Option<(Duration, u64)>,
+    /// Pause at the first time, unpause at the second.
+    pause:        Option<(Duration, Duration)>,
 }
 
 fn stops(dice: &mut Dice) -> Stops {
@@ -334,16 +349,21 @@ fn stops(dice: &mut Dice) -> Stops {
     let cancel_child = dice
         .chance(30)
         .then(|| (Duration::from_millis(dice.roll(150)), dice.roll(4) + 1));
+    let pause = dice.chance(35).then(|| {
+        let at = Duration::from_millis(dice.roll(150));
+        (at, at + Duration::from_millis(20 + dice.roll(200)))
+    });
     Stops {
         cancel,
         kill,
         cancel_child,
+        pause,
     }
 }
 
 /// The coordinator record kinds a crash can follow. `root.finished` is the
 /// root's `invocation.finished`, before `run.finished`.
-const RECORD_KINDS: [&str; 7] = [
+const RECORD_KINDS: [&str; 9] = [
     "invocation.declared",
     "execution.declared",
     "execution.finished",
@@ -351,6 +371,8 @@ const RECORD_KINDS: [&str; 7] = [
     "invocation.cancel.requested",
     "root.finished",
     "scope.released",
+    "run.paused",
+    "run.unpaused",
 ];
 
 /// The resource record kinds a crash can follow: a lease's allocation, the
@@ -455,6 +477,8 @@ fn kind_of(record: &CoordinatorRecord) -> &'static str {
         CoordinatorEvent::GraphRegistered { .. } => "graph.registered",
         CoordinatorEvent::ScopeReleased { .. } => "scope.released",
         CoordinatorEvent::RunNoteRecorded { .. } => "run.note.recorded",
+        CoordinatorEvent::RunPaused => "run.paused",
+        CoordinatorEvent::RunUnpaused => "run.unpaused",
         _ => "other",
     }
 }
@@ -600,10 +624,21 @@ impl ExecutionObserver for Watch {
     }
 }
 
-/// The host: its stops, against whichever coordinator is running.
+/// What the host does at a planned time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Act {
+    CancelRoot,
+    CancelChild(u64),
+    Pause,
+    Unpause,
+}
+
+/// The host: its stops and its pause, against whichever coordinator and
+/// control service are running.
 fn host(
     stops: Stops,
     current: Arc<Mutex<Option<CoordinatorHandle>>>,
+    controls: Arc<Mutex<Option<ControlService>>>,
     epoch: Instant,
 ) -> JoinHandle<()> {
     let handle = move || {
@@ -612,14 +647,42 @@ fn host(
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     };
+    let service = move || {
+        controls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    };
     tokio::spawn(async move {
-        let mut plan: Vec<(Duration, Option<u64>)> = Vec::new();
-        plan.extend(stops.cancel.map(|at| (at, None)));
-        plan.extend(stops.kill.map(|at| (at, None)));
-        plan.extend(stops.cancel_child.map(|(at, id)| (at, Some(id))));
+        let mut plan: Vec<(Duration, Act)> = Vec::new();
+        plan.extend(stops.cancel.map(|at| (at, Act::CancelRoot)));
+        plan.extend(stops.kill.map(|at| (at, Act::CancelRoot)));
+        plan.extend(
+            stops
+                .cancel_child
+                .map(|(at, id)| (at, Act::CancelChild(id))),
+        );
+        plan.extend(stops.pause.map(|(at, _)| (at, Act::Pause)));
+        plan.extend(stops.pause.map(|(_, until)| (until, Act::Unpause)));
         plan.sort_unstable();
-        for (at, child) in plan {
+        for (at, act) in plan {
             time::sleep_until(epoch + at).await;
+            if matches!(act, Act::Pause | Act::Unpause) {
+                // A host whose run is down between lifetimes waits for the
+                // next one's service.
+                let service = loop {
+                    if let Some(service) = service() {
+                        break service;
+                    }
+                    time::sleep(Duration::from_millis(1)).await;
+                };
+                if act == Act::Pause {
+                    service.pause();
+                } else {
+                    service.unpause().await;
+                }
+                continue;
+            }
             // A host whose coordinator is down asks the next one.
             let handle = loop {
                 if let Some(handle) = handle() {
@@ -627,9 +690,21 @@ fn host(
                 }
                 time::sleep(Duration::from_millis(1)).await;
             };
-            match child {
-                Some(id) => handle.cancel(InvocationId::new(id)),
-                None => handle.cancel_root(),
+            match act {
+                Act::CancelChild(id) => handle.cancel(InvocationId::new(id)),
+                _ => handle.cancel_root(),
+            }
+        }
+        // A lifetime that resumed paused after the pause ended is unpaused
+        // again, as a person would.
+        if stops.pause.is_some() {
+            loop {
+                time::sleep(Duration::from_millis(5)).await;
+                if let Some(service) = service()
+                    && service.is_paused()
+                {
+                    service.unpause().await;
+                }
             }
         }
     })
@@ -657,6 +732,7 @@ async fn stored_progress(
 ) -> Option<(
     BTreeSet<(SmolStr, u64, u32)>,
     BTreeSet<(SmolStr, u64)>,
+    bool,
     bool,
 )> {
     let logs = sim.store.open(&run_key(), Access::Read).await.ok()?;
@@ -692,14 +768,21 @@ async fn stored_progress(
         .invocations
         .get(&InvocationId::ROOT)
         .is_some_and(|root| root.result.is_some());
-    Some((finished, stopping, root_done))
+    Some((finished, stopping, root_done, state.paused))
 }
 
 fn simulate_world(seed: u64) -> Outcome {
     let mut dice = Dice(seed);
     let workload = workload(&mut dice);
     let stops = stops(&mut dice);
-    let crashes = crashes(&mut dice);
+    let mut crashes = crashes(&mut dice);
+    // A pause is worth crashing in: the resumed run must start held.
+    if stops.pause.is_some() && dice.chance(50) {
+        crashes.insert(0, Crash::After {
+            kind: "run.paused",
+            nth:  0,
+        });
+    }
     let (leases, lose) = leases(&mut dice);
     trace(|| {
         format!(
@@ -715,7 +798,13 @@ fn simulate_world(seed: u64) -> Outcome {
         sim.leases = leases;
         let epoch = sim.epoch;
         let current = Arc::new(Mutex::new(None));
-        let host = host(stops, Arc::clone(&current), epoch);
+        let controls_now = Arc::new(Mutex::new(None));
+        let host = host(
+            stops,
+            Arc::clone(&current),
+            Arc::clone(&controls_now),
+            epoch,
+        );
         let seen = Arc::new(Mutex::new(Vec::new()));
         let shared = Arc::new(Mutex::new(Shared::default()));
         let mut stats: BTreeMap<&'static str, u64> = BTreeMap::new();
@@ -723,6 +812,7 @@ fn simulate_world(seed: u64) -> Outcome {
         let mut plan = crashes.iter().copied();
         let mut lifetime = 0_u32;
         let mut stored_at_start = BTreeMap::new();
+        let mut started_at = BTreeMap::new();
         let result = loop {
             let crash = plan.next();
             let notify = Arc::new(Notify::new());
@@ -748,13 +838,36 @@ fn simulate_world(seed: u64) -> Outcome {
                 },
                 Arc::clone(&notify),
             );
-            let runtime = sim.runtime();
+            // The host services a CLI process installs, one set per
+            // lifetime.
+            let controls = ControlService::new();
+            *controls_now.lock().unwrap_or_else(PoisonError::into_inner) = Some(controls.clone());
+            let watchdog = workload.stall.map(StallWatchdog::new);
+            let watchdog_task: Arc<Mutex<Option<WatchdogTask>>> = Arc::new(Mutex::new(None));
+            let runtime = sim.runtime().hooks(controls.hooks(None));
+            let mut observers: Vec<Arc<dyn ExecutionObserver>> =
+                vec![watch, Arc::new(controls.clone())];
+            if let Some(watchdog) = &watchdog {
+                observers.push(Arc::new(watchdog.clone()));
+            }
             let hand = {
                 let current = Arc::clone(&current);
+                let controls = controls.clone();
+                let watchdog = watchdog.clone();
+                let watchdog_task = Arc::clone(&watchdog_task);
                 move |handle: CoordinatorHandle, _| {
-                    *current.lock().unwrap_or_else(PoisonError::into_inner) = Some(handle);
+                    *current.lock().unwrap_or_else(PoisonError::into_inner) = Some(handle.clone());
+                    controls.wire(handle.clone());
+                    if let Some(watchdog) = &watchdog {
+                        *watchdog_task.lock().unwrap_or_else(PoisonError::into_inner) =
+                            Some(watchdog.start(handle));
+                    }
                 }
             };
+            started_at.insert(
+                lifetime,
+                SIMULATED_EPOCH_MS + u64::try_from(epoch.elapsed().as_millis()).unwrap_or(0),
+            );
             let stored = if lifetime == 0 {
                 0
             } else {
@@ -768,13 +881,15 @@ fn simulate_world(seed: u64) -> Outcome {
                 Box::pin(host::resume_configured(
                     &runtime,
                     Vec::new(),
-                    vec![watch],
+                    observers,
                     hand,
                 ))
             } else {
-                let run = HostRun::new(workload.root.clone())
-                    .with_children(workload.children.clone())
-                    .observe(watch);
+                let mut run =
+                    HostRun::new(workload.root.clone()).with_children(workload.children.clone());
+                for observer in observers {
+                    run = run.observe(observer);
+                }
                 Box::pin(host::run_configured(&runtime, run, hand))
             };
             let crash_now = async {
@@ -795,6 +910,16 @@ fn simulate_world(seed: u64) -> Outcome {
                 }
             };
             if let Some(result) = ended {
+                let task = watchdog_task
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take();
+                if let Some(task) = task {
+                    task.stop().await;
+                }
+                if watchdog.as_ref().and_then(StallWatchdog::tripped).is_some() {
+                    *stats.entry("stall cancels").or_default() += 1;
+                }
                 break result;
             }
             // The crash: the lifetime is dead before its drivers drop, so no
@@ -808,13 +933,24 @@ fn simulate_world(seed: u64) -> Outcome {
                 }
                 _ => {}
             }
-            let (finished, stopping, root_done) =
+            let (finished, stopping, root_done, paused) =
                 stored_progress(&sim, &workload).await.unwrap_or_default();
             if root_done {
                 *stats.entry("terminal replays").or_default() += 1;
             }
+            if paused {
+                *stats.entry("crashes while paused").or_default() += 1;
+            }
             sim.world.begin_lifetime(finished, stopping);
             *current.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            *controls_now.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            // The process died: its watchdog with it.
+            drop(
+                watchdog_task
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take(),
+            );
             drop(run);
             if lose > 0 {
                 *stats.entry("lost sandboxes").or_default() +=
@@ -839,6 +975,7 @@ fn simulate_world(seed: u64) -> Outcome {
             &workload,
             &seen,
             &stored_at_start,
+            &started_at,
             &mut stats,
             &mut violations,
         )
@@ -903,6 +1040,7 @@ async fn check(
     workload: &Workload,
     seen: &Mutex<Vec<(u32, u64, &'static str)>>,
     stored_at_start: &BTreeMap<u32, u64>,
+    started_at: &BTreeMap<u32, u64>,
     stats: &mut BTreeMap<&'static str, u64>,
     violations: &mut Vec<String>,
 ) {
@@ -1236,6 +1374,80 @@ async fn check(
         }
     }
 
+    // Pause: no attempt is admitted while the run is durably paused, from a
+    // `run.paused` to its `run.unpaused`, or to the end. The hold comes
+    // before the record, so an admission in the pause's own millisecond is
+    // one the hold had already let through.
+    let mut windows: Vec<(u64, u64)> = Vec::new();
+    let mut open: Option<u64> = None;
+    for record in &records {
+        match record.body {
+            CoordinatorEvent::RunPaused if open.is_none() => open = Some(record.recorded_at),
+            CoordinatorEvent::RunUnpaused => {
+                if let Some(from) = open.take() {
+                    windows.push((from, record.recorded_at));
+                }
+            }
+            _ => {}
+        }
+    }
+    windows.extend(open.map(|from| (from, u64::MAX)));
+    *stats.entry("pauses").or_default() += windows.len() as u64;
+    let paused_at = |at: u64| windows.iter().any(|(from, to)| at > *from && at < *to);
+    let mut activity: Vec<u64> = records.iter().map(|record| record.recorded_at).collect();
+    activity.extend(started_at.values().copied());
+    for execution in state.executions.keys() {
+        let Ok(decoded) = read_execution_log(&*logs, *execution).await else {
+            continue;
+        };
+        for (record, at) in decoded.log.records().iter().zip(&decoded.recorded_at) {
+            activity.push(*at);
+            if let Event::AdmissionDecided {
+                decision_id: DecisionId::AttemptStart { firing, attempt },
+                decision: Admission::Admit,
+                ..
+            } = &record.event
+                && paused_at(*at)
+            {
+                violations.push(format!(
+                    "execution {execution} admitted firing {firing} attempt {attempt} at {at}, \
+                     while the run was paused ({windows:?})"
+                ));
+            }
+        }
+    }
+    // The watchdog: a stall cancel only after a whole budget with no
+    // record, no lifetime start and no unpause, and never while paused.
+    if let Some(budget) = workload.stall {
+        let budget = u64::try_from(budget.as_millis()).unwrap_or(u64::MAX);
+        for record in &records {
+            let CoordinatorEvent::InvocationCancelRequested {
+                reason: Some(execution::CancelReason::StallTimeout { .. }),
+                ..
+            } = &record.body
+            else {
+                continue;
+            };
+            let at = record.recorded_at;
+            let last = activity
+                .iter()
+                .copied()
+                .filter(|t| *t < at)
+                .max()
+                .unwrap_or(0);
+            if at - last < budget {
+                violations.push(format!(
+                    "the watchdog cancelled at {at}, {} ms after the last activity (budget \
+                     {budget})",
+                    at - last
+                ));
+            }
+            if paused_at(at) {
+                violations.push(format!("the watchdog cancelled at {at}, while paused"));
+            }
+        }
+    }
+
     // The leases: each ends settled, with its sandbox as its record says,
     // kept only as the run's retention keeps it, and released with a
     // `scope.released` before the run's end. A release that failed at the
@@ -1500,6 +1712,9 @@ fn seeded_runs_keep_the_execution_rules() {
             "failed provider calls",
             "crashes at provider calls",
             "crashes after resource records",
+            "pauses",
+            "crashes while paused",
+            "stall cancels",
         ] {
             assert!(
                 totals.get(key).copied().unwrap_or_default() > 0,
