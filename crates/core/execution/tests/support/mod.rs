@@ -340,10 +340,12 @@ pub(crate) type HookCall = (&'static str, u64, Option<u64>);
 
 /// The host's run-level hooks: `run_finished` and `scope_released` each
 /// return one note naming its execution (and scope), and every call is
-/// counted, across lifetimes.
+/// counted, across lifetimes. A call from a lifetime whose successor took
+/// the run is a zombie's, kept apart: its note can never be recorded.
 #[derive(Default)]
 pub(crate) struct SimHooks {
-    calls: Mutex<Vec<HookCall>>,
+    calls:   Mutex<Vec<HookCall>>,
+    zombies: Mutex<Vec<HookCall>>,
 }
 
 impl SimHooks {
@@ -354,8 +356,30 @@ impl SimHooks {
             .clone()
     }
 
-    fn note(&self, call: HookCall) -> Vec<Note> {
-        self.calls
+    /// The calls zombies made after their successor took the run.
+    pub(crate) fn zombie_calls(&self) -> Vec<HookCall> {
+        self.zombies
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The hooks one lifetime's runtime installs.
+    pub(crate) fn for_lifetime(
+        self: &Arc<Self>,
+        world: Arc<World>,
+        lifetime: u32,
+    ) -> Arc<dyn ExecutionHooks> {
+        Arc::new(LifetimeHooks {
+            hooks: Arc::clone(self),
+            world,
+            lifetime,
+        })
+    }
+
+    fn note(&self, call: HookCall, zombie: bool) -> Vec<Note> {
+        let calls = if zombie { &self.zombies } else { &self.calls };
+        calls
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(call);
@@ -367,8 +391,23 @@ impl SimHooks {
     }
 }
 
+/// One lifetime's view of the hooks: it knows when its successor took the
+/// run.
+struct LifetimeHooks {
+    hooks:    Arc<SimHooks>,
+    world:    Arc<World>,
+    lifetime: u32,
+}
+
+impl LifetimeHooks {
+    fn note(&self, call: HookCall) -> Vec<Note> {
+        let zombie = self.world.lifetime() > self.lifetime;
+        self.hooks.note(call, zombie)
+    }
+}
+
 #[async_trait::async_trait]
-impl ExecutionHooks for SimHooks {
+impl ExecutionHooks for LifetimeHooks {
     async fn run_finished(&self, context: &HookContext, _finished: RunFinished) -> Vec<Note> {
         self.note(("sim.run", context.execution.raw(), None))
     }

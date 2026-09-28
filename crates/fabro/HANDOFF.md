@@ -347,6 +347,10 @@ against.
    creation a crash cut short (stored, with no root invocation declared) is
    refused as `HostError::NotStarted`; start it again with
    `host::run_configured` under the same key, which finishes the creation.
+   Fabro's liveness signal must end a run's store lease only when the
+   worker that holds it is gone: a live worker whose lease was released
+   keeps acting (processes, hooks, provider calls it began) until its next
+   write fails, beside the new owner.
    Known limits: a retained
    thread is not durable across resume (the node starts a fresh session with
    Fabro's discarded-session rule), a pause does not survive resume (a
