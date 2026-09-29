@@ -20,6 +20,8 @@ pub mod control;
 mod inspect;
 mod resume;
 mod session;
+#[cfg(test)]
+mod tests;
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -216,21 +218,21 @@ impl ProviderArgs {
 
 #[derive(Args)]
 struct RunnerArgs {
-    /// Daytona offering for the runner: vm or container.
-    #[arg(long, default_value = "vm")]
-    daytona_kind:      DaytonaSandboxKind,
+    /// Daytona offering for the runner: container (default) or vm.
+    #[arg(long)]
+    daytona_kind:      Option<DaytonaSandboxKind>,
     /// Override a placement label's runner image. Repeatable; later values win.
     #[arg(long = "runner-image", value_name = "LABEL=IMAGE", value_parser = runner_image)]
     images:            Vec<(String, String)>,
-    /// CPUs in a Daytona runner snapshot (minimum 2).
-    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(2..))]
-    daytona_cpus:      u32,
-    /// Memory in a Daytona runner snapshot, in MiB (minimum 4096).
-    #[arg(long, default_value_t = 4096, value_parser = clap::value_parser!(u64).range(4096..))]
-    daytona_memory_mb: u64,
-    /// Disk in a Daytona runner snapshot, in MiB (minimum 4096).
-    #[arg(long, default_value_t = 20480, value_parser = clap::value_parser!(u64).range(4096..))]
-    daytona_disk_mb:   u64,
+    /// CPUs in a Daytona runner snapshot (default and minimum: 2).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(2..))]
+    daytona_cpus:      Option<u32>,
+    /// Memory in a Daytona runner snapshot, in MiB (default and minimum: 4096).
+    #[arg(long, value_parser = clap::value_parser!(u64).range(4096..))]
+    daytona_memory_mb: Option<u64>,
+    /// Disk in a Daytona runner snapshot, in MiB. Omit to let Daytona choose.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    daytona_disk_mb:   Option<u64>,
 }
 
 fn runner_image(value: &str) -> Result<(String, String), String> {

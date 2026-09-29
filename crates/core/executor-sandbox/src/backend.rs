@@ -82,8 +82,8 @@ pub struct SandboxOptions {
 /// The Daytona offering that hosts a workflow runner.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DaytonaSandboxKind {
-    Container,
     #[default]
+    Container,
     VirtualMachine,
 }
 
@@ -116,7 +116,10 @@ impl FromStr for DaytonaSandboxKind {
 pub struct DaytonaResources {
     pub cpu_cores: u32,
     pub memory_mb: u64,
-    pub disk_mb:   u64,
+    /// `None` lets Daytona choose the disk allocation when building the
+    /// snapshot. Explicit allocations must be positive; Daytona validates
+    /// whether the image fits and the account allows the requested size.
+    pub disk_mb:   Option<u64>,
 }
 
 impl Default for DaytonaResources {
@@ -124,24 +127,24 @@ impl Default for DaytonaResources {
         Self {
             cpu_cores: 2,
             memory_mb: 4096,
-            disk_mb:   20 * 1024,
+            disk_mb:   None,
         }
     }
 }
 
 impl DaytonaResources {
     pub(crate) fn validated(self) -> Result<Resources, EnvError> {
-        if self.cpu_cores < 2 || self.memory_mb < 4096 || self.disk_mb < 4096 {
+        if self.cpu_cores < 2 || self.memory_mb < 4096 || self.disk_mb == Some(0) {
             return Err(EnvError::backend(
                 "daytona",
                 "configure",
-                "nested Docker needs at least 2 CPUs, 4096 MiB of memory, and 4096 MiB of disk",
+                "the Daytona runner needs at least 2 CPUs and 4096 MiB of memory; an explicit disk allocation must be positive",
             ));
         }
         let mut resources = Resources::default();
         resources.cpu_cores = Some(self.cpu_cores);
         resources.memory_mb = Some(self.memory_mb);
-        resources.disk_mb = Some(self.disk_mb);
+        resources.disk_mb = self.disk_mb;
         Ok(resources)
     }
 }
@@ -260,5 +263,35 @@ mod tests {
             .validated()
             .is_err()
         );
+        assert!(
+            DaytonaResources {
+                disk_mb: Some(0),
+                ..Default::default()
+            }
+            .validated()
+            .is_err()
+        );
+        for disk in [1024, 3 * 1024, 4096, 20 * 1024] {
+            let resources = DaytonaResources {
+                disk_mb: Some(disk),
+                ..Default::default()
+            }
+            .validated()
+            .unwrap();
+            assert_eq!(resources.disk_mb, Some(disk));
+        }
+    }
+
+    #[test]
+    fn daytona_defaults_use_a_container_with_provider_selected_disk() {
+        let options = SandboxOptions {
+            backend: SandboxBackend::Daytona,
+            ..Default::default()
+        };
+        assert_eq!(options.daytona_kind.sandbox_kind(), SandboxKind::Container);
+        let resources = options.daytona_resources.validated().unwrap();
+        assert_eq!(resources.cpu_cores, Some(2));
+        assert_eq!(resources.memory_mb, Some(4096));
+        assert_eq!(resources.disk_mb, None);
     }
 }
