@@ -38,7 +38,8 @@ use pebble_coding_agent::events::{
     CodingAgentEvent, CodingEvent, EventSink, EventSinkError, PermissionLevel,
 };
 use pebble_coding_agent::{
-    CodingAgent, CodingAgentOptions, Error as AgentError, PromptReport, ShutdownReason,
+    CodingAgent, CodingAgentOptions, CodingInput, Error as AgentError, InputSource, PromptReport,
+    ShutdownReason,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -716,7 +717,11 @@ impl AgentWork {
             },
         };
         let (text, reason) = {
-            let prompt = agent.prompt_with_cancellation(&self.instructions, &cancel);
+            // Hook instructions are harness-assembled like a stage prompt:
+            // sourced Agent so skill-reference expansion leaves them alone
+            // (fabro-3fce; latent while hook agents discover no skills).
+            let input = CodingInput::text(&self.instructions).with_source(InputSource::Agent);
+            let prompt = agent.prompt_with_cancellation(input, &cancel);
             tokio::pin!(prompt);
             let ended = tokio::select! {
                 biased;
