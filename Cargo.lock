@@ -1512,7 +1512,7 @@ dependencies = [
 [[package]]
 name = "pebble-agent"
 version = "0.1.0"
-source = "git+https://github.com/denkhaus/pebble?branch=fabro#3ea3424bd207c58c7200cedd0813e8a85bc1031c"
+source = "git+https://github.com/denkhaus/pebble?branch=fabro#e0294047aa2785903e49cb26389ea75ab6e6fcef"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1529,7 +1529,7 @@ dependencies = [
 [[package]]
 name = "pebble-coding-agent"
 version = "0.1.0"
-source = "git+https://github.com/denkhaus/pebble?branch=fabro#3ea3424bd207c58c7200cedd0813e8a85bc1031c"
+source = "git+https://github.com/denkhaus/pebble?branch=fabro#e0294047aa2785903e49cb26389ea75ab6e6fcef"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2882,7 +2882,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
