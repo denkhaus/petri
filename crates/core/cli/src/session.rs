@@ -97,7 +97,7 @@ impl SessionArgs {
         options.sandbox.daytona_resources = DaytonaResources {
             cpu_cores: runner.daytona_cpus,
             memory_mb: runner.daytona_memory_mb,
-            disk_mb:   runner.daytona_disk_mb,
+            disk_mb:   Some(runner.daytona_disk_mb),
         };
         options
     }

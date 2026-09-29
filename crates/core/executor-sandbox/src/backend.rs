@@ -116,7 +116,9 @@ impl FromStr for DaytonaSandboxKind {
 pub struct DaytonaResources {
     pub cpu_cores: u32,
     pub memory_mb: u64,
-    pub disk_mb:   u64,
+    /// `None` lets Daytona choose the disk allocation when building the
+    /// snapshot. Explicit allocations must be at least 4096 MiB.
+    pub disk_mb:   Option<u64>,
 }
 
 impl Default for DaytonaResources {
@@ -124,14 +126,17 @@ impl Default for DaytonaResources {
         Self {
             cpu_cores: 2,
             memory_mb: 4096,
-            disk_mb:   20 * 1024,
+            disk_mb:   Some(20 * 1024),
         }
     }
 }
 
 impl DaytonaResources {
     pub(crate) fn validated(self) -> Result<Resources, EnvError> {
-        if self.cpu_cores < 2 || self.memory_mb < 4096 || self.disk_mb < 4096 {
+        if self.cpu_cores < 2
+            || self.memory_mb < 4096
+            || self.disk_mb.is_some_and(|disk| disk < 4096)
+        {
             return Err(EnvError::backend(
                 "daytona",
                 "configure",
@@ -141,7 +146,7 @@ impl DaytonaResources {
         let mut resources = Resources::default();
         resources.cpu_cores = Some(self.cpu_cores);
         resources.memory_mb = Some(self.memory_mb);
-        resources.disk_mb = Some(self.disk_mb);
+        resources.disk_mb = self.disk_mb;
         Ok(resources)
     }
 }
@@ -260,5 +265,22 @@ mod tests {
             .validated()
             .is_err()
         );
+        for disk in [0, 4095] {
+            assert!(
+                DaytonaResources {
+                    disk_mb: Some(disk),
+                    ..Default::default()
+                }
+                .validated()
+                .is_err()
+            );
+        }
+        let unspecified = DaytonaResources {
+            disk_mb: None,
+            ..Default::default()
+        }
+        .validated()
+        .unwrap();
+        assert_eq!(unspecified.disk_mb, None);
     }
 }

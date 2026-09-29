@@ -190,7 +190,7 @@ async fn a_process_step_runs_in_the_runner_vm() {
     let resources = status.resources.expect("Daytona reports the allocation");
     assert_eq!(resources.cpu_cores, Some(wanted.cpu_cores));
     assert_eq!(resources.memory_mb, Some(wanted.memory_mb));
-    assert_eq!(resources.disk_mb, Some(wanted.disk_mb));
+    assert_eq!(resources.disk_mb, wanted.disk_mb);
     if let Some(region) = env::var_os("DAYTONA_TARGET").filter(|value| !value.is_empty()) {
         assert_eq!(
             status.region.as_deref(),

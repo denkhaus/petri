@@ -59,8 +59,24 @@ impl RunnerSnapshot {
     }
 
     fn validate_status(&self, status: &SnapshotStatus) -> Result<(), EnvError> {
+        let mut expected = self.spec.resources;
+        if expected.disk_mb.is_none() {
+            // An omitted request delegates disk sizing to Daytona. Accept
+            // its positive allocation without imposing the minimum for an
+            // explicitly sized runner; other requested resources still
+            // have to match exactly.
+            let disk = status.resources.and_then(|resources| resources.disk_mb);
+            if disk.is_none_or(|disk| disk == 0) {
+                return Err(EnvError::backend(
+                    "daytona",
+                    "snapshot",
+                    "the runner snapshot must report a positive disk allocation",
+                ));
+            }
+            expected.disk_mb = disk;
+        }
         if status.sandbox_kind != self.spec.sandbox_kind
-            || status.resources != Some(self.spec.resources)
+            || status.resources != Some(expected)
             || self
                 .spec
                 .region
@@ -200,7 +216,9 @@ mod tests {
             let id = SnapshotId::try_new(spec.name.as_ref().unwrap()).unwrap();
             let mut status = SnapshotStatus::new(id.clone(), SnapshotState::Active);
             status.sandbox_kind = spec.sandbox_kind;
-            status.resources = Some(spec.resources);
+            let mut resolved = spec.resources;
+            resolved.disk_mb.get_or_insert(3 * 1024);
+            status.resources = Some(resolved);
             status.regions = spec.region.iter().cloned().collect();
             *self.status.lock().unwrap() = Some(status);
             yield_now().await;
@@ -256,6 +274,71 @@ mod tests {
             SandboxKind::VirtualMachine,
             None,
         )
+    }
+
+    #[tokio::test]
+    async fn an_unspecified_disk_uses_the_resolved_allocation_and_reuses_the_snapshot() {
+        let resources = DaytonaResources {
+            disk_mb: None,
+            ..Default::default()
+        }
+        .validated()
+        .unwrap();
+        let request = RunnerSnapshot::new("runner:pinned", resources, SandboxKind::Container, None);
+        let snapshots = Snapshots::default();
+        RunnerSnapshots::default()
+            .ensure(&snapshots, &request)
+            .await
+            .unwrap();
+        // A fresh executor must also accept Daytona's concrete allocation.
+        RunnerSnapshots::default()
+            .ensure(&snapshots, &request)
+            .await
+            .unwrap();
+        assert_eq!(snapshots.creates.load(Ordering::SeqCst), 1);
+        let status = snapshots.get(&request.id).await.unwrap();
+        assert_eq!(status.resources.unwrap().disk_mb, Some(3 * 1024));
+        let mut explicit = resources;
+        explicit.disk_mb = Some(10 * 1024);
+        assert_ne!(
+            request.id,
+            RunnerSnapshot::new("runner:pinned", explicit, SandboxKind::Container, None).id
+        );
+    }
+
+    #[test]
+    fn provider_disk_defaults_are_accepted_and_explicit_resources_still_match() {
+        let resources = DaytonaResources {
+            disk_mb: None,
+            ..Default::default()
+        }
+        .validated()
+        .unwrap();
+        let request = RunnerSnapshot::new("runner:pinned", resources, SandboxKind::Container, None);
+        let mut status = SnapshotStatus::new(request.id.clone(), SnapshotState::Active);
+        status.sandbox_kind = Some(SandboxKind::Container);
+        for disk in [None, Some(0), Some(3 * 1024), Some(4096), Some(10 * 1024)] {
+            let mut resolved = resources;
+            resolved.disk_mb = disk;
+            status.resources = Some(resolved);
+            assert_eq!(
+                request.validate_status(&status).is_ok(),
+                disk.is_some_and(|disk| disk > 0)
+            );
+        }
+        status.resources.as_mut().unwrap().cpu_cores = Some(4);
+        assert!(request.validate_status(&status).is_err());
+        status.resources.as_mut().unwrap().cpu_cores = resources.cpu_cores;
+        status.sandbox_kind = Some(SandboxKind::VirtualMachine);
+        assert!(request.validate_status(&status).is_err());
+        status.sandbox_kind = Some(SandboxKind::Container);
+        let explicit = RunnerSnapshot::new(
+            "runner:pinned",
+            DaytonaResources::default().validated().unwrap(),
+            SandboxKind::Container,
+            None,
+        );
+        assert!(explicit.validate_status(&status).is_err());
     }
 
     #[tokio::test]
