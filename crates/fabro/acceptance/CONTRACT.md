@@ -796,7 +796,7 @@ two copies of one library. The row names are the keys of a record's
 |---|---|---|---|
 | `pebble` | `ba2928d7407a536de817667d5cea02d8595d4167` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
 | `lithos_llm` | `f40391aa8b3c3871bbac3dced2f4e26ddc46a743` | `lithoscomputer/lithos-llm` (public) | provider transport, request retries, and the `Usage` type every usage takes |
-| `sandbox_driver` | `b6b5c9c207a510e41c01bcbce4203f489bf734fc` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
+| `sandbox_driver` | `7d1932b5fd758dbc67ae5a34aaed08d8733ddaba` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
 | `twins` | `ca45f0e50a6716d716aa2f638ca3cf767e88f613` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
 | `fabro_reference` | `05ebd0fd1beec214b558f4b478e36bd08b507dc7` | `fabro-sh/fabro` (public, `main`) | the reference Fabro the corpus, oracle, bundles, and differential matrix use |
 | `runner_image` | `f8bbbfd81934` | `lithoscomputer/sandbox-images` (public) | the default runner images (`ghcr.io/lithoscomputer/ubuntu-*`) Docker and Daytona scopes start from (`RUNNER_PIN` in `crates/core/executor-sandbox/src/backend.rs`; PyYAML present since `df708f910111`) |
@@ -810,11 +810,10 @@ serve them. Since Pebble `6996942` Pebble's `mcp` feature no longer names
 the sandbox-driver crate; since Pebble PR #27 its `sandbox-driver` feature
 names it again, and Fabro builds that feature beside Petri's crates, so
 Petri and Pebble both name sandbox-driver by `branch = "main"` and the
-lockfile holds one copy. sandbox-driver is locked at `b6b5c9c2` (PR #65),
+lockfile holds one copy. sandbox-driver is locked at `7d1932b5` (the merge of PR #65),
 which shares Daytona allocation normalization with Petri. Runner minimums,
 snapshot identity and status comparisons now use the driver's effective
-allocation. This is stacked on the driver review commit pending its merge.
-The preceding pin `236196ed` adds
+allocation. The preceding pin `236196ed` adds
 Daytona's cursor-based sandbox listing (lithoscomputer/sandbox-driver#62) and
 tracks daytona-sdk-rust `main` (#64) on top of `583a1646`. `583a1646`
 (the merge of lithoscomputer/sandbox-driver#61, `7cc5d5ba`, into `main` on
