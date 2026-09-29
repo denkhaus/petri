@@ -93,11 +93,12 @@ impl SessionArgs {
             options.sandbox.backend = backend;
         }
         options.sandbox.runner_images = runner.images.into_iter().collect();
-        options.sandbox.daytona_kind = runner.daytona_kind;
+        options.sandbox.daytona_kind = runner.daytona_kind.unwrap_or(options.sandbox.daytona_kind);
+        let defaults = options.sandbox.daytona_resources;
         options.sandbox.daytona_resources = DaytonaResources {
-            cpu_cores: runner.daytona_cpus,
-            memory_mb: runner.daytona_memory_mb,
-            disk_mb:   Some(runner.daytona_disk_mb),
+            cpu_cores: runner.daytona_cpus.unwrap_or(defaults.cpu_cores),
+            memory_mb: runner.daytona_memory_mb.unwrap_or(defaults.memory_mb),
+            disk_mb:   runner.daytona_disk_mb.or(defaults.disk_mb),
         };
         options
     }

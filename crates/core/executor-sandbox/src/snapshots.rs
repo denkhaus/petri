@@ -270,7 +270,12 @@ mod tests {
     fn request() -> RunnerSnapshot {
         RunnerSnapshot::new(
             "runner:dind-pinned",
-            DaytonaResources::default().validated().unwrap(),
+            DaytonaResources {
+                disk_mb: Some(20 * 1024),
+                ..Default::default()
+            }
+            .validated()
+            .unwrap(),
             SandboxKind::VirtualMachine,
             None,
         )
@@ -334,7 +339,12 @@ mod tests {
         status.sandbox_kind = Some(SandboxKind::Container);
         let explicit = RunnerSnapshot::new(
             "runner:pinned",
-            DaytonaResources::default().validated().unwrap(),
+            DaytonaResources {
+                disk_mb: Some(20 * 1024),
+                ..Default::default()
+            }
+            .validated()
+            .unwrap(),
             SandboxKind::Container,
             None,
         );

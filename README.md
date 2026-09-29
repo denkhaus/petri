@@ -345,27 +345,34 @@ Host is the default, unless the workflow's own configuration asks for another
 lowered graph through `Frontend::launch_settings`; `petri resume` finds the
 format from the stored graph through `Frontend::claims_graph`); an explicit
 `--backend` always wins. Docker runs process jobs in a pinned slim runner image.
-Daytona runs them in a VM with nested Docker; container jobs, services, and
-Docker actions stay inside that VM. `--runner-image LABEL=IMAGE` overrides a
+Daytona runs them in a container with nested Docker; container jobs, services,
+and Docker actions stay inside that sandbox. `--daytona-kind vm` explicitly
+selects a VM when the account supports it. `--runner-image LABEL=IMAGE` overrides a
 runner label. Docker defaults cover Ubuntu 22.04, 24.04, and 26.04. Daytona's
 published Docker-in-Docker default covers Ubuntu 24.04 and `ubuntu-latest`;
 other labels need an override. Unknown or conflicting labels fail at acquire.
 
 Daytona reads its credentials from `DAYTONA_API_KEY` or `DAYTONA_JWT_TOKEN`
-and the SDK's endpoint and organization variables. `--daytona-cpus`,
-`--daytona-memory-mb`, and `--daytona-disk-mb` default to 2, 4096, and 20480.
+and the SDK's endpoint and organization variables. The CLI and embedded library
+share a baseline of 2 CPUs and 4096 MiB of memory, the runner's minimums.
+Disk is unspecified by default, so Daytona chooses the allocation. Existing
+`--daytona-cpus`, `--daytona-memory-mb`, and `--daytona-disk-mb` flags override
+each value independently; clients set `SandboxOptions` and `DaytonaResources`.
+Explicit disk allocations must be positive; Daytona enforces image-fit and
+account limits. No VM access or enlarged disk quota is needed for the defaults.
 Runner snapshots are named by image and resources, prepared once per run,
 and reused across runs. Snapshot preparation has a 15-minute deadline.
-Petri disables automatic VM stop, pause, deletion, and TTL timers; lease
+Petri disables automatic sandbox stop, pause, deletion, and TTL timers; lease
 release and prune control cleanup. Shared runner snapshots remain available.
 
 Daytona has no inferred route to Petri's ObjectService. Ordinary JavaScript
 and Docker actions still run, with the service variables omitted. Artifact
 and cache actions need `PETRI_SANDBOX_DAYTONA_HOST_ADDRESS` set to a name or
-address reachable from the VM. Local transport and adapter tests pass. The
+address reachable from the sandbox. Local transport and adapter tests pass. The
 live Daytona tier (`mise run test:daytona`, see
 [the live Daytona tier](crates/core/executor-sandbox/DAYTONA.md)) needs
-credentials and has not yet been run against the hosted service.
+credentials. Its default process and nested-container smoke tests have passed
+against the hosted service; the full tier remains separate validation.
 
 Release archives bundle the Docker, Host, and Daytona plugin executables from
 the locked sandbox-driver commit. Petri embeds their SHA-256 digests at release build time.
