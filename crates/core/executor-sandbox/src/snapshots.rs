@@ -282,6 +282,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn equivalent_allocations_reuse_the_snapshot_and_accept_provider_sizes() {
+        let snapshots = Snapshots::default();
+        for disk_mb in [None, Some(2862)] {
+            let requested = DaytonaResources {
+                memory_mb: 3815,
+                disk_mb,
+                ..Default::default()
+            };
+            let rounded = DaytonaResources {
+                memory_mb: 4096,
+                disk_mb: disk_mb.map(|_| 3072),
+                ..requested
+            };
+            let snapshot = RunnerSnapshot::new(
+                "runner:pinned",
+                requested.validated().unwrap(),
+                SandboxKind::Container,
+                Some("us"),
+            );
+            let equivalent = RunnerSnapshot::new(
+                "runner:pinned",
+                rounded.validated().unwrap(),
+                SandboxKind::Container,
+                Some("us"),
+            );
+            assert_eq!(snapshot.id, equivalent.id);
+            assert_eq!(snapshot.spec.resources.memory_mb, Some(4096));
+            assert_eq!(snapshot.spec.resources.disk_mb, rounded.disk_mb);
+
+            // A provider reports actual whole-GiB allocations, including
+            // its chosen disk size when the request left that unspecified.
+            let mut actual = rounded.validated().unwrap();
+            actual.disk_mb = Some(3072);
+            let mut status = SnapshotStatus::new(snapshot.id.clone(), SnapshotState::Active);
+            status.sandbox_kind = Some(SandboxKind::Container);
+            status.regions = vec!["us".to_owned()];
+            status.resources = Some(actual);
+            *snapshots.status.lock().unwrap() = Some(status.clone());
+            RunnerSnapshots::default()
+                .ensure(&snapshots, &snapshot)
+                .await
+                .unwrap();
+            RunnerSnapshots::default()
+                .ensure(&snapshots, &equivalent)
+                .await
+                .unwrap();
+
+            status.resources.as_mut().unwrap().memory_mb = Some(5120);
+            assert!(snapshot.validate_status(&status).is_err());
+            status.resources = Some(actual);
+            status.regions = vec!["eu".to_owned()];
+            assert!(snapshot.validate_status(&status).is_err());
+        }
+        assert_eq!(snapshots.creates.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn an_unspecified_disk_uses_the_resolved_allocation_and_reuses_the_snapshot() {
         let resources = DaytonaResources {
             disk_mb: None,

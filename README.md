@@ -366,7 +366,11 @@ Disk is unspecified by default, so Daytona chooses the allocation. Existing
 each value independently; clients set `SandboxOptions` and `DaytonaResources`.
 Explicit disk allocations must be positive; Daytona enforces image-fit and
 account limits. No VM access or enlarged disk quota is needed for the defaults.
-Runner snapshots are named by image and resources, prepared once per run,
+The executor uses the driver's whole-GiB allocation rule before checking the
+memory minimum, naming a snapshot, and comparing its reported resources.
+Equivalent requests therefore reuse a snapshot, including requests supplied
+in MiB by an embedded client. Omitted disk remains unspecified.
+Runner snapshots are named by image and effective resources, prepared once per run,
 and reused across runs. Snapshot preparation has a 15-minute deadline.
 Petri disables automatic sandbox stop, pause, deletion, and TTL timers; lease
 release and prune control cleanup. Shared runner snapshots remain available.
