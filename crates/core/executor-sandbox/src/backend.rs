@@ -115,6 +115,8 @@ impl FromStr for DaytonaSandboxKind {
 #[derive(Clone, Copy, Debug)]
 pub struct DaytonaResources {
     pub cpu_cores: u32,
+    /// Requested memory in MiB. The driver's effective allocation must
+    /// meet the runner minimum; Daytona rounds up to whole GiB.
     pub memory_mb: u64,
     /// `None` lets Daytona choose the disk allocation when building the
     /// snapshot. Explicit allocations must be positive; Daytona validates
@@ -134,7 +136,8 @@ impl Default for DaytonaResources {
 
 impl DaytonaResources {
     pub(crate) fn validated(self) -> Result<Resources, EnvError> {
-        if self.cpu_cores < 2 || self.memory_mb < 4096 || self.disk_mb == Some(0) {
+        let memory_mb = sandbox_driver_daytona_config::allocation_mib(self.memory_mb);
+        if self.cpu_cores < 2 || memory_mb < 4096 || self.disk_mb == Some(0) {
             return Err(EnvError::backend(
                 "daytona",
                 "configure",
@@ -143,8 +146,12 @@ impl DaytonaResources {
         }
         let mut resources = Resources::default();
         resources.cpu_cores = Some(self.cpu_cores);
-        resources.memory_mb = Some(self.memory_mb);
-        resources.disk_mb = self.disk_mb;
+        // Snapshot identity, creation and status validation all use the
+        // same effective allocation that the provider sends to Daytona.
+        resources.memory_mb = Some(memory_mb);
+        resources.disk_mb = self
+            .disk_mb
+            .map(sandbox_driver_daytona_config::allocation_mib);
         Ok(resources)
     }
 }
@@ -293,5 +300,29 @@ mod tests {
         assert_eq!(resources.cpu_cores, Some(2));
         assert_eq!(resources.memory_mb, Some(4096));
         assert_eq!(resources.disk_mb, None);
+    }
+
+    #[test]
+    fn daytona_validates_the_effective_memory_allocation() {
+        for memory_mb in [0, 1, 2048, 3072] {
+            assert!(
+                DaytonaResources {
+                    memory_mb,
+                    ..Default::default()
+                }
+                .validated()
+                .is_err()
+            );
+        }
+        for memory_mb in [3073, 3815, 4096] {
+            let resources = DaytonaResources {
+                memory_mb,
+                ..Default::default()
+            }
+            .validated()
+            .unwrap();
+            assert_eq!(resources.memory_mb, Some(4096));
+            assert_eq!(resources.disk_mb, None);
+        }
     }
 }
