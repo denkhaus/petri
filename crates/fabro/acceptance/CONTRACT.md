@@ -784,26 +784,26 @@ agent's event stream as `LlmRetry`.
 ## Pinned revisions
 
 Every library Petri runs Fabro workflows through is locked to one commit
-(see "Git dependencies" in `DEVELOPING.md`). This table is the
-citation the evidence records and `scripts/check-pins.py` compare against
-`Cargo.lock`, `crates/fabro/corpus-pin.txt`, and `bundles.lock.json`.
-`mise run check:pins` fails when any of them disagree, when an internal
-dependency names anything but `branch = "main"`, or when `Cargo.lock` holds
-two copies of one library. The row names are the keys of a record's
-`pins` block.
+(see "Git dependencies" in `DEVELOPING.md`). Each revision has one home, and
+this table names it instead of copying it. The row names are the keys of an
+evidence record's `pins` block. `mise run check:pins` fails when an internal
+dependency names anything but `branch = "main"`, when `Cargo.lock` holds two
+copies of one library, when `corpus-pin.txt` and `bundles.lock.json` name
+different Fabro commits, or when an evidence record cites a revision other
+than the one locked.
 
 | Pin | Revision | Repository | Role |
 |---|---|---|---|
-| `pebble` | `ba2928d7407a536de817667d5cea02d8595d4167` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
-| `lithos_llm` | `f40391aa8b3c3871bbac3dced2f4e26ddc46a743` | `lithoscomputer/lithos-llm` (public) | provider transport, request retries, and the `Usage` type every usage takes |
-| `sandbox_driver` | `7d1932b5fd758dbc67ae5a34aaed08d8733ddaba` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
-| `twins` | `ca45f0e50a6716d716aa2f638ca3cf767e88f613` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
-| `fabro_reference` | `05ebd0fd1beec214b558f4b478e36bd08b507dc7` | `fabro-sh/fabro` (public, `main`) | the reference Fabro the corpus, oracle, bundles, and differential matrix use |
-| `runner_image` | `f8bbbfd81934` | `lithoscomputer/sandbox-images` (public) | the default runner images (`ghcr.io/lithoscomputer/ubuntu-*`) Docker and Daytona scopes start from (`RUNNER_PIN` in `crates/core/executor-sandbox/src/backend.rs`; PyYAML present since `df708f910111`) |
+| `pebble` | `Cargo.lock` | `lithoscomputer/pebble` (public) | the agent loop and coding agent (`pebble-coding-agent`, `pebble-agent`) |
+| `lithos_llm` | `Cargo.lock` | `lithoscomputer/lithos-llm` (public) | provider transport, request retries, and the `Usage` type every usage takes |
+| `sandbox_driver` | `Cargo.lock` | `lithoscomputer/sandbox-driver` (public) | the sandbox plugin protocol and the host, Docker, and Daytona plugins |
+| `twins` | `Cargo.lock` | `lithoscomputer/twins` (public) | the OpenAI and Anthropic provider twins the harness serves on loopback |
+| `fabro_reference` | `crates/fabro/corpus-pin.txt` | `fabro-sh/fabro` (public, `main`) | the reference Fabro the corpus, oracle, bundles, and differential matrix use |
+| `runner_image` | `RUNNER_PIN` in `crates/core/executor-sandbox/src/backend.rs` | `lithoscomputer/sandbox-images` (public) | the default runner images (`ghcr.io/lithoscomputer/ubuntu-*`) Docker and Daytona scopes start from (PyYAML present since `df708f910111`) |
 
 A change to Pebble or lithos-llm runs the owning
-repository's required checks before Petri moves its lock; then this table,
-`Cargo.lock`, and the affected evidence records move together. The library batch
+repository's required checks before Petri moves its lock; then the affected
+scenarios run again, and their evidence records cite the new commits. The library batch
 the readiness work asked for is inside the pinned revisions (Pebble `4c00633`,
 sandbox-driver `a92c0db6`); the twins track `main` in both test crates that
 serve them. Since Pebble `6996942` Pebble's `mcp` feature no longer names
@@ -861,7 +861,7 @@ it.
 |---|---|---|
 | Repeatable focused task on the same required set as CI | `mise run test:fabro:blackbox` runs `scripts/test-fabro-blackbox.sh`: every `petri-cli` `fabro_*blackbox` binary (the readiness suite included) plus `standalone`, `fabro_cli` and the oracle test, same build and features as `mise run test`, evidence and coverage report per run | met |
 | Extended variations and repeated process-isolation runs in `check:nightly` | `mise run check:nightly` on every nightly runner: `test:fabro:blackbox:repeat` (three runs under different schedules), `test:long`, `test:fabro:differential`, `check:msrv`, `test:release`; the nightly workflow then runs `check:fabro:readiness` (the strict set, `test:fabro:blackbox:strict`, plus the readiness verdict) on the runners that have Docker, since the strict task requires a daemon | met |
-| Library changes run the owning repository's checks before Petri pins them | `README.md` "Library and repository gates", `DEVELOPING.md`; the "Pinned revisions" table above; `mise run check:pins` (the runner image included) | met; the batch is pinned |
+| Library changes run the owning repository's checks before Petri pins them | `README.md` "Library and repository gates", `DEVELOPING.md`; the "Pinned revisions" table above; `mise run check:pins` | met; the batch is locked |
 | Protocol retry, Pebble replay, Petri retry, and cross-layer cases distinct; a provider interruption after a non-idempotent tool effect | `llm_client.rs`, `fabro_fallback_blackbox::a_tool_effect_is_not_repeated_across_a_failover`, `client_retries_are_spent_before_the_chain_advances`, `a_workflow_retry_is_not_a_failover`, `fallback_events.rs` | met |
 | Required CI verifies the vendored bundles and the pinned twins, requires the corpus, fails on an absent asset, binary, scenario, or backend | `.github/workflows/ci.yml`; `PETRI_REQUIRE_*`; `tests/support/fabro/require.rs`; `mise run check:bundles` | met: the push runs on `67f4cb0` (34325364222), `97fb247` (34379457228) and `2463979` (34394908040) passed every job with no fetch and no key (2026-09-09) |
 | Every required host scenario in routine CI; the Docker subset on Linux | `mise run check` runs the whole suite on both runners; Docker cases skip on macOS and are required on Linux; every planned cell of `matrix.json` has a test | met; hosted on the runs above (Linux with Docker required, macOS host cells) |

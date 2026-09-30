@@ -81,7 +81,7 @@ bounded output capture, and the Pebble environment contract on Host and Docker.
 | `mise run test:lean` | Check the engine core against the Lean model, with the model required |
 | `mise run check` | Run the complete routine verification gate |
 | `mise run check:bundles` | Verify the vendored Fabro bundles against `bundles.lock.json`, digest by digest |
-| `mise run check:pins` | Check that internal Git dependencies track `main`, and that `Cargo.lock`, `CONTRACT.md`, and the latest evidence records cite the same revisions |
+| `mise run check:pins` | Check that internal Git dependencies track `main`, that `Cargo.lock` holds one copy of each, and that the latest evidence records cite the locked revisions |
 | `mise run test:fabro:blackbox` | Run the required Fabro black box scenarios and write their evidence records and coverage report |
 | `mise run test:fabro:blackbox:repeat` | The same set three times, each in fresh processes under a different schedule |
 | `mise run test:fabro:differential` | Compare the shipped binary with the pinned `fabro` binary (built from the corpus on first use, about three minutes) |
@@ -118,10 +118,10 @@ secrets, step output, and environment values are never captured.
 ## Library and repository gates
 
 The MCP client is Pebble's dependency. A change to Pebble or `lithos-llm`
-runs that repository's required checks first; only then does Petri move its lock,
-update the "Pinned revisions" table in
-`crates/fabro/acceptance/CONTRACT.md`, and rerun the affected black box
-scenarios. `mise run check:pins` fails while the citations disagree. A library
+runs that repository's required checks first; only then does Petri move its lock
+and rerun the affected black box scenarios. `Cargo.lock` is the only copy of
+the locked commits; `mise run check:pins` fails when an evidence record cites
+another. A library
 test pass never replaces a required Petri scenario. The pending library batch
 is listed in `README.md` under "Library and repository gates".
 

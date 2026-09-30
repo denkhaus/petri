@@ -7,8 +7,8 @@ name: Internal dependencies
 # tracking issue labeled `internal-deps`, or comments on the open one; the
 # next passing run closes it. Nothing is pushed: Petri's lock only decides
 # what Petri's own CI builds, so a maintainer picks up a passing update with
-# the same `cargo update -p` commands (and the "Pinned revisions" table in
-# crates/fabro/acceptance/CONTRACT.md, which `mise run check:pins` compares).
+# the same `cargo update -p` commands. Cargo.lock is the only copy of the
+# locked commits, so nothing else has to move with it.
 
 on:
   schedule:
@@ -147,10 +147,10 @@ jobs:
 
       # The rest mirrors the Linux half of the routine CI job, so the new lock
       # meets the same test suite: the corpus, the vendored bundles, Docker,
-      # and the sandbox plugins, all required. It runs the lint, the tests, and
-      # the compiler floor, not the whole `mise run check`: `check:pins` fails
-      # by design until CONTRACT.md cites the new commits, and the release
-      # build and the repository checks do not depend on the lock.
+      # and the sandbox plugins, all required. It runs the pin check, the
+      # lint, the tests, and the compiler floor, not the whole `mise run
+      # check`: the release build and the repository checks do not depend on
+      # the lock.
       - name: Fetch the corpus
         if: steps.update.outputs.changed == 'true'
         run: scripts/corpus-fetch.sh && scripts/corpus-fetch-actions.sh && scripts/corpus-fetch-fabro.sh
@@ -184,6 +184,10 @@ jobs:
       - name: Build the sandbox plugins
         if: steps.update.outputs.changed == 'true'
         run: mise run plugins:build
+
+      - name: Check the pins
+        if: steps.update.outputs.changed == 'true'
+        run: mise run check:pins
 
       - name: Lint
         if: steps.update.outputs.changed == 'true'

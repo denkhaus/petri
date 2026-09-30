@@ -289,22 +289,20 @@ record. A pinned-Fabro assertion that a decision record lists under
 record; any other failed assertion fails the cell. CI writes the report into the job summary
 and keeps the full bundles of a failed run and the compact records of a passed
 run as job artifacts. `mise run check:pins` (`scripts/check-pins.py`) fails
-when `Cargo.lock`, the "Pinned revisions" table in
-`crates/fabro/acceptance/CONTRACT.md`, and the latest records cite different
-revisions. The readiness checklist with each item's evidence source is the
+when the latest records cite revisions other than the ones `Cargo.lock` locks.
+The readiness checklist with each item's evidence source is the
 "Readiness gate checklist" section of that contract.
 
 #### Library and repository gates
 
 Pebble owns the agent loop, coding-agent behavior, and the MCP client;
 `lithos-llm` owns provider transport and request retries. A change to either runs the owning repository's required checks
-before Petri moves its lock; then `Cargo.lock`, the contract's pin table, and
-the affected evidence records move together, and the relevant Petri scenarios
-run again through the shipped binary. A library test pass never replaces a
-required Petri scenario. The current locked commits are in the contract's
-"Pinned revisions" table (Pebble `ba2928d`, lithos-llm `f40391a`, sandbox-driver
-`236196ed`, twins `ca45f0e`, Fabro `05ebd0f`, the runner image
-`f8bbbfd81934`); `mise run check:pins` keeps every citation in agreement.
+before Petri moves its lock; then the relevant Petri scenarios run again
+through the shipped binary, and their evidence records cite the new commits.
+A library test pass never replaces a required Petri scenario. The locked
+commits live only in `Cargo.lock`; the contract's "Pinned revisions" table
+names where each revision lives, the Fabro reference and the runner image
+included.
 See [git dependencies](DEVELOPING.md#git-dependencies) for how they are
 named and updated.
 The library batch the readiness work asked for landed on

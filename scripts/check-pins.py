@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Check that every citation of a locked library revision agrees.
+"""Check that internal dependencies track `main` and that evidence cites the lock.
 
     scripts/check-pins.py [--evidence DIR]
 
 Every internal git dependency (a `lithoscomputer/*` repository) must name
 exactly `branch = "main"` in its manifest: never `rev`, and never an omitted
 ref, which Cargo treats as a different source. `Cargo.lock` chooses the
-commit. Sources compared:
+commit, and nothing else in the repository copies it. Sources compared:
 
   Cargo.toml, crates/petri/cli/Cargo.toml, crates/petri/lib/Cargo.toml
                                       every internal git dependency tracks `main`
@@ -14,12 +14,8 @@ commit. Sources compared:
                                       pebble-agent, lithos-llm, the sandbox-driver
                                       packages, and the twins (one commit, and one
                                       copy, per repository)
-  crates/core/executor-sandbox/src/backend.rs  RUNNER_PIN, the sandbox-images revision of
-                                      the default runner images (cited by the contract
-                                      table, not by evidence records)
   crates/fabro/corpus-pin.txt         the Fabro reference commit
   crates/fabro/acceptance/bundles.lock.json   fabro_reference.commit
-  crates/fabro/acceptance/CONTRACT.md the "Pinned revisions" table
   DIR/records/*.json                  the `pins` block of every evidence record
                                       (default: target/fabro-evidence/latest when present)
 
@@ -30,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 import tomllib
 from pathlib import Path
@@ -38,7 +33,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 INTERNAL = "github.com/lithoscomputer/"
 MANIFESTS = ("Cargo.toml", "crates/petri/cli/Cargo.toml", "crates/petri/lib/Cargo.toml")
-# The locked packages behind each row of the contract table.
+# The locked packages behind each key of an evidence record's `pins` block.
 LOCKED = {
     "pebble": ("pebble-coding-agent", "pebble-agent"),
     "lithos_llm": ("lithos-llm",),
@@ -101,22 +96,6 @@ def same(problems: list[str], label: str, values: dict[str, str]) -> str | None:
     return None
 
 
-def contract_table(path: Path) -> dict[str, str]:
-    text = path.read_text(encoding="utf-8")
-    start = text.find("## Pinned revisions")
-    if start < 0:
-        return {}
-    section = text[start:]
-    end = section.find("\n## ", 1)
-    section = section if end < 0 else section[:end]
-    table: dict[str, str] = {}
-    for line in section.splitlines():
-        m = re.match(r"^\|\s*`?([a-z0-9_-]+)`?\s*\|\s*`([0-9a-f]{7,40})`", line)
-        if m:
-            table[m.group(1)] = m.group(2)
-    return table
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--evidence", type=Path)
@@ -135,24 +114,6 @@ def main() -> int:
     lock = json.loads((ROOT / "crates/fabro/acceptance/bundles.lock.json").read_text(encoding="utf-8"))
     if lock.get("fabro_reference", {}).get("commit") != fabro:
         problems.append(f"bundles.lock.json fabro_reference.commit {lock.get('fabro_reference', {}).get('commit')} != pin {fabro}")
-
-    contract = contract_table(ROOT / "crates/fabro/acceptance/CONTRACT.md")
-    if not contract:
-        problems.append("CONTRACT.md: no `## Pinned revisions` table")
-    backend = (ROOT / "crates/core/executor-sandbox/src/backend.rs").read_text(encoding="utf-8")
-    runner = re.search(r'const RUNNER_PIN: &str = "([0-9a-f]+)"', backend)
-    if runner is None:
-        problems.append("backend.rs: RUNNER_PIN not found")
-    elif contract.get("runner_image") is None:
-        problems.append("CONTRACT.md: no row for runner_image")
-    elif not runner.group(1).startswith(contract["runner_image"]) and not contract["runner_image"].startswith(runner.group(1)):
-        problems.append(f"CONTRACT.md: runner_image is {contract['runner_image']}, backend.rs pins {runner.group(1)}")
-    for name, rev in expected.items():
-        cited = contract.get(name)
-        if cited is None:
-            problems.append(f"CONTRACT.md: no row for {name}")
-        elif not rev.startswith(cited):
-            problems.append(f"CONTRACT.md: {name} is {cited}, Cargo.lock locks {rev}")
 
     evidence = args.evidence or (ROOT / "target/fabro-evidence/latest")
     records = sorted(evidence.glob("records/*.json")) if evidence.is_dir() else []
@@ -173,8 +134,6 @@ def main() -> int:
 
     for name, rev in sorted(expected.items()):
         print(f"{name:16} {rev}")
-    if runner is not None:
-        print(f"{'runner_image':16} {runner.group(1)}")
     print(f"evidence records checked: {len(records)}" + (f" ({evidence})" if records else ""))
     if problems:
         print("pin check failed:", file=sys.stderr)
