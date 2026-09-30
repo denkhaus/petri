@@ -32,7 +32,7 @@ exactly `branch = "main"`: not `rev`, and not an omitted ref, which Cargo
 treats as a different source. Pick up a newer commit with
 `cargo update -p <crate>` and let CI decide; whoever breaks an API another
 Lithos repository uses fixes that repository promptly. Fabro's `Cargo.lock`
-decides what ships. `mise run check:pins` enforces the form.
+decides what ships.
 
 All of these repositories are public. `Cargo.toml` names them over HTTPS, so
 a build needs no SSH key and no credential, locally or in CI.
@@ -81,7 +81,6 @@ bounded output capture, and the Pebble environment contract on Host and Docker.
 | `mise run test:lean` | Check the engine core against the Lean model, with the model required |
 | `mise run check` | Run the complete routine verification gate |
 | `mise run check:bundles` | Verify the vendored Fabro bundles against `bundles.lock.json`, digest by digest |
-| `mise run check:pins` | Check that internal Git dependencies track `main`, that `Cargo.lock` holds one copy of each, and that the latest evidence records cite the locked revisions |
 | `mise run test:fabro:blackbox` | Run the required Fabro black box scenarios and write their evidence records and coverage report |
 | `mise run test:fabro:blackbox:repeat` | The same set three times, each in fresh processes under a different schedule |
 | `mise run test:fabro:differential` | Compare the shipped binary with the pinned `fabro` binary (built from the corpus on first use, about three minutes) |
@@ -120,9 +119,7 @@ secrets, step output, and environment values are never captured.
 The MCP client is Pebble's dependency. A change to Pebble or `lithos-llm`
 runs that repository's required checks first; only then does Petri move its lock
 and rerun the affected black box scenarios. `Cargo.lock` is the only copy of
-the locked commits; `mise run check:pins` fails when an evidence record cites
-another. A library
-test pass never replaces a required Petri scenario. The pending library batch
+the locked commits. A library test pass never replaces a required Petri scenario. The pending library batch
 is listed in `README.md` under "Library and repository gates".
 
 ## Rust policy

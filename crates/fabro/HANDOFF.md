@@ -37,7 +37,7 @@ lives in the distribution crate, so a host on the six packages builds its
 Petri names the libraries the two repositories share by `branch = "main"`.
 A Fabro build that names the same sources links one copy of each, and
 Fabro's `Cargo.lock` chooses the commit that ships. Petri's `Cargo.lock` only
-decides what Petri's own CI builds. `mise run check:pins` holds Petri's evidence records to it.
+decides what Petri's own CI builds.
 The readiness suite (`mise run check:fabro:readiness`) is the gate after
 either repository moves its lock.
 
@@ -274,7 +274,7 @@ acknowledgement gates the next step of the run:
 | the run format (7) on the run declaration, and the coordinator record version (`{seq, origin, recorded_at, body}` lines, `body` tagged by `event` with `<subject>.<verb>` names; the declaration carries the run `key`; version 6 adds `scope.released` and pins engine log v11; version 7 lets the declaration carry `forked_from`) | `execution::store` | a run written by a newer or older format is refused, never migrated; the check reads the first stored record before any other is decoded |
 | the engine log version (v11: `{seq, origin, recorded_at, body}` records, `body` tagged by `event` with `<subject>.<verb>` names; v11 adds `scope.acquired` and `scope.failed`), pinned by the run format | `engine::log` | a log whose version the runner does not speak is refused; replay must reproduce the log byte for byte or inspection reports corruption |
 | `inspect_format_version`, `event_contract_version` | in the documents themselves | |
-| Library pins (Pebble, lithos-llm, sandbox-driver, twins, the Fabro reference, the runner image) | `Cargo.lock`, `crates/fabro/corpus-pin.txt`, `RUNNER_PIN`; `CONTRACT.md` "Pinned revisions" names each home | evidence records cite the locked commits; `scripts/check-pins.py` checks them |
+| Library pins (Pebble, lithos-llm, sandbox-driver, twins, the Fabro reference, the runner image) | `Cargo.lock`, `crates/fabro/corpus-pin.txt`, `RUNNER_PIN`; `CONTRACT.md` "Pinned revisions" names each home | evidence records cite the locked commits |
 
 **Strict rejection of incompatible logs.** Petri never migrates a stored
 run: a run whose format version, coordinator record version, or engine log

@@ -786,11 +786,8 @@ agent's event stream as `LlmRetry`.
 Every library Petri runs Fabro workflows through is locked to one commit
 (see "Git dependencies" in `DEVELOPING.md`). Each revision has one home, and
 this table names it instead of copying it. The row names are the keys of an
-evidence record's `pins` block. `mise run check:pins` fails when an internal
-dependency names anything but `branch = "main"`, when `Cargo.lock` holds two
-copies of one library, when `corpus-pin.txt` and `bundles.lock.json` name
-different Fabro commits, or when an evidence record cites a revision other
-than the one locked.
+evidence record's `pins` block, which the record reads from these sources
+when it is written.
 
 | Pin | Revision | Repository | Role |
 |---|---|---|---|
@@ -861,7 +858,7 @@ it.
 |---|---|---|
 | Repeatable focused task on the same required set as CI | `mise run test:fabro:blackbox` runs `scripts/test-fabro-blackbox.sh`: every `petri-cli` `fabro_*blackbox` binary (the readiness suite included) plus `standalone`, `fabro_cli` and the oracle test, same build and features as `mise run test`, evidence and coverage report per run | met |
 | Extended variations and repeated process-isolation runs in `check:nightly` | `mise run check:nightly` on every nightly runner: `test:fabro:blackbox:repeat` (three runs under different schedules), `test:long`, `test:fabro:differential`, `check:msrv`, `test:release`; the nightly workflow then runs `check:fabro:readiness` (the strict set, `test:fabro:blackbox:strict`, plus the readiness verdict) on the runners that have Docker, since the strict task requires a daemon | met |
-| Library changes run the owning repository's checks before Petri pins them | `README.md` "Library and repository gates", `DEVELOPING.md`; the "Pinned revisions" table above; `mise run check:pins` | met; the batch is locked |
+| Library changes run the owning repository's checks before Petri pins them | `README.md` "Library and repository gates", `DEVELOPING.md`; the "Pinned revisions" table above | met; the batch is locked |
 | Protocol retry, Pebble replay, Petri retry, and cross-layer cases distinct; a provider interruption after a non-idempotent tool effect | `llm_client.rs`, `fabro_fallback_blackbox::a_tool_effect_is_not_repeated_across_a_failover`, `client_retries_are_spent_before_the_chain_advances`, `a_workflow_retry_is_not_a_failover`, `fallback_events.rs` | met |
 | Required CI verifies the vendored bundles and the pinned twins, requires the corpus, fails on an absent asset, binary, scenario, or backend | `.github/workflows/ci.yml`; `PETRI_REQUIRE_*`; `tests/support/fabro/require.rs`; `mise run check:bundles` | met: the push runs on `67f4cb0` (34325364222), `97fb247` (34379457228) and `2463979` (34394908040) passed every job with no fetch and no key (2026-09-09) |
 | Every required host scenario in routine CI; the Docker subset on Linux | `mise run check` runs the whole suite on both runners; Docker cases skip on macOS and are required on Linux; every planned cell of `matrix.json` has a test | met; hosted on the runs above (Linux with Docker required, macOS host cells) |

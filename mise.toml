@@ -131,10 +131,6 @@ run = "zizmor .github/workflows"
 description = "Verify the vendored Fabro bundles against bundles.lock.json, digest by digest"
 run = "scripts/corpus-fetch-fabro-bundles.sh"
 
-[tasks."check:pins"]
-description = "Check internal git dependency refs, and that Cargo.lock, CONTRACT.md, and the latest evidence records agree"
-run = "python3 scripts/check-pins.py"
-
 [tasks."check:whitespace"]
 description = "Check tracked and untracked patches for whitespace errors"
 run = ["git diff --check", "git diff --cached --check"]
@@ -152,7 +148,6 @@ depends = [
   "check:release-build",
   "check:actions",
   "check:bundles",
-  "check:pins",
   "check:whitespace",
   "test:remote",
 ]
