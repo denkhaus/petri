@@ -301,7 +301,10 @@ async fn a_json_schema_contract_spreads_top_level_context_updates() {
         report.state.errors()
     );
     let kv = report.state.run_context();
-    assert_eq!(kv.get("output.p"), Some(&json!({ "n": 3, "context_updates": {"seed": "seeds-1", "brief": "do it"} })));
+    assert_eq!(
+        kv.get("output.p"),
+        Some(&json!({ "n": 3, "context_updates": {"seed": "seeds-1", "brief": "do it"} }))
+    );
     assert_eq!(kv.get("seed"), Some(&json!("seeds-1")));
     assert_eq!(kv.get("brief"), Some(&json!("do it")));
 }

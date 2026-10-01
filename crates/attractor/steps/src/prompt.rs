@@ -54,6 +54,7 @@ use crate::blobs::{self, OutputStore};
 use crate::contract::{Contract, Parsed, repair_message, validate};
 use crate::fallback::{self, FrozenPlan, ModelFailure, StageRequest};
 use crate::fidelity::{self, Fidelity, Incoming, Preamble, StageInfo, ThreadConfig};
+use crate::fork_preamble_policy::{self, PreamblePolicy};
 use crate::outcome::{ExplicitRoutes, Stage};
 use crate::parallel::{BRANCH_COUNT_KEY, RESULTS_KEY, parallel_complete, strip_placeholders};
 use crate::pebble::environment::PebbleEnvironment;
@@ -220,9 +221,16 @@ impl PromptConfig {
         .fidelity
     }
 
-    /// The one user message: the fidelity preamble, the branch results for
+    /// The one user message: the fidelity preamble (shaped by the node's
+    /// fork preamble policy, fabro-70af PART 2b), the branch results for
     /// a fan-in, the node's prompt, and the contract.
-    fn assemble(&self, contract: &Contract, results: &Value, run_id: &str) -> String {
+    fn assemble(
+        &self,
+        contract: &Contract,
+        results: &Value,
+        run_id: &str,
+        policy: Option<&PreamblePolicy>,
+    ) -> String {
         let stages: Vec<StageInfo> = fidelity::stages(&self.stages);
         let preamble = Preamble {
             goal: &self.goal,
@@ -230,6 +238,7 @@ impl PromptConfig {
             stages: &stages,
             nodes: &self.nodes,
             kv: &self.kv,
+            policy,
         };
         let mut body = String::new();
         if !self.sources.is_empty() {
@@ -325,7 +334,8 @@ impl Step for PromptStep {
             .capability::<RunInfo>()
             .map(|run| run.run_id.clone())
             .unwrap_or_default();
-        let prompt = config.assemble(&contract, &results, &run_id);
+        let policy = fork_preamble_policy::policy_for(&ctx, &config.node);
+        let prompt = config.assemble(&contract, &results, &run_id, Some(&policy));
         let request = StageRequest {
             node:             &config.node,
             provider:         config.provider.as_deref(),
@@ -552,12 +562,15 @@ impl Step for PromptStep {
             // downstream reader resolves them as missing.
             Parsed::Structured(value) => {
                 stage.output.insert("structured".into(), value.clone());
-                stage
-                    .context_updates
-                    .insert(SmolStr::new(format!("output.{}", config.node)), value.clone());
+                stage.context_updates.insert(
+                    SmolStr::new(format!("output.{}", config.node)),
+                    value.clone(),
+                );
                 if let Some(updates) = value.get("context_updates").and_then(Value::as_object) {
                     for (key, item) in updates {
-                        stage.context_updates.insert(SmolStr::new(key.clone()), item.clone());
+                        stage
+                            .context_updates
+                            .insert(SmolStr::new(key.clone()), item.clone());
                     }
                 }
                 // The routing contract survives the schema contract: routing fields
@@ -569,7 +582,9 @@ impl Step for PromptStep {
                     stage.output.insert("preferred_label".into(), json!(label));
                 }
                 if let Some(ids) = value.get("suggested_next_ids") {
-                    stage.output.insert("suggested_next_ids".into(), ids.clone());
+                    stage
+                        .output
+                        .insert("suggested_next_ids".into(), ids.clone());
                 }
             }
             Parsed::Plain => {}
