@@ -1001,6 +1001,89 @@ fn the_launch_model_default_sits_below_every_layer() {
     assert_eq!(graph.params["fabro.launch"]["provider"], json!(null));
 }
 
+#[test]
+fn explicit_model_overrides_beat_defaults_but_preserve_node_and_stylesheet_choices() {
+    let source = dot(r##"
+        graph [default_model="graph-model", default_provider="graph-provider",
+               model_stylesheet="#styled { model: styled-model; provider: styled-provider; }"]
+        agent [prompt="x"]
+        prompt [shape=tab, prompt="x"]
+        explicit [prompt="x", model="node-model", provider="node-provider"]
+        styled [prompt="x"]
+        start -> agent -> prompt -> explicit -> styled -> exit
+    "##);
+    let files = files(&[(
+        "wf/workflow.toml",
+        "[run.model]\nname = \"file-model\"\nprovider = \"file-provider\"\n",
+    )]);
+    for (model, provider, expected_model, expected_provider) in [
+        (
+            "override-model",
+            "override-provider",
+            "override-model",
+            "override-provider",
+        ),
+        ("override-model", "", "override-model", "graph-provider"),
+        ("", "override-provider", "graph-model", "override-provider"),
+        (" ", "\t", "graph-model", "graph-provider"),
+    ] {
+        let inputs = CompileInputs::new()
+            .with_var(frontend::MODEL_OVERRIDE_VAR, model)
+            .with_var(frontend::PROVIDER_OVERRIDE_VAR, provider);
+        let lowered = load("wf/workflow.fabro", &source, &files, &inputs);
+        assert!(
+            !lowered.diagnostics.has_errors(),
+            "{:?}",
+            lowered.diagnostics
+        );
+        let graph = lowered.graph.expect("lowers");
+        for id in ["agent", "prompt"] {
+            let config = &node(&graph, id).step.config;
+            assert_eq!(config["model"], json!(expected_model));
+            assert_eq!(config["provider"], json!(expected_provider));
+        }
+        let explicit = &node(&graph, "explicit").step.config;
+        assert_eq!(explicit["model"], json!("node-model"));
+        assert_eq!(explicit["provider"], json!("node-provider"));
+        let styled = &node(&graph, "styled").step.config;
+        assert_eq!(styled["model"], json!("styled-model"));
+        assert_eq!(styled["provider"], json!("styled-provider"));
+    }
+
+    // With no graph defaults, each override replaces its workflow setting
+    // independently; the other workflow field is retained.
+    for (variable, value, model, provider) in [
+        (
+            frontend::MODEL_OVERRIDE_VAR,
+            "override-model",
+            "override-model",
+            "file-provider",
+        ),
+        (
+            frontend::PROVIDER_OVERRIDE_VAR,
+            "override-provider",
+            "file-model",
+            "override-provider",
+        ),
+    ] {
+        let lowered = load(
+            "wf/workflow.fabro",
+            &dot("agent [prompt=\"x\"]; start -> agent -> exit"),
+            &files,
+            &CompileInputs::new().with_var(variable, value),
+        );
+        assert!(
+            !lowered.diagnostics.has_errors(),
+            "{:?}",
+            lowered.diagnostics
+        );
+        let graph = lowered.graph.expect("lowers");
+        let config = &node(&graph, "agent").step.config;
+        assert_eq!(config["model"], json!(model));
+        assert_eq!(config["provider"], json!(provider));
+    }
+}
+
 /// `[environments.<id>]` and `[run.environment]` come from every settings
 /// layer: a bundle names an environment only the host's layer declares (a
 /// Fabro server's catalog), a bundle with no `[run.environment]` takes the

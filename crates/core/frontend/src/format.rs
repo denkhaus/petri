@@ -34,6 +34,13 @@ pub const REPOSITORY_VAR: &str = "petri.repository";
 pub const LAUNCH_MODEL_VAR: &str = "petri.launch_model";
 pub const LAUNCH_PROVIDER_VAR: &str = "petri.launch_provider";
 
+/// Explicit model selections from an embedding host, such as Fabro's CLI
+/// overrides. Attractor agent and prompt nodes read these above graph and
+/// run defaults, but below node attributes and stylesheet rules. Each field
+/// overrides independently; absent or blank values leave defaults in charge.
+pub const MODEL_OVERRIDE_VAR: &str = "petri.model_override";
+pub const PROVIDER_OVERRIDE_VAR: &str = "petri.provider_override";
+
 /// The compile variable `petri run --environment` binds: the execution
 /// environment the launch selects, by the id a format's run configuration
 /// declares it under. A format with environments reads it over every file

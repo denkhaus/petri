@@ -3,7 +3,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
-use frontend::Span;
+use frontend::{MODEL_OVERRIDE_VAR, PROVIDER_OVERRIDE_VAR, Span};
 use ir::placeholder::{ADMISSION_HOOKS_BY_STEP, ADMISSION_HOOKS_META};
 use ir::{Budget, ExprId, StepRef};
 use serde_json::{Map, Value, json};
@@ -319,6 +319,19 @@ impl Ctx<'_> {
         for key in ["model", "provider", "reasoning_effort"] {
             if let Some(value) = node.attrs.text(key) {
                 config.insert(key.into(), Value::String(value));
+            }
+        }
+        // Explicit host overrides sit below the node (including stylesheet
+        // rules), above graph and run defaults, and apply independently.
+        for (key, variable) in [
+            ("model", MODEL_OVERRIDE_VAR),
+            ("provider", PROVIDER_OVERRIDE_VAR),
+        ] {
+            if !config.contains_key(key)
+                && let Some(value) = self.template.vars().get(variable).and_then(Value::as_str)
+                && !value.trim().is_empty()
+            {
+                config.insert(key.into(), Value::String(value.to_owned()));
             }
         }
         // The graph's defaults, then the run settings' model defaults.
