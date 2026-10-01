@@ -423,8 +423,9 @@ the coordinator registers `attractor_steps::workflow::ChildInvoker`.
   contract, as one user message. `project_memory` (default `true`) prepends
   the project instruction files of the working directory alone, selected by
   the model's agent profile as for an agent node, as a system message;
-  `project_memory=false` reads none. `model` (or `default_model`, or
-  `[run.model] name`, or `--model`/`--provider` at launch) is required;
+  `project_memory=false` reads none. `model` (the node's own, else
+  `--model`/`--provider` at launch, else `default_model`, else
+  `[run.model] name`, else a host default) is required;
   `provider` qualifies it, and a provider with no model runs the provider's
   catalog default; `reasoning_effort`,
   `speed` (`standard`, `fast`) and `max_tokens` ride the request; a JSON
@@ -456,9 +457,10 @@ the coordinator registers `attractor_steps::workflow::ChildInvoker`.
   request; on ACP they are observer metadata like the other model settings.
   `backend="api"` is the default, as Fabro's `select_run_backend` picks the
   native agent for a node that names no backend (the pinned bundles name
-  none). It runs the Pebble Rust library in Petri. `model` (or graph
-  `default_model`, or `[run.model] name`, or `--model`/`--provider` at
-  launch; a provider with no model runs its catalog default) is required.
+  none). It runs the Pebble Rust library in Petri. `model` (the node's own, else
+  `--model`/`--provider` at launch, else graph `default_model`, else
+  `[run.model] name`, else a host default; a provider with no model runs its
+  catalog default) is required.
   `backend="acp"` starts
   the Agent Client Protocol command from `acp.command` / `acp.config` (node,
   graph, then `PETRI_ACP_COMMAND`). The ACP command owns model selection;

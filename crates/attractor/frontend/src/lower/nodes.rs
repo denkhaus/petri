@@ -321,6 +321,22 @@ impl Ctx<'_> {
                 config.insert(key.into(), Value::String(value));
             }
         }
+        // The launch's model choice, below the node (its attributes and
+        // stylesheet rules) and above the graph and run defaults. A node that
+        // names its own model leaves its provider to the node and the
+        // defaults, so the launch's provider never pairs with a model the
+        // node chose.
+        if !config.contains_key("model") {
+            let launch = &self.settings.model_override;
+            if let Some(model) = &launch.name {
+                config.insert("model".into(), Value::String(model.clone()));
+            }
+            if !config.contains_key("provider")
+                && let Some(provider) = &launch.provider
+            {
+                config.insert("provider".into(), Value::String(provider.clone()));
+            }
+        }
         // The graph's defaults, then the run settings' model defaults.
         if !config.contains_key("model")
             && let Some(model) = workflow
