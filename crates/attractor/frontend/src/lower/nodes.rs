@@ -3,7 +3,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
-use frontend::{MODEL_OVERRIDE_VAR, PROVIDER_OVERRIDE_VAR, Span};
+use frontend::Span;
 use ir::placeholder::{ADMISSION_HOOKS_BY_STEP, ADMISSION_HOOKS_META};
 use ir::{Budget, ExprId, StepRef};
 use serde_json::{Map, Value, json};
@@ -321,17 +321,20 @@ impl Ctx<'_> {
                 config.insert(key.into(), Value::String(value));
             }
         }
-        // Explicit host overrides sit below the node (including stylesheet
-        // rules), above graph and run defaults, and apply independently.
-        for (key, variable) in [
-            ("model", MODEL_OVERRIDE_VAR),
-            ("provider", PROVIDER_OVERRIDE_VAR),
-        ] {
-            if !config.contains_key(key)
-                && let Some(value) = self.template.vars().get(variable).and_then(Value::as_str)
-                && !value.trim().is_empty()
+        // The launch's model choice, below the node (its attributes and
+        // stylesheet rules) and above the graph and run defaults. A node that
+        // names its own model leaves its provider to the node and the
+        // defaults, so the launch's provider never pairs with a model the
+        // node chose.
+        if !config.contains_key("model") {
+            let launch = &self.settings.model_override;
+            if let Some(model) = &launch.name {
+                config.insert("model".into(), Value::String(model.clone()));
+            }
+            if !config.contains_key("provider")
+                && let Some(provider) = &launch.provider
             {
-                config.insert(key.into(), Value::String(value.to_owned()));
+                config.insert("provider".into(), Value::String(provider.clone()));
             }
         }
         // The graph's defaults, then the run settings' model defaults.

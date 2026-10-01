@@ -267,15 +267,14 @@ None. The matrix (task 18) found one, since retired:
 
 - **The interview bundle needed a `[run.model]` default**
   (`interview-run-model-migration`, retired). `petri run --provider` and
-  `--model` now supply a launch-level model default below the node, the
-  graph and the `[run.model]` layers, and `--provider` alone runs the
-  provider's catalog default (`gpt-5.6-sol` for `openai`), as `fabro run
-  --provider` does. The interview cell runs the unchanged bundle with
-  `--provider openai` on both engines, and
+  `--model` now choose the model over the graph and the `[run.model]`
+  layers, below a model a node names itself, as the pinned Fabro's launch
+  layer sits above `workflow.toml`; `--provider` alone runs the provider's
+  catalog default (`gpt-5.6-sol` for `openai`), as `fabro run --provider`
+  does. The interview cell runs the unchanged bundle with `--provider openai`
+  on both engines, and
   `fabro_blackbox::the_unchanged_interview_bundle_runs_with_a_launch_provider`
-  runs it against the twin. One ordering difference stays, documented in
-  `crates/fabro/FORMAT.md`: the pinned Fabro's launch layer sits above
-  `workflow.toml`, Petri's below it.
+  runs it against the twin.
 
 Resolved by the matrix (Petri fixed, no departure): a `yes_no` or
 `confirmation` gate records `yes`/`no` under `human.gate.<node>.answer` as
@@ -545,7 +544,7 @@ names the decision record under `decisions/`; "gap" names the owner.
 | `default_fidelity`, `fidelity=*`, `thread_id`, `default_thread`, `project_memory` | `petri-frontend-fabro::hooks::full_fidelity_nodes_continue_their_thread_and_others_start_fresh`, `petri-frontend-fabro::hooks::edge_fidelity_wins_and_a_lost_thread_degrades_to_summary_high`, `petri-frontend-fabro::hooks::project_memory_follows_the_profile_and_the_node_kind`, `fabro_hooks_blackbox::full_fidelity_nodes_share_one_conversation_through_the_binary`, `fabro_compaction_blackbox::a_node_that_lost_its_conversation_starts_at_summary_high`, `fabro_fallback_blackbox::a_retained_thread_continues_on_the_fallback_route`, both readiness suites (the `notes` and `docs` threads, the memory rule in the first request). Across `petri resume` a retained thread restarts from the `summary:high` preamble under Fabro's discarded-session rule (`petri-attractor-steps::subagents::a_resumed_run_restarts_the_stage_and_keeps_an_unfinished_childs_files`); this matches the pinned Fabro, whose `AgentApiBackend` keeps full-fidelity sessions in an in-memory map per worker, so it is parity, not a gap (owner decision of 2026-09-08; persisting threads would be an improvement beyond Fabro) |
 | sub-agents | the C4 row above; `fabro_subagents_blackbox` (8), `petri-attractor-steps::subagents` (14), both readiness suites (a hooked child, cancellation inside the child's tool). Accepted difference `subagent-usage-separate` (nesting under the open-session bound and inherited MCP tools are the reference's behaviour too since `05ebd0f`) |
 | `stall_timeout`, `loop_restart_signature_limit`, `goal_gate`, `retry_target`, `max_visits`, `max_node_visits` | `petri::controls::an_idle_run_is_cancelled_by_the_watchdog`, `petri::controls::a_pending_question_parks_the_watchdog`, `fabro_blackbox::a_stalled_run_is_cancelled_by_the_watchdog`, `petri::controls::a_repeated_deterministic_failure_trips_the_breaker_across_restarts`, `petri::controls::a_restart_edge_admits_only_transient_failures`, `petri::controls::the_breaker_state_is_restored_on_resume`, `petri::controls::node_visit_totals_survive_a_restart_while_context_resets`, cell `routing/goal-gate-restart-and-visit-limit`, the oracle |
-| `hexagon` gates, every `question_type`, accelerator labels, `freeform=true`, `human.default_choice`, `review_target`, gate `timeout` | `fabro_blackbox::a_multi_select_answer_routes_on_the_first_key_and_records_all`, `fabro_blackbox::an_invalid_scripted_answer_is_re_asked_and_the_second_entry_routes`, `fabro_blackbox::a_delayed_reply_lands_on_its_gate`, `fabro_blackbox::a_withheld_reply_expires_into_the_default_choice`, `fabro_blackbox::a_withheld_reply_without_a_default_fails_with_the_retry_outcome`, `fabro_blackbox::a_review_target_gate_shows_its_reference_in_the_terminal`, `fabro_terminal_blackbox::interactive_multi_select_takes_comma_separated_keys`, `fabro_terminal_blackbox::interactive_freeform_takes_a_line_of_text`, `fabro_terminal_blackbox::interactive_invalid_input_is_refused_and_asked_again`, `fabro_terminal_blackbox::interactive_without_terminal_input_fails_closed_with_a_reason`, the eleven `interview/*` cells, differential `interview_scripted_choices_match_the_pinned_fabro`. Accepted difference `sensitive-answers`; the launch-level model default (`petri run --provider`, `--model`) runs the unchanged bundle (`fabro_blackbox::the_unchanged_interview_bundle_runs_with_a_launch_provider`) |
+| `hexagon` gates, every `question_type`, accelerator labels, `freeform=true`, `human.default_choice`, `review_target`, gate `timeout` | `fabro_blackbox::a_multi_select_answer_routes_on_the_first_key_and_records_all`, `fabro_blackbox::an_invalid_scripted_answer_is_re_asked_and_the_second_entry_routes`, `fabro_blackbox::a_delayed_reply_lands_on_its_gate`, `fabro_blackbox::a_withheld_reply_expires_into_the_default_choice`, `fabro_blackbox::a_withheld_reply_without_a_default_fails_with_the_retry_outcome`, `fabro_blackbox::a_review_target_gate_shows_its_reference_in_the_terminal`, `fabro_terminal_blackbox::interactive_multi_select_takes_comma_separated_keys`, `fabro_terminal_blackbox::interactive_freeform_takes_a_line_of_text`, `fabro_terminal_blackbox::interactive_invalid_input_is_refused_and_asked_again`, `fabro_terminal_blackbox::interactive_without_terminal_input_fails_closed_with_a_reason`, the eleven `interview/*` cells, differential `interview_scripted_choices_match_the_pinned_fabro`. Accepted difference `sensitive-answers`; the launch model choice (`petri run --provider`, `--model`) runs the unchanged bundle (`fabro_blackbox::the_unchanged_interview_bundle_runs_with_a_launch_provider`) |
 | `tab` prompt nodes | `petri-attractor-steps::prompt`, `fabro_blackbox::a_prompt_node_makes_one_tool_free_model_call`, `fabro_fallback_blackbox::a_prompt_node_fails_over_and_repairs_on_its_plan`. Accepted difference `event-kinds` |
 | `house` manager loop, `stack.child_workflow`, `manager.max_cycles` | `petri-attractor-steps::manager` (`a_thousand_polls_consume_one_child_then_exhaustion_cancels_it`, `a_redispatched_attempt_reattaches_and_a_new_attempt_starts_a_new_child`, `the_stop_condition_reads_the_parent_context_and_cancels_the_child`, `a_parent_cancel_cancels_the_child`, `max_cycles_normalizes_as_fabro_does`), `petri-fabro-acceptance::workflow`, the six `implement/*` host cells and `implement/child-runs-successfully@docker/openrouter` (inline graphs of the bundle's shape: an accepted migration, task 17; the Docker cell runs the manager loop, the child and its deterministic check inside the container). The pinned bundle itself is not run: its child's verify node hard-codes the Fabro repository's own toolchain |
 | conditions, `{{ inputs.* }}`, `[run.inputs]`, `import` | `petri-frontend-attractor::conditions`, the oracle, `fabro_blackbox::workflow_toml_inputs_bind_and_unsupported_sections_are_reported`, `petri-frontend-attractor::lowering::imports_expand_at_load_with_fabro_rules`, `fabro_blackbox::an_import_is_expanded_at_load_and_its_nodes_run_under_the_prefix` |
@@ -611,7 +610,7 @@ names the decision record under `decisions/`; "gap" names the owner.
    owns the budget, deduplication and truncation for native sessions and
    prompt nodes alike; `attractor_steps::memory` keeps only Fabro's path
    selection.
-9. Retired: the interview bundle's launch-level model default is
+9. Retired: the interview bundle's model comes from the launch,
    `petri run --provider` and `--model`.
 
 ## Library pin

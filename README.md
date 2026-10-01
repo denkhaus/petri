@@ -1232,16 +1232,21 @@ answers arrived in, so a re-asked question follows its original ask. A sensitive
 `{"$secret": "answer:<id>"}` reference. A non-empty `errors` list is exit
 code 4, whatever the engine status; the persisted run is not rewritten.
 
-**Model default.** `petri run --provider <id>` and `--model <name>` supply the
-model for a prompt or agent node that names none, in a graph with no
-`default_model`, in a run whose `workflow.toml` (and the project and settings
-layers) names none. `--provider` alone runs the provider's default model from
-the runner's catalog (`openai` is `gpt-5.6-sol`), as `fabro run --provider`
-does; the pinned interview bundle relies on this. The launch lands in the
-persisted root graph's `fabro.launch` parameter (`model`, `provider`, as
-given), so `petri inspect` and a replay see it; `petri replay` takes the same
-options so the graph lowers the same. `petri resume` needs nothing: the
-stored graph already carries the default.
+**Model selection.** `petri run --model <name>` and `--provider <id>` choose
+the model for every prompt or agent node that names none of its own, over the
+graph's `default_model`/`default_provider` and `[run.model]` in `workflow.toml`
+(and the project and settings layers), as `fabro run --model` and `--provider`
+do. Each applies on its own. A node that names its own model, by attribute or
+stylesheet rule, keeps it, and keeps its provider to the node and the defaults.
+`--provider` alone, where nothing names a model, runs the provider's default
+model from the runner's catalog (`openai` is `gpt-5.6-sol`); the pinned
+interview bundle relies on this. A host can also bind its own last-resort
+default (`petri.default_model`, `petri.default_provider`), below every file
+layer. The launch lands in the persisted root graph's `fabro.launch` parameter
+(`model`, `provider`, `default_model`, `default_provider`, as given), so
+`petri inspect` and a replay see it; `petri replay` takes the same options so
+the graph lowers the same. `petri resume` needs nothing: the stored graph
+already carries the choice.
 
 **Environment selection.** `petri run --environment <id>` selects the
 `[environments.<id>]` table the run executes in over what any settings layer's
