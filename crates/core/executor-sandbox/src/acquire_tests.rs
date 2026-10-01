@@ -342,3 +342,37 @@ async fn network_policy_reaches_creation_and_block_requires_provider_confirmatio
         fixture.assert_deleted().await;
     }
 }
+
+#[tokio::test]
+async fn a_reused_sandbox_cannot_bypass_the_block_policy() {
+    let mut fixture = Fixture::new(EnvironmentBehavior::Wait);
+    Arc::get_mut(&mut fixture.executor).unwrap().options.network = NetworkPolicy::Block;
+    *fixture.provider.sandbox.network.lock().unwrap() = Some(NetworkPolicy::Block);
+    fixture.provider.allow_create.notify_one();
+    fixture.provider.sandbox.allow_environment.notify_one();
+    let scope = ScopeSpec::new(ir::ScopeId::new(0), "scope-0")
+        .with_runtime(ir::RuntimeSpec::container("test-image"));
+    let ctx = AcquireContext::bare().with_lease(LEASE);
+    let handle = fixture.executor.acquire(&scope, &ctx).await.unwrap();
+    fixture
+        .executor
+        .release(handle, executor::ScopeOutcome::Succeeded)
+        .await;
+
+    // Reacquisition returns the cached sandbox without calling create or
+    // rebuilding its spec. It must still confirm that networking is blocked.
+    *fixture.provider.sandbox.network.lock().unwrap() = Some(NetworkPolicy::AllowAll);
+    let error = fixture.executor.acquire(&scope, &ctx).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("does not report blocked networking")
+    );
+    assert_eq!(fixture.provider.requests.lock().unwrap().len(), 1);
+    fixture
+        .executor
+        .manager()
+        .release_lease(LEASE, Retention::Never, executor::ScopeOutcome::Failed)
+        .await;
+    fixture.assert_deleted().await;
+}
