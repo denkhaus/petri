@@ -176,7 +176,7 @@ crates/petri/cli/tests/fabro_terminal_blackbox.rs  readiness item 2 through the 
 crates/petri/cli/tests/fabro_milestone_blackbox.rs  readiness item 8 through the binary: one workflow with `run.prepare`, commands, a native agent editing a file under a tool hook, a retained thread, project memory, a scripted decision, a bounded fan-out consumed downstream, run-end hooks and file checks; success, failure and cancellation
 crates/petri/cli/tests/fabro_readiness_blackbox.rs  readiness item 10 (milestone D) through the binary: the item 8 workflow with every item 9 facility in one run (a skill-guided plan, a hooked MCP write, a hooked sub-agent, a fan-out, a compaction and a later node on the compacted thread with an MCP call, a second thread failing over to the Anthropic twin), no platform Git operation in the repository the run prepared, every family on the public stream; an exhausted chain and an interrupt inside a child's tool as separate cases
 crates/petri/lib/tests/embedding_readiness.rs  readiness item 10 through the embedding boundary: the same combined execution run in-process by a host with its own hooks, interviewer and sink against the twins; the same files and scripts, the run rebuilt from public events, replay equal to the live stream
-crates/petri/cli/tests/fabro_evidence_blackbox.rs  the readiness gate's evidence: a scenario through the binary leaves a complete record with every pin, a failed scenario keeps its case directory, the coverage report counts only passed cells, the pin check rejects a record citing another revision, a required asset fails instead of skipping
+crates/petri/cli/tests/fabro_evidence_blackbox.rs  the readiness gate's evidence: a scenario through the binary leaves a complete record with every pin, a failed scenario keeps its case directory, the coverage report counts only passed cells, a required asset fails instead of skipping
 crates/petri/lib/tests/fabro_dependencies.rs  readiness item 1: no Fabro crate anywhere in Petri's dependency graph
 crates/petri/cli/tests/standalone.rs          readiness item 1: the binary runs a Fabro workflow with no `fabro` on PATH
 ```
@@ -288,23 +288,19 @@ record. A pinned-Fabro assertion that a decision record lists under
 `known_defects` is expected and counts as passed with a note naming the
 record; any other failed assertion fails the cell. CI writes the report into the job summary
 and keeps the full bundles of a failed run and the compact records of a passed
-run as job artifacts. `mise run check:pins` (`scripts/check-pins.py`) fails
-when `Cargo.lock`, the "Pinned revisions" table in
-`crates/fabro/acceptance/CONTRACT.md`, and the latest records cite different
-revisions. The readiness checklist with each item's evidence source is the
+run as job artifacts. The readiness checklist with each item's evidence source is the
 "Readiness gate checklist" section of that contract.
 
 #### Library and repository gates
 
 Pebble owns the agent loop, coding-agent behavior, and the MCP client;
 `lithos-llm` owns provider transport and request retries. A change to either runs the owning repository's required checks
-before Petri moves its lock; then `Cargo.lock`, the contract's pin table, and
-the affected evidence records move together, and the relevant Petri scenarios
-run again through the shipped binary. A library test pass never replaces a
-required Petri scenario. The current locked commits are in the contract's
-"Pinned revisions" table (Pebble `ba2928d`, lithos-llm `f40391a`, sandbox-driver
-`236196ed`, twins `ca45f0e`, Fabro `05ebd0f`, the runner image
-`f8bbbfd81934`); `mise run check:pins` keeps every citation in agreement.
+before Petri moves its lock; then the relevant Petri scenarios run again
+through the shipped binary, and their evidence records cite the new commits.
+A library test pass never replaces a required Petri scenario. The locked
+commits live only in `Cargo.lock`; the contract's "Pinned revisions" table
+names where each revision lives, the Fabro reference and the runner image
+included.
 See [git dependencies](DEVELOPING.md#git-dependencies) for how they are
 named and updated.
 The library batch the readiness work asked for landed on

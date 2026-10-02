@@ -34,18 +34,12 @@ one Petri revision by tag. `petri::build_llm_client` is the exception: it
 lives in the distribution crate, so a host on the six packages builds its
 `lithos_llm::Client` itself.
 
-The libraries the two repositories share are pinned to one revision each,
-the rows of `crates/fabro/acceptance/CONTRACT.md` "Pinned revisions", which
-`mise run check:pins` holds equal to the manifests and the evidence records.
-Fabro's `main` holds the same three (its pull requests #873 to #875 and
-#883): Pebble `67c9f486dd28f15c04e8d590a91e6f5563f7605d`, lithos-llm
-`43a42ac28e9d9bcf40a91abc02be4f12ca274ebb`, sandbox-driver
-`64c14b89d078a4b34d1555092ad01d41541f7a7d`. Each is a descendant of the
-revision Fabro pinned when the integration plan was written (Pebble
-`6996942`, lithos-llm `a1e3fd3`, sandbox-driver `ddb32e1`), so the two
-repositories link one copy of each library; the readiness suite
-(`mise run check:fabro:readiness`) is the gate after either repository
-moves a pin.
+Petri names the libraries the two repositories share by `branch = "main"`.
+A Fabro build that names the same sources links one copy of each, and
+Fabro's `Cargo.lock` chooses the commit that ships. Petri's `Cargo.lock` only
+decides what Petri's own CI builds.
+The readiness suite (`mise run check:fabro:readiness`) is the gate after
+either repository moves its lock.
 
 ## What a host implements
 
@@ -280,7 +274,7 @@ acknowledgement gates the next step of the run:
 | the run format (7) on the run declaration, and the coordinator record version (`{seq, origin, recorded_at, body}` lines, `body` tagged by `event` with `<subject>.<verb>` names; the declaration carries the run `key`; version 6 adds `scope.released` and pins engine log v11; version 7 lets the declaration carry `forked_from`) | `execution::store` | a run written by a newer or older format is refused, never migrated; the check reads the first stored record before any other is decoded |
 | the engine log version (v11: `{seq, origin, recorded_at, body}` records, `body` tagged by `event` with `<subject>.<verb>` names; v11 adds `scope.acquired` and `scope.failed`), pinned by the run format | `engine::log` | a log whose version the runner does not speak is refused; replay must reproduce the log byte for byte or inspection reports corruption |
 | `inspect_format_version`, `event_contract_version` | in the documents themselves | |
-| Library pins (Pebble, lithos-llm, sandbox-driver, twins, the Fabro reference, the runner image) | `CONTRACT.md` "Pinned revisions", `scripts/check-pins.py` | moved together with the manifests and the evidence records |
+| Library pins (Pebble, lithos-llm, sandbox-driver, twins, the Fabro reference, the runner image) | `Cargo.lock`, `crates/fabro/corpus-pin.txt`, `RUNNER_PIN`; `CONTRACT.md` "Pinned revisions" names each home | evidence records cite the locked commits |
 
 **Strict rejection of incompatible logs.** Petri never migrates a stored
 run: a run whose format version, coordinator record version, or engine log
