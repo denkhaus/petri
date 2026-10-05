@@ -90,14 +90,12 @@ impl AgentCommand {
     /// Workflow secret references fill the launch environment beneath the
     /// agent's explicit `acp.config.env` overrides. Values resolve only at
     /// spawn.
-    pub fn with_workflow_env(mut self, env: Option<&Value>) -> Result<Self, String> {
-        if let Some(env) = env {
-            let mut inherited: BTreeMap<String, EnvValue> = serde_json::from_value(env.clone())
-                .map_err(|error| format!("invalid ACP workflow environment: {error}"))?;
-            inherited.append(&mut self.env);
-            self.env = inherited;
-        }
-        Ok(self)
+    #[must_use]
+    pub fn with_workflow_env(mut self, env: &BTreeMap<String, EnvValue>) -> Self {
+        let mut inherited = env.clone();
+        inherited.append(&mut self.env);
+        self.env = inherited;
+        self
     }
 
     /// The process to start: the command with its environment resolved.
@@ -115,7 +113,22 @@ impl AgentCommand {
                 Err(error) => return Err(format!("resolving secret `{name}`: {error}")),
             }
         }
-        for (key, value) in &self.env {
+        env.append(&mut resolve_env(&self.env, secrets)?);
+        let args: Vec<&str> = self.args.iter().map(String::as_str).collect();
+        Ok(ProcessSpec::new(&self.program, &args)
+            .with_env(env)
+            .with_stdin(StdinMode::Piped))
+    }
+}
+
+/// Resolve an environment's `$secret` references; a reference the provider
+/// cannot supply is an error naming the secret and the variable.
+pub fn resolve_env(
+    env: &BTreeMap<String, EnvValue>,
+    secrets: &dyn SecretProvider,
+) -> Result<BTreeMap<SmolStr, SmolStr>, String> {
+    env.iter()
+        .map(|(key, value)| {
             let value = match value {
                 EnvValue::Literal(text) => SmolStr::new(text),
                 EnvValue::Secret(name) => secrets
@@ -123,13 +136,9 @@ impl AgentCommand {
                     .map_err(|error| format!("secret `{name}` for env `{key}`: {error}"))?
                     .expose(),
             };
-            env.insert(SmolStr::new(key), value);
-        }
-        let args: Vec<&str> = self.args.iter().map(String::as_str).collect();
-        Ok(ProcessSpec::new(&self.program, &args)
-            .with_env(env)
-            .with_stdin(StdinMode::Piped))
-    }
+            Ok((SmolStr::new(key), value))
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]

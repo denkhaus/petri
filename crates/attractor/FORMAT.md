@@ -756,10 +756,24 @@ The agent's environment is the scope's, plus:
   reads `PETRI_SECRET_<NAME>`; Fabro its vault) and masked in every log; a
   name the provider does not know is left out. A product in a container
   gets its key this way without the workflow naming it.
-- the command's own `env` from `acp.config`, on top. A value is a string or
-  a `{"$secret": "NAME"}` reference resolved the same way; a reference the
-  run cannot supply fails the node with class `secret_unavailable` before
-  the agent starts.
+- the workflow environment's secret references (the step config's `env`,
+  which a frontend lowers from secret-valued workflow environment entries,
+  such as Fabro's `[run.environment.env]`), on top. These reach the agent
+  however it is named: `acp.command`, `acp.config` or `PETRI_ACP_COMMAND`. A
+  workflow secret with a product credential's name replaces the provider's
+  value for it.
+- the command's own `env` from `acp.config`, on top of both. A value is a
+  string or a `{"$secret": "NAME"}` reference resolved the same way.
+
+Every reference, the workflow's and the command's, resolves when the agent
+starts. One the run cannot supply fails the node with class
+`secret_unavailable` before the agent starts, whether or not the agent reads
+it.
+
+A native (`backend="api"`) agent's tool shells get the same workflow secret
+references, resolved when its session opens, beneath the variables a tool call
+sets itself; a reference the run cannot supply fails the node the same way.
+Its MCP servers get only their own configured env.
 
 The session opens in the scope's workspace (`session/new` with `cwd`). An
 agent that answers `session/new` with `auth_required` (Gemini CLI, until

@@ -21,6 +21,7 @@ use crate::env::ExecEnv;
 use crate::error::{EnvError, ReleaseReport};
 use crate::progress::{NoProgress, ProgressSink};
 use crate::secrets::{MapSecrets, SecretProvider};
+use crate::spawn_env::{SpawnEnv, layer_exec, layer_runner};
 
 /// The default time a step gets between `SIGTERM` and `SIGKILL`.
 pub const DEFAULT_GRACE: Duration = Duration::from_secs(10);
@@ -279,13 +280,16 @@ impl EnvHandle {
         }
     }
 
-    /// Replace the process environment while preserving the scope identity,
-    /// sandbox, container runner and the originating executor's teardown
-    /// record. An executor layer uses this to decorate the environment it
-    /// acquired.
+    /// Apply `spawn_env` to every process this scope starts, through
+    /// [`Self::exec`] and [`Self::container_runner`] alike. The scope
+    /// identity, sandbox, teardown record and every other answer the
+    /// environment gives stay the executor's. An executor layer uses this to
+    /// add credentials to the environment it acquired. It wraps the runner
+    /// already bound, so an executor binds its runner first.
     #[must_use]
-    pub fn with_exec(mut self, env: Arc<dyn ExecEnv>) -> Self {
-        self.env = env;
+    pub fn with_spawn_env(mut self, spawn_env: Arc<dyn SpawnEnv>) -> Self {
+        self.env = layer_exec(self.env, spawn_env.clone());
+        self.runner = self.runner.map(|runner| layer_runner(runner, spawn_env));
         self
     }
 

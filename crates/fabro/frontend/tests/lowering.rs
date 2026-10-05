@@ -1553,10 +1553,11 @@ fn the_run_goal_overrides_the_graphs_goal_and_the_launch_overrides_both() {
 }
 
 #[test]
-fn workflow_secrets_reach_acp_launch_as_references() {
+fn workflow_secrets_reach_agent_processes_as_references() {
     for agent in [
-        r#"acp.command="agent --acp""#,
-        r#"acp.config="{\"command\":\"agent\"}""#,
+        r#"backend="acp", acp.command="agent --acp""#,
+        r#"backend="acp", acp.config="{\"command\":\"agent\"}""#,
+        r#"backend="api", model="claude-sonnet-5-5""#,
     ] {
         let files = files(&[(
             "wf/workflow.toml",
@@ -1564,9 +1565,7 @@ fn workflow_secrets_reach_acp_launch_as_references() {
         )]);
         let lowered = load(
             "wf/workflow.fabro",
-            &dot(&format!(
-                r#"a [backend="acp", {agent}, prompt="x"]; start -> a -> exit"#
-            )),
+            &dot(&format!(r#"a [{agent}, prompt="x"]; start -> a -> exit"#)),
             &files,
             &CompileInputs::new(),
         );
@@ -1578,7 +1577,7 @@ fn workflow_secrets_reach_acp_launch_as_references() {
         let graph = lowered.graph.expect("lowers");
         assert!(!graph.scopes[0].env.contains_key("TOKEN"));
         assert_eq!(
-            node(&graph, "a").step.config["acp"]["env"]["TOKEN"],
+            node(&graph, "a").step.config["env"]["TOKEN"],
             json!({"$secret": "REVIEW_TOKEN"})
         );
     }

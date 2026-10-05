@@ -412,6 +412,14 @@ impl Ctx<'_> {
         } else {
             self.acp(node, workflow, &mut config, acp_backend);
         }
+        // An agent's processes, on either backend, see the workflow's secrets:
+        // the ACP agent itself, and a native session's tool shells.
+        if !is_prompt {
+            let env = self.workflow_secret_env();
+            if !env.is_empty() {
+                config.insert("env".into(), Value::Object(env));
+            }
+        }
         let nodes = self.b.exprs().var("nodes");
         config.insert("nodes".into(), placeholder(nodes));
         Value::Object(config)
@@ -465,14 +473,6 @@ impl Ctx<'_> {
             .attrs
             .text("acp.config")
             .or_else(|| workflow.attrs.text("acp.config"));
-        let mut env = Map::new();
-        if let Some(environment) = &self.settings.environment {
-            for (key, value) in &environment.env {
-                if let EnvValue::Secret(_) = value {
-                    env.insert(key.clone(), value.to_json());
-                }
-            }
-        }
         match (command, acp_config) {
             (Some(_), Some(_)) => self.diags.error(
                 "attractor.acp_both",
@@ -498,11 +498,21 @@ impl Ctx<'_> {
             (None, None) if acp_backend => lints::acp_requires_command(node, &mut self.diags),
             (None, None) => {}
         }
-        if !env.is_empty()
-            && let Some(acp) = config.get_mut("acp")
-        {
-            acp["env"] = Value::Object(env);
+    }
+
+    /// The workflow environment's secret references, for a step that starts
+    /// processes. Literal values reach every process through the scope's
+    /// env; secret values stay references until the step spawns.
+    fn workflow_secret_env(&self) -> Map<String, Value> {
+        let mut env = Map::new();
+        if let Some(environment) = &self.settings.environment {
+            for (key, value) in &environment.env {
+                if let EnvValue::Secret(_) = value {
+                    env.insert(key.clone(), value.to_json());
+                }
+            }
         }
+        env
     }
 
     fn command_config(
@@ -553,14 +563,7 @@ impl Ctx<'_> {
                 format!("command node `{}` needs a `script`", node.id),
             ),
         }
-        let mut env = Map::new();
-        if let Some(environment) = &self.settings.environment {
-            for (key, value) in &environment.env {
-                if let EnvValue::Secret(_) = value {
-                    env.insert(key.clone(), value.to_json());
-                }
-            }
-        }
+        let mut env = self.workflow_secret_env();
         if let Some(prepare_env) = self.prepare_envs.get(&node.id) {
             for (key, value) in prepare_env {
                 env.insert(key.clone(), value.to_json());

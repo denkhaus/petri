@@ -414,12 +414,11 @@ async fn workflow_secrets_reach_command_and_config_acp_agents_with_explicit_over
             ("ACP_ENV_RECORD", record.to_str().expect("utf-8")),
             ("ACP_ENV_RECORD_KEYS", "AGENT_KEY"),
         ]);
-        let acp = &mut node_config(&mut graph, "a")["acp"];
-        acp["env"] = json!({ "AGENT_KEY": { "$secret": "WORKFLOW_KEY" } });
+        let config = node_config(&mut graph, "a");
+        config["env"] = json!({ "AGENT_KEY": { "$secret": "WORKFLOW_KEY" } });
         if config_launch {
-            *acp = json!({
+            config["acp"] = json!({
                 "config": {"command":"python3", "args":[agent], "env":{"AGENT_KEY":{"$secret":"OVERRIDE_KEY"}}},
-                "env": {"AGENT_KEY":{"$secret":"WORKFLOW_KEY"}}
             });
         }
         let secrets = MapSecrets::from_pairs(&[

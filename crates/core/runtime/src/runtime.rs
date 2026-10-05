@@ -269,7 +269,9 @@ impl Runtime {
     /// Wrap the run's executor while retaining the standard router's lease
     /// ledger, reconciliation and pruning. Layers are applied in registration
     /// order; the last registered layer is outermost. Each layer must forward
-    /// acquisition and release to the executor it receives.
+    /// acquisition and release to the executor it receives. A layer that adds
+    /// to every process's environment, such as credentials, applies
+    /// [`executor::EnvHandle::with_spawn_env`] to the handle it acquired.
     #[must_use]
     pub fn executor_layer(
         mut self,

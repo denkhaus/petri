@@ -71,7 +71,7 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc;
 use tokio::time;
 
-pub use self::command::{AgentCommand, EnvValue, PRODUCT_CREDENTIALS};
+pub use self::command::{AgentCommand, EnvValue, PRODUCT_CREDENTIALS, resolve_env};
 pub use self::hooks::AcpHooks;
 use self::hooks::{Finished, ToolCall, tool_output};
 use crate::agent::INTERRUPTED_EVENT;
