@@ -153,7 +153,12 @@ pub use replay::{
 /// with no scope records for one that had none to record. Within version 4,
 /// `run.started` gained the optional `forked_from` (run format 7): a forked
 /// run's stream names its source before any copied record (`FORK.md`).
-pub const EVENT_CONTRACT_VERSION: u32 = 4;
+///
+/// Version 5 changes the shape of a partial success inside a `step.finished`
+/// record: `underlying` is an `UnderlyingFailure` (`{"failure": {...}}` or
+/// `"timed_out"`) instead of a bare `FailureInfo`. The version moves with the
+/// engine log (v12) and run format (8) that carry it.
+pub const EVENT_CONTRACT_VERSION: u32 = 5;
 
 /// Which durable log an event was derived from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -395,15 +400,13 @@ pub enum Derived {
     },
     /// `routing.resolved`: the node each group's decision resolved to.
     RoutingResolved { groups: Vec<GroupTarget> },
-    /// `route.applied`: the node the route leads to, and for an edge its
-    /// transition and whether it is a `back` edge. Absent for a route that
-    /// applied nothing.
+    /// `route.applied`: the node the edge leads to, the edge's transition
+    /// and whether it is a `back` edge. Absent for a route that applied
+    /// nothing.
     RouteApplied {
         target:     NodeRef,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        transition: Option<EdgeTransition>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        back:       Option<bool>,
+        transition: EdgeTransition,
+        back:       bool,
     },
     /// `node.expanded`: each clone's entry node.
     NodeExpanded { clones: Vec<CloneRef> },
@@ -426,8 +429,8 @@ pub enum Derived {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GroupTarget {
     pub group:  u32,
-    /// The node an `emit` or `jump` decision leads to. Absent for `none`
-    /// and `block`.
+    /// The node an `emit` decision leads to. Absent for `none` and
+    /// `block`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<NodeRef>,
 }

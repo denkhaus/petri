@@ -101,6 +101,53 @@ skips the comparison; `mise run test:lean` builds the model and requires it,
 as the `lean model` CI job does. A new Lean or elan version must be at least
 a day old, like every other tool here.
 
+## Simulations
+
+`crates/core/driver/tests/simulation.rs` is deterministic simulation testing
+of the driver. Each seed builds a workflow, host stops and crashes, and a host
+that answers questions, delays and fails hooks and decisions, and shares the
+attempt slot with a sibling execution. It runs the real driver against a
+simulated sandbox world (`testkit::sim`) on a paused, single-threaded
+runtime; every choice comes from the seed, so a seed always runs the same
+way.
+
+`crates/core/execution/tests/simulation.rs` does the same for the execution
+layer. Each seed builds a root graph and child graphs with invoke steps
+(single calls and forks, their own sandbox or the caller's, some through a
+fork gate) and restart arms, sometimes turns on the circuit breaker or a low
+invocation limit, plans host cancels and up to three crashes (at a time,
+right after a chosen coordinator or resource record, at a sandbox provider
+call, or at a store fault: a failed append, a lost reply, a store that stays
+down), and runs the coordinator through the host wrappers over one
+in-memory store, resuming after each crash. Some crashes leave a zombie
+that runs on beside its successor after the store released its lease. The runtime's own lease router
+reaches the world as a Docker-kind provider (`testkit::sim::WorldFactory`),
+so lease records, reconcile, fencing, retention and release all run, and the
+world checks each provider call against the lease's recorded intent. The host
+services run as a CLI or Fabro host runs them, one set per lifetime: the
+control service pauses and unpauses the run, the stall watchdog watches it,
+the interview dispatcher carries questions to an interviewer that answers or
+lets them expire, and run-level hooks note the run's end and each release.
+
+`mise run test` runs 128 and 64 seeds, each in a few seconds at most, and
+`mise run test:dst`, part of the nightly gate, runs 50,000 and 20,000. The
+execution layer also runs a tenth of its seeds, at least 128, twice, and
+compares their logs byte for byte. To run another number, or to replay a
+failing seed with a trace of what it did:
+
+```sh
+PETRI_DST_SEEDS=2000 cargo nextest run -p petri-driver --test simulation
+PETRI_DST_SEED=1234 PETRI_DST_TRACE=1 cargo nextest run -p petri-execution \
+  --test simulation --no-capture
+```
+
+Keep the simulations deterministic: every `select!` they, the driver or the
+coordinator run is `biased;`, maps they iterate are ordered, time comes from
+the runtime's clock, and the runtime's `recording_clock`, `step_logs` and
+`decision_seed` take the rest. `a_seeded_world_replays_byte_for_byte`,
+`a_seeded_run_replays_byte_for_byte` and the two `determinism.rs` tests check
+it.
+
 ## Diagnostics
 
 Set `PETRI_LOG` to see tracing output on stderr. The default is `warn`. Use
