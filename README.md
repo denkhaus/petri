@@ -98,7 +98,8 @@ crates/core/engine/tests/partial_success.rs  handoff §4 soft failure, is_succes
 crates/core/engine/tests/seeding.rs          seed edges for entry nodes and clone entries
 crates/core/engine/tests/resolved_firing.rs  the executor boundary: no unresolved ExprId crosses it
 crates/core/engine/tests/event_log.rs        §5 logging, determinism, serde round-trip, §8 seams
-crates/core/engine/tests/flow_properties.rs  §3/§4 over random acyclic flows: joins sound and complete, one firing per key, replay
+crates/core/engine/tests/flow_properties.rs  §3–§5 over random flows: joins, generations, budgets, retries, cancel and kill, replay
+crates/core/engine/tests/resume_properties.rs  §6 resume over random flows: a log cut anywhere resumes to the live state, owes what was outstanding, and goes on to the same log
 crates/core/engine/tests/lean_model.rs       the core against the Lean model in `lean/`: flows and `deterministic_pick` (`mise run test:lean`)
 crates/core/ir/tests/validation.rs           §7, invariant by invariant
 crates/core/ir/tests/expressions.rs          the expression language
@@ -111,6 +112,8 @@ crates/core/driver/tests/timeout.rs       exec §7 6: timeouts, and the race und
 crates/core/driver/tests/environments.rs  exec §7 7,10: acquire failure and retention
 crates/core/driver/tests/secrets.rs       exec §7 8: masking, and what reaches the log
 crates/core/driver/tests/docker.rs        exec §7 3,10 Docker halves; skipped without a daemon
+crates/core/driver/tests/determinism.rs   §10 determinism: a seeded run on a simulated clock replays byte for byte
+crates/core/driver/tests/simulation.rs    §10 simulation: seeded crashes, stops and faults against a simulated sandbox world
 crates/core/executor-sandbox/tests/docker_backend.rs   the sandbox executor over the Docker plugin: the workspace in the sandbox, exit codes and signals, files over the wire, the crash fence, retention, services, one-shot actions
 crates/core/executor-sandbox/tests/daytona_backend.rs  the same executor over the Daytona plugin, live (`mise run test:daytona`, `PETRI_REQUIRE_DAYTONA`): the runner VM, a nested container job, files, the fence, retention, output after idle and under a burst, a preview URL, the failure modes; `DAYTONA.md` maps Fabro's former live suite onto it
 crates/petri/lib/tests/daytona.rs             the standalone host on `--backend daytona`, live: retention and `prune` with the tombstone, `resume` fencing the crashed VM
@@ -144,6 +147,8 @@ crates/petri/cli/tests/inspect_cli.rs        black box phase 2: `petri inspect` 
 crates/petri/lib/tests/fork.rs               `host::fork_from` through the embedding boundary: a three-stage run forked after its first stage, a fork at the last position with and without `rerun_last`, a fork after a parallel fan-in and before it, a position inside a branch refused, a fork at a failed firing on its failure route, and a fork in a host's own store
 crates/petri/cli/tests/fabro_resume_blackbox.rs  `petri resume` through the binary: a run killed with SIGKILL continues without repeating finished work, a paused run stays paused across the resume until an unpause, a waiting gate asks again, `inspect` reports `paused`, and the refusals (finished, leased, missing, corrupt)
 crates/core/execution/tests/inspect.rs      black box phase 2: `inspect_run` reconstruction, retries, children, torn and corrupt logs
+crates/core/execution/tests/determinism.rs  §10 determinism: a seeded coordinator run stores the same logs byte for byte, every record stamped from the simulated clock
+crates/core/execution/tests/simulation.rs   §10 simulation: seeded invocation trees, forks, gates, restarts, cancels, the breaker and crashes, resumed over one store
 crates/petri/cli/tests/fabro_blackbox.rs     the Fabro black box battery: the shipped binary against provider twins on loopback, scripted interviews, retention, the readiness milestone A smoke run with no `fabro` on PATH (`milestone_a_smoke_run_without_fabro_on_path`); every read of a finished run goes through `petri inspect --json`
 crates/petri/cli/tests/fabro_scenarios_blackbox.rs black box phase 4: every required (scenario, backend, agent) cell of `crates/fabro/acceptance/scenarios/matrix.json`, each a scenario file in the versioned format `scenarios/SCHEMA.md` documents, run through the shipped binary with provider twins, a fixture repository with real local Git remotes, and a scripted interviewer; `scripts/fabro-coverage-report.py` merges the per-cell records into `coverage.json`
 crates/petri/cli/tests/fabro_differential.rs black box phase 5: every scenario through the shipped binary and the pinned Fabro binary, independent expectations per engine, the committed reference, and the comparison under `tests/support/fabro/compare.rs` with decision records (`crates/fabro/acceptance/decisions/`)
@@ -1210,7 +1215,11 @@ edge taken by anything but a transient failure. See `crates/attractor/FORMAT.md`
 "Watchdog and circuit breaker".
 
 **The receipt.** Every run with an interviewer writes
-`<run-dir>/interviews.json` (`execution::InterviewReceipt`, version 1): one
+`<run-dir>/interviews.json` (`execution::InterviewReceipt`, version 2) each
+time a question's outcome is recorded, so a crash loses only the questions
+still waiting, which the resumed run asks again. A resumed run continues the
+receipt it finds: the receipt's `lifetime` counts the processes that wrote
+it, and each record carries the `lifetime` that asked it. One
 record per question with its invocation, execution, firing, attempt, node,
 occurrence, ask, question id, kind, text, offered option keys, the review
 `reference` and `timeout_ms` when the question had them, the reply
@@ -1224,7 +1233,9 @@ and how it left (`delivered`, `not_live`, `late`, `shutdown`, `withheld`,
 invocation path, then invocation, execution, firing, occurrence, and ask
 (the root's questions first, then each nested invocation's in path order;
 within an invocation, the order the run asked them), whatever order the
-answers arrived in, so a re-asked question follows its original ask. A sensitive answer appears only as its
+answers arrived in, so a re-asked question follows its original ask, and a
+question asked again after a resume follows the earlier process's. A
+sensitive answer appears only as its
 `{"$secret": "answer:<id>"}` reference. A non-empty `errors` list is exit
 code 4, whatever the engine status; the persisted run is not rewritten.
 

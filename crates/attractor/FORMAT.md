@@ -241,7 +241,7 @@ Petri's `partially_succeed` — and the specific one wins:
 
 `goal_gate=true` nodes lower to a `goal_check` noop in front of `exit`: for each
 gate (in id order) an arm guarded by `!default(nodes.<gate>.success_like, false)`
-jumps back to the first existing retry target of the node's `retry_target`, its
+routes back to the first existing retry target of the node's `retry_target`, its
 `fallback_retry_target`, the graph's, the graph's fallback; a gate with no target
 ends the run failed; the last arm reaches `exit` when every gate passed.
 
@@ -1467,7 +1467,8 @@ standalone host installs `execution::watchdog::StallWatchdog` as an observer.
 Any engine or lifecycle record of any execution is activity. A question
 pending with the host parks the clock: a run waiting on a person is blocked,
 not stalled. When the last pending question is answered the run gets a full
-stall budget again. A run idle for the whole budget is cancelled through the
+stall budget again. A pause parks it too, until the unpause, which restarts
+the full budget; a run resumed paused starts parked. A run idle for the whole budget is cancelled through the
 coordinator, and the terminal prints `stall watchdog: no execution activity
 for N s`. This is separate from each attempt's active-work timer.
 

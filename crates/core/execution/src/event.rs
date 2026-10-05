@@ -28,8 +28,10 @@ use crate::{ExecutionId, GraphDigest, InvocationId, ParentCallKey, SandboxLeaseI
 /// inside a resource record with snake-case tags; a version 5 run is
 /// refused, never migrated. Version 7 lets the run declaration carry
 /// `forked_from`, the source and position a forked run was seeded from
-/// (`FORK.md`); a version 6 run is refused, never migrated.
-pub const COORDINATOR_FORMAT_VERSION: u32 = 7;
+/// (`FORK.md`); a version 6 run is refused, never migrated. Version 8 pins
+/// engine log version 12 (a partial success keeps its underlying failure
+/// whole, a timeout included); a version 7 run is refused, never migrated.
+pub const COORDINATOR_FORMAT_VERSION: u32 = 8;
 
 /// Name-only child secret bindings. Plaintext is not representable here.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,9 +233,10 @@ pub enum CoordinatorEvent {
     /// for `outcome`. `retained` is whether the sandbox and its workspace
     /// still exist on the provider afterwards; `problems` is what the release
     /// could not do, in which case the sandbox is still there and the next
-    /// release (`finish`, or `petri sandbox prune`) tries again. Usually
-    /// before `run.finished`; a lease a crash left live is released by the
-    /// resumed run's end, after it.
+    /// release (the run's end, or `petri sandbox prune`) tries again. Always
+    /// before `run.finished`: the run's end releases what a crash left live
+    /// or a failed release left behind, and records a release a crash cut
+    /// off before its record, first.
     #[serde(rename = "scope.released")]
     ScopeReleased {
         invocation: InvocationId,
