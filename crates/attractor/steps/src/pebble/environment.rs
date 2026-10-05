@@ -9,7 +9,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use executor::{EnvError, ExecEnv, OutputMode, ProcessHandle, ProcessSpec, Sig, SpawnEnv};
+use executor::{
+    EnvError, ExecEnv, OutputMode, ProcessHandle, ProcessSpec, Sig, SpawnEnv, SpawnTarget,
+};
 use globset::{GlobBuilder, GlobMatcher};
 use ir::LogStream;
 use pebble_coding_agent::environment::support::{
@@ -39,7 +41,11 @@ impl InheritedEnv {
 
 #[async_trait]
 impl SpawnEnv for InheritedEnv {
-    async fn apply(&self, env: &mut BTreeMap<SmolStr, SmolStr>) -> Result<(), EnvError> {
+    async fn apply(
+        &self,
+        _target: SpawnTarget,
+        env: &mut BTreeMap<SmolStr, SmolStr>,
+    ) -> Result<(), EnvError> {
         for (key, value) in &self.0 {
             env.entry(key.clone()).or_insert_with(|| value.clone());
         }

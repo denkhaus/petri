@@ -35,4 +35,4 @@ pub use scope::{
     ScopeOutcome, ScopeSpec, ServiceSpec, Teardown, WorkspaceId,
 };
 pub use secrets::{MapSecrets, Masker, SECRET_REF_KEY, Secret, SecretError, SecretProvider};
-pub use spawn_env::{SpawnEnv, layer_exec};
+pub use spawn_env::{SpawnEnv, SpawnTarget, layer_exec};

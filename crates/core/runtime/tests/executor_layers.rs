@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use executor::{
-    AcquireContext, EnvError, EnvHandle, Executor, ReleaseReport, ScopeOutcome, ScopeSpec, SpawnEnv,
+    AcquireContext, EnvError, EnvHandle, Executor, ReleaseReport, ScopeOutcome, ScopeSpec,
+    SpawnEnv, SpawnTarget,
 };
 use runtime::frontend::native;
 use runtime::ir::RunStatus;
@@ -21,7 +22,13 @@ struct NamedVariable(&'static str);
 
 #[async_trait]
 impl SpawnEnv for NamedVariable {
-    async fn apply(&self, env: &mut BTreeMap<SmolStr, SmolStr>) -> Result<(), EnvError> {
+    async fn apply(
+        &self,
+        target: SpawnTarget,
+        env: &mut BTreeMap<SmolStr, SmolStr>,
+    ) -> Result<(), EnvError> {
+        // A native `run:` node starts a process in the scope.
+        assert_eq!(target, SpawnTarget::Process);
         env.insert(
             SmolStr::new(format!("LAYER_{}", self.0)),
             SmolStr::new(self.0),

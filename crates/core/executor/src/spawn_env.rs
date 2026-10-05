@@ -19,15 +19,31 @@ use crate::container::{ContainerRunner, OneShotContainer};
 use crate::env::{DirectoryEntry, ExecEnv, PreviewUrl, ProcessHandle, ProcessSpec};
 use crate::error::EnvError;
 
+/// What a scope is about to start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpawnTarget {
+    /// A process in the scope's own environment, through [`ExecEnv::spawn`]:
+    /// it sees the scope's filesystem, so a file a layer wrote there through
+    /// the scope is a path it can name.
+    Process,
+    /// A one-shot container, through [`ContainerRunner::run`]: a filesystem
+    /// of its own that shares only the workspace mount with the scope.
+    Container,
+}
+
 /// Adjusts the environment of a process just before a scope starts it.
 ///
 /// Called once per spawn, for a process and for a one-shot container alike,
 /// so a value can be fresh each time. An error fails that spawn.
 #[async_trait]
 pub trait SpawnEnv: Send + Sync {
-    /// Edit `env`, the process's own environment as its step built it. The
-    /// executor still puts the scope's ambient environment beneath it.
-    async fn apply(&self, env: &mut BTreeMap<SmolStr, SmolStr>) -> Result<(), EnvError>;
+    /// Edit `env`, the environment its step built for what `target` names.
+    /// The executor still puts the scope's ambient environment beneath it.
+    async fn apply(
+        &self,
+        target: SpawnTarget,
+        env: &mut BTreeMap<SmolStr, SmolStr>,
+    ) -> Result<(), EnvError>;
 }
 
 /// `env` with `spawn_env` applied to every process it starts.
@@ -58,7 +74,9 @@ struct LayeredExec {
 #[async_trait]
 impl ExecEnv for LayeredExec {
     async fn spawn(&self, mut spec: ProcessSpec) -> Result<Box<dyn ProcessHandle>, EnvError> {
-        self.spawn_env.apply(&mut spec.env).await?;
+        self.spawn_env
+            .apply(SpawnTarget::Process, &mut spec.env)
+            .await?;
         self.inner.spawn(spec).await
     }
 
@@ -131,7 +149,9 @@ impl ContainerRunner for LayeredRunner {
     }
 
     async fn run(&self, mut spec: OneShotContainer) -> Result<Box<dyn ProcessHandle>, EnvError> {
-        self.spawn_env.apply(&mut spec.env).await?;
+        self.spawn_env
+            .apply(SpawnTarget::Container, &mut spec.env)
+            .await?;
         self.inner.run(spec).await
     }
 }
@@ -204,12 +224,21 @@ mod tests {
         }
     }
 
+    /// A fresh token for anything, and a store path only a process in the
+    /// scope can read.
     struct Token;
 
     #[async_trait]
     impl SpawnEnv for Token {
-        async fn apply(&self, env: &mut BTreeMap<SmolStr, SmolStr>) -> Result<(), EnvError> {
+        async fn apply(
+            &self,
+            target: SpawnTarget,
+            env: &mut BTreeMap<SmolStr, SmolStr>,
+        ) -> Result<(), EnvError> {
             env.entry("TOKEN".into()).or_insert_with(|| "fresh".into());
+            if target == SpawnTarget::Process {
+                env.insert("STORE".into(), "/tmp/store".into());
+            }
             Ok(())
         }
     }
@@ -222,7 +251,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_layer_reaches_processes_and_containers_and_keeps_the_rest() {
+    async fn the_layer_reaches_processes_and_containers_by_target_and_keeps_the_rest() {
         let exec = Arc::new(Recorder::default());
         let runner = Arc::new(Recorder::default());
         let sandbox = SandboxInstance {
@@ -244,8 +273,8 @@ mod tests {
         assert!(layered.spawn(spec).await.is_err());
         assert!(layered.spawn(ProcessSpec::new("true", &[])).await.is_err());
         assert_eq!(*exec.seen.lock().expect("seen"), [
-            env(&[("TOKEN", "own")]),
-            env(&[("TOKEN", "fresh")])
+            env(&[("STORE", "/tmp/store"), ("TOKEN", "own")]),
+            env(&[("STORE", "/tmp/store"), ("TOKEN", "fresh")])
         ]);
 
         let containers = handle.container_runner().expect("runner");
