@@ -80,6 +80,6 @@ and a native agent's tool shells. They resolve when the agent starts, and a
 missing one fails the agent node with `secret_unavailable` (Fabro failed the
 whole run at start instead). Explicit `acp.config.env` entries override the
 workflow environment for the same name. That is the reverse of Fabro, where
-the workflow environment won. Workflow secrets override the product credentials
-Petri adds to an ACP agent's environment. Secret values never enter the admitted
-graph or unmasked run records. See "ACP products" in the Attractor format.
+the workflow environment won. As in Fabro, an ACP agent gets no product API
+key the workflow does not name. Secret values never enter the admitted graph or
+unmasked run records. See "ACP products" in the Attractor format.

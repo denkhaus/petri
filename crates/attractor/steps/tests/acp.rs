@@ -4,10 +4,10 @@
 //! recorded as the `acp` envelope, a permission request is allowed always
 //! when no `pre_tool_use` hook is configured, the session usage extension
 //! folds into the stage's metrics, an agent that requires authentication is
-//! authenticated with its API-key method, and the run's secrets reach the
-//! agent's environment (a product credential by name, a `$secret` reference
-//! in `acp.config`) masked in every log. The hook mapping itself is covered
-//! with `[[run.hooks]]` in `crates/fabro/frontend/tests/hooks.rs`.
+//! authenticated with its API-key method, and the secrets a launch names
+//! reach the agent's environment, and no others, masked in every log. The hook
+//! mapping itself is covered with `[[run.hooks]]` in
+//! `crates/fabro/frontend/tests/hooks.rs`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -311,11 +311,11 @@ async fn an_agent_that_requires_authentication_gets_its_api_key_method() {
     );
 }
 
-/// The agent starts with every product credential the run's secrets know
-/// and the `$secret` references its `acp.config` names, and nothing else of
-/// the secrets; what the agent prints of them is masked.
+/// The agent starts with the `$secret` references its `acp.config` names
+/// and nothing else of the secrets, not even a product's API key the
+/// provider knows; what the agent prints of them is masked.
 #[tokio::test]
-async fn product_credentials_and_secret_references_reach_the_agent_masked() {
+async fn only_named_secrets_reach_the_agent_masked() {
     let dir = RunDir::new("acp-credentials");
     let agent = scripted_agent(&dir);
     let env_record = dir.path().join("env.json");
@@ -348,14 +348,10 @@ async fn product_credentials_and_secret_references_reach_the_agent_masked() {
     .expect("json");
     assert_eq!(
         seen,
-        json!({ "AGENT_KEY": "agent-secret-value", "GEMINI_API_KEY": "gemini-secret-value" }),
-        "the named reference and the known product credential, no other secret"
+        json!({ "AGENT_KEY": "agent-secret-value" }),
+        "the named reference, no other secret"
     );
     let lines = log_lines(&report);
-    assert!(
-        lines.iter().any(|line| line == "GEMINI_API_KEY=***"),
-        "the credential the agent printed is masked: {lines:?}"
-    );
     assert!(
         lines.iter().any(|line| line == "AGENT_KEY=***"),
         "the referenced secret the agent printed is masked: {lines:?}"

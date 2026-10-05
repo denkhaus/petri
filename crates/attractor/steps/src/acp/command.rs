@@ -1,20 +1,13 @@
 //! How an ACP agent is launched: the command line or stdio server config a
-//! node names, the environment it gets, and the product credentials the
-//! run's secrets supply.
+//! node names, and the environment it gets.
 
 use std::collections::BTreeMap;
 
-use executor::{ProcessSpec, SECRET_REF_KEY, SecretError, SecretProvider, StdinMode};
+use executor::{ProcessSpec, SECRET_REF_KEY, SecretProvider, StdinMode};
 use ir::Value;
 use serde::Deserialize;
 use serde::de::Error as _;
 use smol_str::SmolStr;
-
-/// The credentials a product reads from its environment. Each one the run's
-/// secret provider knows is put into the agent's environment at launch, so a
-/// product in a container has its key without the workflow naming it; a name
-/// the provider does not know is left out.
-pub const PRODUCT_CREDENTIALS: &[&str] = &["ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY"];
 
 /// A value in the agent command's environment: a literal, or a reference
 /// to one of the run's secrets, resolved at launch and never written down.
@@ -98,22 +91,13 @@ impl AgentCommand {
         self
     }
 
-    /// The process to start: the command with its environment resolved.
-    /// Every product credential the provider knows comes first, then the
-    /// command's own `env` on top; a `$secret` reference the provider cannot
-    /// supply is an error naming the secret.
+    /// The process to start: the command with its environment resolved. Only
+    /// the secrets its `env` names reach the agent. A product's API key is
+    /// never added on its own, because some products bill an API key ahead
+    /// of the subscription they are signed in to. A `$secret` reference the
+    /// provider cannot supply is an error naming the secret.
     pub fn spec(&self, secrets: &dyn SecretProvider) -> Result<ProcessSpec, String> {
-        let mut env: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
-        for name in PRODUCT_CREDENTIALS {
-            match secrets.resolve(name) {
-                Ok(secret) => {
-                    env.insert(SmolStr::new(name), secret.expose());
-                }
-                Err(SecretError::Unknown(_)) => {}
-                Err(error) => return Err(format!("resolving secret `{name}`: {error}")),
-            }
-        }
-        env.append(&mut resolve_env(&self.env, secrets)?);
+        let env = resolve_env(&self.env, secrets)?;
         let args: Vec<&str> = self.args.iter().map(String::as_str).collect();
         Ok(ProcessSpec::new(&self.program, &args)
             .with_env(env)
@@ -226,7 +210,7 @@ mod tests {
     }
 
     #[test]
-    fn the_spec_resolves_secrets_and_forwards_known_product_credentials() {
+    fn the_spec_resolves_named_secrets_and_adds_no_product_credential() {
         let secrets = MapSecrets::new(BTreeMap::from([
             ("AGENT_KEY".into(), "agent-secret-value".into()),
             ("GEMINI_API_KEY".into(), "gemini-secret-value".into()),
@@ -242,14 +226,9 @@ mod tests {
             Some("agent-secret-value")
         );
         assert_eq!(spec.env.get("MODE").map(SmolStr::as_str), Some("test"));
-        assert_eq!(
-            spec.env.get("GEMINI_API_KEY").map(SmolStr::as_str),
-            Some("gemini-secret-value"),
-            "a product credential the provider knows is forwarded"
-        );
         assert!(
-            !spec.env.contains_key("ANTHROPIC_API_KEY"),
-            "one it does not know is left out"
+            !spec.env.contains_key("GEMINI_API_KEY"),
+            "a product credential the provider knows is not added unnamed"
         );
         assert_eq!(spec.stdin, StdinMode::Piped);
         // Resolving registered both values for masking.
