@@ -383,6 +383,32 @@ impl Preamble<'_> {
         parts
     }
 
+    /// The node's visible context projection with raw values (fabro-e71b):
+    /// the same keys the `## Context` rows show — public, non-blank,
+    /// policy-allowed, not already rendered by a completed stage's output.
+    /// The stage-time `{{ context.NAME }}` pass resolves against exactly
+    /// this set, so a token can read what `## Context` shows and nothing
+    /// more.
+    pub(crate) fn context_pairs(&self) -> Vec<(String, Value)> {
+        let completed = self.completed();
+        let rendered: BTreeSet<&str> = completed
+            .iter()
+            .flat_map(|stage| stage.rendered.iter().map(String::as_str))
+            .collect();
+        let Value::Object(kv) = self.kv else {
+            return Vec::new();
+        };
+        kv.iter()
+            .filter(|(key, value)| {
+                !is_hidden_key(key)
+                    && !rendered.contains(key.as_str())
+                    && !is_blank(value)
+                    && self.policy.is_none_or(|policy| policy.context_visible(key))
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+
     fn context_rows(&self, completed: &[Completed<'_>]) -> Vec<(String, String)> {
         let Value::Object(kv) = self.kv else {
             return Vec::new();
@@ -576,7 +602,7 @@ fn tail_lines(text: &str, max: usize, indent: &str) -> String {
 
 /// A context value as the preamble shows it: a string as written, anything
 /// else as JSON, bounded to [`INLINE_VALUE_MAX`].
-fn render_value(value: &Value) -> String {
+pub(crate) fn render_value(value: &Value) -> String {
     let text = match value {
         Value::String(text) => text.clone(),
         other => other.to_string(),
@@ -597,7 +623,7 @@ fn bounded(text: &str) -> String {
 
 /// Keys Fabro keeps out of preambles: engine state, graph mirrors, thread
 /// bookkeeping, and the keys a stage's own output already shows.
-fn is_hidden_key(key: &str) -> bool {
+pub(crate) fn is_hidden_key(key: &str) -> bool {
     key.starts_with("internal.")
         || key.starts_with("graph.")
         || key.starts_with("thread.")
@@ -609,7 +635,7 @@ fn is_hidden_key(key: &str) -> bool {
         )
 }
 
-fn is_blank(value: &Value) -> bool {
+pub(crate) fn is_blank(value: &Value) -> bool {
     match value {
         Value::Null => true,
         Value::String(text) => text.trim().is_empty(),

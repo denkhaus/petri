@@ -42,7 +42,6 @@ use steps::{Step, StepCtx};
 
 use crate::acp::{AgentCommand, EnvValue};
 use crate::blobs::{self, OutputStore};
-use crate::compaction;
 use crate::contract::{Contract, Parsed, repair_message, validate};
 use crate::fallback::{self, FrozenPlan, Plan, Route, StageRequest};
 use crate::fidelity::{
@@ -53,6 +52,7 @@ use crate::outcome::{ExplicitRoutes, Stage};
 use crate::pebble::{PebbleClient, Resume};
 use crate::sessions::{Retained, SessionService};
 use crate::stage::{self, RunInfo};
+use crate::{compaction, fork_context_tokens};
 
 pub const KIND: StepKindId = AGENT_KIND;
 
@@ -243,7 +243,7 @@ impl AgentConfig {
         run_id: &str,
         contract: &Contract,
         policy: Option<&PreamblePolicy>,
-    ) -> String {
+    ) -> Result<String, String> {
         let stages: Vec<StageInfo> = fidelity::stages(&self.stages);
         let preamble = Preamble {
             goal: &self.goal,
@@ -262,7 +262,11 @@ impl AgentConfig {
         }
         let mut out = preamble.prompt(fidelity, &body);
         out.push_str(&contract.prompt_suffix());
-        out
+        // fabro-e71b: the second, narrow pass over the assembled prompt —
+        // `{{ context.NAME }}` resolves against the node's visible context
+        // projection, strictly.
+        fork_context_tokens::resolve(&out, &preamble.context_pairs())
+            .map_err(|unresolved| unresolved.to_string())
     }
 
     /// The `provider/model` selector a native session runs on.
@@ -528,7 +532,11 @@ async fn run_session(
     // shapes the preamble, and its consume-keys tombstone the inputs this
     // stage consumed once it records.
     let policy = fork_preamble_policy::policy_for(ctx, &config.node);
-    let mut prompt = config.assemble(fidelity, run_id, contract, Some(&policy));
+    let mut prompt = config
+        .assemble(fidelity, run_id, contract, Some(&policy))
+        // fabro-e71b: strict resolution — a typo names the token and the
+        // visible keys instead of rendering empty.
+        .map_err(|message| AgentError::failed(fork_context_tokens::CLASS, message))?;
     let mut repairs = 0_u64;
     // Each turn is marked live for the control service while it runs, so a
     // host's interrupt finds it; a driver built outside the coordinator has

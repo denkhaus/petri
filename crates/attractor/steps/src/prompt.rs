@@ -54,6 +54,7 @@ use crate::blobs::{self, OutputStore};
 use crate::contract::{Contract, Parsed, repair_message, validate};
 use crate::fallback::{self, FrozenPlan, ModelFailure, StageRequest};
 use crate::fidelity::{self, Fidelity, Incoming, Preamble, StageInfo, ThreadConfig};
+use crate::fork_context_tokens;
 use crate::fork_preamble_policy::{self, PreamblePolicy};
 use crate::outcome::{ExplicitRoutes, Stage};
 use crate::parallel::{BRANCH_COUNT_KEY, RESULTS_KEY, parallel_complete, strip_placeholders};
@@ -230,7 +231,7 @@ impl PromptConfig {
         results: &Value,
         run_id: &str,
         policy: Option<&PreamblePolicy>,
-    ) -> String {
+    ) -> Result<String, String> {
         let stages: Vec<StageInfo> = fidelity::stages(&self.stages);
         let preamble = Preamble {
             goal: &self.goal,
@@ -251,7 +252,11 @@ impl PromptConfig {
         }
         let mut out = preamble.prompt(self.fidelity(), &body);
         out.push_str(&contract.prompt_suffix());
-        out
+        // fabro-e71b: the second, narrow pass over the assembled prompt —
+        // `{{ context.NAME }}` resolves against the node's visible context
+        // projection, strictly.
+        fork_context_tokens::resolve(&out, &preamble.context_pairs())
+            .map_err(|unresolved| unresolved.to_string())
     }
 
     fn response_format(contract: &Contract) -> Option<ResponseFormat> {
@@ -335,7 +340,12 @@ impl Step for PromptStep {
             .map(|run| run.run_id.clone())
             .unwrap_or_default();
         let policy = fork_preamble_policy::policy_for(&ctx, &config.node);
-        let prompt = config.assemble(&contract, &results, &run_id, Some(&policy));
+        let prompt = match config.assemble(&contract, &results, &run_id, Some(&policy)) {
+            Ok(prompt) => prompt,
+            // fabro-e71b: strict resolution — a typo names the token and the
+            // visible keys instead of rendering empty.
+            Err(message) => return fail(message, fork_context_tokens::CLASS),
+        };
         let request = StageRequest {
             node:             &config.node,
             provider:         config.provider.as_deref(),
