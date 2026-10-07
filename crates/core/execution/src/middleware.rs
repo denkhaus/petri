@@ -134,8 +134,10 @@ impl<D> Next<'_, D> {
     where
         D: Clone + Send + Sync + 'static,
     {
+        use std::future::ready;
+
         Self {
-            call: Box::new(move || Box::pin(std::future::ready(decision.clone()))),
+            call: Box::new(move || Box::pin(ready(decision.clone()))),
         }
     }
 }

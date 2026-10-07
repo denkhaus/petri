@@ -249,15 +249,12 @@ fn nodes_record_fields_read_the_run_context_record() {
 
     let with_generation = |generation: u32| {
         let mut run = ir::RunContext::new();
-        run.record(
-            smol_str::SmolStr::new("flaky"),
-            ir::NodeRecord {
-                status:     ir::Status::Failure(ir::FailureInfo::default()),
-                output:     serde_json::json!(null),
-                generation: ir::Generation::new(generation),
-                attempts:   1,
-            },
-        );
+        run.record(smol_str::SmolStr::new("flaky"), ir::NodeRecord {
+            status:     ir::Status::Failure(ir::FailureInfo::default()),
+            output:     serde_json::json!(null),
+            generation: ir::Generation::new(generation),
+            attempts:   1,
+        });
         let ir::Guard::Expr(id) = guard else {
             panic!("a condition guard");
         };

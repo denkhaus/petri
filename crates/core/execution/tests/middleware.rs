@@ -64,7 +64,7 @@ async fn middleware_composes_over_the_core_proposal_and_checkpoints_fold_state()
                 target:     "first".into(),
                 rank:       None,
                 transition: EdgeTransition::Continue,
-                    back: false,
+                back:       false,
             },
             RoutingCandidate {
                 edge:       EdgeId::new(1),
@@ -72,7 +72,7 @@ async fn middleware_composes_over_the_core_proposal_and_checkpoints_fold_state()
                 target:     "second".into(),
                 rank:       None,
                 transition: EdgeTransition::Continue,
-                    back: false,
+                back:       false,
             },
         ],
     };
@@ -158,7 +158,7 @@ async fn independent_routing_groups_resolve_concurrently_in_declared_order() {
             target: format!("node-{group}").into(),
             rank: None,
             transition: EdgeTransition::Continue,
-                    back: false,
+            back: false,
         }],
     };
 

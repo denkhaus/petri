@@ -6,11 +6,10 @@
 
 mod support;
 
-use ir::{
-    Arm, BinOp, Budget, GraphBuilder, Outcome, RunStatus, Value, validate,
-};
-use support::{Harness, NOOP};
 use std::time::Duration;
+
+use ir::{Arm, BinOp, Budget, GraphBuilder, Outcome, RunStatus, Value, validate};
+use support::{Harness, NOOP};
 
 fn flaky_loop_graph() -> ir::Graph {
     let mut b = GraphBuilder::new();
@@ -60,9 +59,17 @@ fn a_generation_guard_on_a_looping_node_sees_the_counter_advance() {
         .filter(|r| r.name == "flaky")
         .map(|r| r.generation.raw())
         .collect();
-    assert_eq!(generations, vec![0, 1, 2], "three visits, one per generation");
+    assert_eq!(
+        generations,
+        vec![0, 1, 2],
+        "three visits, one per generation"
+    );
 
-    assert_eq!(h.start_count("flaky"), 3, "the deadlock exit fires on visit 3");
+    assert_eq!(
+        h.start_count("flaky"),
+        3,
+        "the deadlock exit fires on visit 3"
+    );
     assert_eq!(status, RunStatus::Success, "the exit node decides the run");
     assert!(
         h.state.errors().is_empty(),

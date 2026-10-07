@@ -437,8 +437,7 @@ impl Middleware for CircuitBreaker {
             // decision with no route at all.
             let exits = match &decision {
                 RouteDecision::Emit(edge) => call.proposal.candidates.iter().any(|candidate| {
-                    candidate.edge == *edge
-                        && self.terminals.iter().any(|name| *name == candidate.target)
+                    candidate.edge == *edge && self.terminals.contains(&candidate.target)
                 }),
                 _ => false,
             };
@@ -568,9 +567,10 @@ mod tests {
     mod route_seam {
         use std::sync::Arc;
 
-        use super::super::*;
         use engine::{DecisionId, RoutingCandidate, RoutingProposal};
         use ir::{Attempt, EdgeId, FiringId, NodeId, Status};
+
+        use super::super::*;
         use crate::{DecisionAddress, ExecutionId, InvocationId};
 
         /// A classifier that calls every failure deterministic.
@@ -596,14 +596,11 @@ mod tests {
             let mut state = breaker.initial_state();
             for firing in 1..=u64::from(limit) {
                 breaker
-                    .fold(
-                        &mut state,
-                        &FoldEvent::FinalOutcome {
-                            firing: FiringId::new(firing),
-                            node:   NodeId::new(2),
-                            outcome: &Outcome::failure("exit status 1"),
-                        },
-                    )
+                    .fold(&mut state, &FoldEvent::FinalOutcome {
+                        firing:  FiringId::new(firing),
+                        node:    NodeId::new(2),
+                        outcome: &Outcome::failure("exit status 1"),
+                    })
                     .expect("fold");
             }
             state
@@ -615,10 +612,10 @@ mod tests {
                 tier:       None,
                 pick:       None,
                 candidates: vec![RoutingCandidate {
-                    edge:       EdgeId::new(7),
-                    weight:     1,
-                    target:     SmolStr::new(target),
-                    rank:       None,
+                    edge: EdgeId::new(7),
+                    weight: 1,
+                    target: SmolStr::new(target),
+                    rank: None,
                     transition: EdgeTransition::Continue,
                     back,
                 }],
@@ -629,19 +626,19 @@ mod tests {
             breaker: &CircuitBreaker,
             state: Value,
             decision: RouteDecision,
-            target:  &str,
-            back:    bool,
+            target: &str,
+            back: bool,
         ) -> RouteDecision {
             let next = RouteNext::from_decision(Ok(decision));
             breaker
                 .route(
                     RouteCall {
-                        address:  DecisionAddress {
+                        address: DecisionAddress {
                             invocation: InvocationId::new(0),
                             execution:  ExecutionId::new(0),
                             decision:   DecisionId::route(FiringId::new(3), Attempt::new(1)),
                         },
-                        firing:   FiringId::new(3),
+                        firing: FiringId::new(3),
                         proposal: proposal(target, back),
                         state,
                     },
@@ -729,4 +726,3 @@ mod tests {
         }
     }
 }
-

@@ -21,9 +21,10 @@
 //! hook's own identity.
 
 use std::collections::BTreeMap;
+use std::env::temp_dir;
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Stdio, id as process_id};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -43,6 +44,7 @@ use pebble_coding_agent::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::fs::{remove_file, write};
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 use tokio::time::{sleep, timeout};
@@ -309,11 +311,8 @@ async fn context_file(payload: &[u8]) -> Option<PathBuf> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    let path = std::env::temp_dir().join(format!(
-        ".fabro-hook-context-{}-{nanos}.json",
-        std::process::id()
-    ));
-    tokio::fs::write(&path, payload).await.ok()?;
+    let path = temp_dir().join(format!(".fabro-hook-context-{}-{nanos}.json", process_id()));
+    write(&path, payload).await.ok()?;
     Some(path)
 }
 
@@ -361,7 +360,7 @@ async fn host_command(
         Ok(child) => child,
         Err(error) => {
             if let Some(path) = &context {
-                let _ = tokio::fs::remove_file(path).await;
+                let _ = remove_file(path).await;
             }
             return Executed::Decided(Decision::Block {
                 reason: Some(format!("command spawn failed: {error}")),
@@ -382,7 +381,7 @@ async fn host_command(
         )),
         Ok(Err(error)) => {
             if let Some(path) = &context {
-                let _ = tokio::fs::remove_file(path).await;
+                let _ = remove_file(path).await;
             }
             Executed::Decided(Decision::Block {
                 reason: Some(format!("command wait failed: {error}")),
@@ -392,7 +391,7 @@ async fn host_command(
         // removal never runs; the copy is best-effort removed here.
         Err(_) => {
             if let Some(path) = &context {
-                let _ = tokio::fs::remove_file(path).await;
+                let _ = remove_file(path).await;
             }
             Executed::Decided(parse_decision(-1, ""))
         }
