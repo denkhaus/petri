@@ -7,7 +7,7 @@ use std::str::FromStr;
 
 use executor::EnvError;
 use ir::RuntimeSpec;
-use sandbox_driver::{Resources, SandboxKind};
+use sandbox_driver::{NetworkPolicy, Resources, SandboxKind};
 
 const RUNNER_PIN: &str = "f8bbbfd81934";
 const DEFAULT_LABEL: &str = "ubuntu-24.04";
@@ -67,6 +67,10 @@ pub enum LostSandbox {
 #[derive(Clone, Debug, Default)]
 pub struct SandboxOptions {
     pub backend:           SandboxBackend,
+    /// Network policy for every sandbox created by this run. Providers reject
+    /// policies they cannot enforce. Blocked runs also verify attached
+    /// sandboxes.
+    pub network:           NetworkPolicy,
     /// What to do when a lease's recorded sandbox is gone from the provider.
     pub lost_sandbox:      LostSandbox,
     /// Label-to-image overrides. Daytona images must include Docker,
@@ -82,8 +86,8 @@ pub struct SandboxOptions {
 /// The Daytona offering that hosts a workflow runner.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DaytonaSandboxKind {
-    Container,
     #[default]
+    Container,
     VirtualMachine,
 }
 
@@ -115,8 +119,13 @@ impl FromStr for DaytonaSandboxKind {
 #[derive(Clone, Copy, Debug)]
 pub struct DaytonaResources {
     pub cpu_cores: u32,
+    /// Requested memory in MiB. The driver's effective allocation must
+    /// meet the runner minimum; Daytona rounds up to whole GiB.
     pub memory_mb: u64,
-    pub disk_mb:   u64,
+    /// `None` lets Daytona choose the disk allocation when building the
+    /// snapshot. Explicit allocations must be positive; Daytona validates
+    /// whether the image fits and the account allows the requested size.
+    pub disk_mb:   Option<u64>,
 }
 
 impl Default for DaytonaResources {
@@ -124,24 +133,29 @@ impl Default for DaytonaResources {
         Self {
             cpu_cores: 2,
             memory_mb: 4096,
-            disk_mb:   20 * 1024,
+            disk_mb:   None,
         }
     }
 }
 
 impl DaytonaResources {
     pub(crate) fn validated(self) -> Result<Resources, EnvError> {
-        if self.cpu_cores < 2 || self.memory_mb < 4096 || self.disk_mb < 4096 {
+        let memory_mb = sandbox_driver_daytona_config::allocation_mib(self.memory_mb);
+        if self.cpu_cores < 2 || memory_mb < 4096 || self.disk_mb == Some(0) {
             return Err(EnvError::backend(
                 "daytona",
                 "configure",
-                "nested Docker needs at least 2 CPUs, 4096 MiB of memory, and 4096 MiB of disk",
+                "the Daytona runner needs at least 2 CPUs and 4096 MiB of memory; an explicit disk allocation must be positive",
             ));
         }
         let mut resources = Resources::default();
         resources.cpu_cores = Some(self.cpu_cores);
-        resources.memory_mb = Some(self.memory_mb);
-        resources.disk_mb = Some(self.disk_mb);
+        // Snapshot identity, creation and status validation all use the
+        // same effective allocation that the provider sends to Daytona.
+        resources.memory_mb = Some(memory_mb);
+        resources.disk_mb = self
+            .disk_mb
+            .map(sandbox_driver_daytona_config::allocation_mib);
         Ok(resources)
     }
 }
@@ -260,5 +274,59 @@ mod tests {
             .validated()
             .is_err()
         );
+        assert!(
+            DaytonaResources {
+                disk_mb: Some(0),
+                ..Default::default()
+            }
+            .validated()
+            .is_err()
+        );
+        for disk in [1024, 3 * 1024, 4096, 20 * 1024] {
+            let resources = DaytonaResources {
+                disk_mb: Some(disk),
+                ..Default::default()
+            }
+            .validated()
+            .unwrap();
+            assert_eq!(resources.disk_mb, Some(disk));
+        }
+    }
+
+    #[test]
+    fn daytona_defaults_use_a_container_with_provider_selected_disk() {
+        let options = SandboxOptions {
+            backend: SandboxBackend::Daytona,
+            ..Default::default()
+        };
+        assert_eq!(options.daytona_kind.sandbox_kind(), SandboxKind::Container);
+        let resources = options.daytona_resources.validated().unwrap();
+        assert_eq!(resources.cpu_cores, Some(2));
+        assert_eq!(resources.memory_mb, Some(4096));
+        assert_eq!(resources.disk_mb, None);
+    }
+
+    #[test]
+    fn daytona_validates_the_effective_memory_allocation() {
+        for memory_mb in [0, 1, 2048, 3072] {
+            assert!(
+                DaytonaResources {
+                    memory_mb,
+                    ..Default::default()
+                }
+                .validated()
+                .is_err()
+            );
+        }
+        for memory_mb in [3073, 3815, 4096] {
+            let resources = DaytonaResources {
+                memory_mb,
+                ..Default::default()
+            }
+            .validated()
+            .unwrap();
+            assert_eq!(resources.memory_mb, Some(4096));
+            assert_eq!(resources.disk_mb, None);
+        }
     }
 }

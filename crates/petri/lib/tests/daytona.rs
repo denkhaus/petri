@@ -1,7 +1,7 @@
-//! The standalone host on `--backend daytona`: a run's sandbox is a VM the
+//! The standalone host on `--backend daytona`: a run's sandbox is a sandbox the
 //! run records by provider and id, retention keeps it stopped and `prune`
 //! deletes it with a tombstone, and a resume after a crash attaches the same
-//! VM and fences it before the step runs again. Every test skips without a
+//! sandbox and fences it before the step runs again. Every test skips without a
 //! Daytona credential and a plugin whose backend accepts it, unless
 //! `PETRI_REQUIRE_DAYTONA` says the tier must run. The Docker halves are in
 //! `host.rs`; `crates/core/executor-sandbox/DAYTONA.md` maps Fabro's former
@@ -28,7 +28,7 @@ fn options(dir: &RunDir, retention: Retention) -> RunOptions {
     options
 }
 
-/// A run kept by retention leaves its VM stopped on the provider, with its
+/// A run kept by retention leaves its sandbox stopped on the provider, with its
 /// record saying so; `petri sandbox prune` deletes it, records the
 /// tombstone, and refuses to run while a live process holds the run.
 #[tokio::test]
@@ -118,7 +118,7 @@ async fn a_daytona_run_keeps_its_sandbox_stopped_and_prune_deletes_it() {
 }
 
 /// The fence across a resume, through the host: `host::resume` builds a
-/// fresh executor, which finds the crashed run's VM by the run id recorded
+/// fresh executor, which finds the crashed run's sandbox by the run id recorded
 /// in the run dir and the lease's workspace label, attaches it, and fences
 /// it (one stop, one start) before re-dispatching the step into the same
 /// workspace.
@@ -177,10 +177,10 @@ sleep 300
                 Duration::from_secs(900)
             )
             .await,
-        "the step never started inside the VM"
+        "the step never started inside the sandbox"
     );
     // The crash: the host task is gone (coordinator, driver and lease drop,
-    // release never runs), the VM beats on.
+    // release never runs), the sandbox beats on.
     run.abort();
     let _ = run.await;
     let crashed = observer
@@ -204,7 +204,7 @@ sleep 300
     let output = testkit::output_of(&resumed, "beat");
     assert_eq!(
         output["before"], output["after"],
-        "the crashed VM's beater kept writing: the fence missed it ({output})"
+        "the crashed sandbox's beater kept writing: the fence missed it ({output})"
     );
     let leftovers: Vec<String> = observer
         .sandboxes(&run_id)

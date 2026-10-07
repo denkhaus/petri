@@ -1,6 +1,6 @@
 //! The same action contract on a sandbox without a callback route. Docker
 //! covers it locally; the live Daytona tier (`PETRI_REQUIRE_DAYTONA`, see
-//! `crates/core/executor-sandbox/DAYTONA.md`) adds Daytona VM and job
+//! `crates/core/executor-sandbox/DAYTONA.md`) adds Daytona process and job
 //! targets.
 
 mod support;
@@ -128,7 +128,7 @@ async fn ordinary_actions_run_without_advertising_an_unreachable_results_service
 
 /// Skips without a Daytona credential and plugin, unless
 /// `PETRI_REQUIRE_DAYTONA` says the tier must run. Creates billable
-/// sandboxes: one VM and one VM with a nested job container.
+/// sandboxes: one runner and one runner with a nested job container.
 #[tokio::test(flavor = "multi_thread")]
 async fn daytona_runs_process_and_container_jobs_with_javascript_and_docker_actions() {
     if !is_daytona_ready().await {
@@ -150,15 +150,17 @@ async fn daytona_runs_process_and_container_jobs_with_javascript_and_docker_acti
             .expect("PETRI_TEST_DAYTONA_MEMORY_MB is an integer");
     }
     if let Ok(value) = env::var("PETRI_TEST_DAYTONA_DISK_MB") {
-        resources.disk_mb = value
-            .parse()
-            .expect("PETRI_TEST_DAYTONA_DISK_MB is an integer");
+        resources.disk_mb = Some(
+            value
+                .parse()
+                .expect("PETRI_TEST_DAYTONA_DISK_MB is an integer"),
+        );
     }
     for container in [false, true] {
         let dir = RunDir::new(if container {
             "daytona-container-actions"
         } else {
-            "daytona-vm-actions"
+            "daytona-process-actions"
         });
         let rt = runtime(dir.path());
         let mut options = rt.run_options().clone();

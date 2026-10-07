@@ -159,10 +159,6 @@ pub enum Intervention {
         middleware: MiddlewareKey,
         edge:       EdgeId,
     },
-    Jump {
-        middleware: MiddlewareKey,
-        target:     NodeId,
-    },
     Block {
         middleware: MiddlewareKey,
         reason:     SmolStr,
@@ -174,7 +170,6 @@ pub enum Intervention {
 #[serde(rename_all = "snake_case")]
 pub enum RouteDecision {
     Emit(EdgeId),
-    Jump(NodeId),
     None,
     Block { reason: SmolStr },
 }
@@ -197,10 +192,6 @@ pub enum RouteApplied {
         group:  u32,
         edge:   EdgeId,
     },
-    Jump {
-        firing: FiringId,
-        target: NodeId,
-    },
     None {
         firing: FiringId,
         group:  u32,
@@ -211,9 +202,7 @@ impl RouteApplied {
     /// The firing whose routing this record applies.
     pub fn firing(&self) -> FiringId {
         match self {
-            Self::Edge { firing, .. } | Self::Jump { firing, .. } | Self::None { firing, .. } => {
-                *firing
-            }
+            Self::Edge { firing, .. } | Self::None { firing, .. } => *firing,
         }
     }
 
@@ -221,7 +210,6 @@ impl RouteApplied {
     pub fn decision(&self) -> RouteDecision {
         match self {
             Self::Edge { edge, .. } => RouteDecision::Emit(*edge),
-            Self::Jump { target, .. } => RouteDecision::Jump(*target),
             Self::None { .. } => RouteDecision::None,
         }
     }

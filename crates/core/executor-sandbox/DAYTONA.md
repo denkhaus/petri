@@ -38,12 +38,13 @@ DAYTONA_API_KEY=... mise run test:daytona
 ```
 
 The tests run in the `daytona` Nextest group, three at a time. Each live test
-creates one VM from the shared runner snapshot (`petri-runner-<digest>`,
+creates one container sandbox with 2 CPUs, 4096 MiB of memory and provider-selected
+disk from the shared runner snapshot (`petri-runner-<digest>`,
 named by image, resources, kind and region). The first run on an account
 builds that snapshot, which can take up to fifteen minutes; later runs reuse
 it. Every test releases what it created and then lists the account by the
 run's labels to check nothing was left behind. Sandboxes are billable; the
-tier creates about fourteen VMs per run.
+tier creates about fourteen sandboxes per run.
 
 CI does not run the tier: no runner has the credential. The tier is run by a
 developer with an account, before a change to the executor's Daytona path or
@@ -61,10 +62,10 @@ for the Docker battery.
 
 | Suite | Tests |
 | --- | --- |
-| `crates/core/executor-sandbox/tests/daytona_backend.rs` | the executor over the Daytona plugin: a process step in the runner VM, signals and timeouts, workspace files over the wire, a nested container job with a one-shot action, retention and reattachment, crash recovery and the fence, output after idle and under a burst, a preview URL to a port, a bad image, a missing plugin |
-| `crates/petri/lib/tests/daytona.rs` | the standalone host on `--backend daytona`: the run's records and `prune`, and `resume` fencing the crashed VM |
+| `crates/core/executor-sandbox/tests/daytona_backend.rs` | the executor over the Daytona plugin: a process step in the runner sandbox, signals and timeouts, workspace files over the wire, a nested container job with a one-shot action, retention and reattachment, crash recovery and the fence, output after idle and under a burst, a preview URL to a port, a bad image, a missing plugin |
+| `crates/petri/lib/tests/daytona.rs` | the standalone host on `--backend daytona`: the run's records and `prune`, and `resume` fencing the crashed sandbox |
 | `crates/petri/cli/tests/fabro_terminal_blackbox.rs` | `a_daytona_run_keeps_its_sandbox_after_success_and_prune_removes_it`: the binary on `--backend daytona`, the reported sandbox and the reported prune command |
-| `crates/github/acceptance/tests/backend_e2e.rs` | `daytona_runs_process_and_container_jobs_with_javascript_and_docker_actions`: a GitHub Actions workflow with JavaScript and Docker actions on a VM job and on a nested container job |
+| `crates/github/acceptance/tests/backend_e2e.rs` | `daytona_runs_process_and_container_jobs_with_javascript_and_docker_actions`: a GitHub Actions workflow with JavaScript and Docker actions on a sandbox job and on a nested container job |
 
 ## The mapping
 
@@ -73,16 +74,16 @@ Fabro's tests in file order. "Petri test" names the test in
 
 | # | Fabro test | What it proved | Petri test, or why there is none |
 | --- | --- | --- | --- |
-| 1 | `daytona_exec_command` | create a sandbox, run `echo hello`, exit code 0 and the output | `a_process_step_runs_in_the_runner_vm` |
-| 2 | `daytona_exec_command_with_pipe` | a shell pipeline runs (`echo hello world \| wc -w` is 2) | `a_process_step_runs_in_the_runner_vm` |
-| 3 | `daytona_exec_command_cancelled` | a cancel token ends `sleep 10`: no exit code, a cancelled or killed termination | `term_and_a_timeout_end_a_step_in_the_vm`: `SIGTERM` ends the step, the signal is reported, and it reaches the step's process group |
-| 4 | `daytona_exec_command_local_timeout` | a 100 ms timeout ends `sleep 10` in under three seconds as a timeout | `term_and_a_timeout_end_a_step_in_the_vm`: the step's own deadline ends it as `timed_out`, promptly |
+| 1 | `daytona_exec_command` | create a sandbox, run `echo hello`, exit code 0 and the output | `a_process_step_runs_in_the_runner_sandbox` |
+| 2 | `daytona_exec_command_with_pipe` | a shell pipeline runs (`echo hello world \| wc -w` is 2) | `a_process_step_runs_in_the_runner_sandbox` |
+| 3 | `daytona_exec_command_cancelled` | a cancel token ends `sleep 10`: no exit code, a cancelled or killed termination | `term_and_a_timeout_end_a_step_in_the_runner_sandbox`: `SIGTERM` ends the step, the signal is reported, and it reaches the step's process group |
+| 4 | `daytona_exec_command_local_timeout` | a 100 ms timeout ends `sleep 10` in under three seconds as a timeout | `term_and_a_timeout_end_a_step_in_the_runner_sandbox`: the step's own deadline ends it as `timed_out`, promptly |
 | 5 | `daytona_file_round_trip` | write, exists, read, delete a file | `workspace_files_go_over_the_wire`: write with missing parents, read, a missing file, the read limit, a directory listing. Delete is not on `ExecEnv`; a step removes files with a process |
-| 6 | `daytona_full_lifecycle` | initialize, the platform is Linux, `pwd` works, the directory lists, delete | `a_process_step_runs_in_the_runner_vm` (`pwd`, the release deletes the VM) and `workspace_files_go_over_the_wire` (the listing). `ExecEnv` has no platform query; the executor reads the image's `PATH` at acquire instead |
-| 7 | `daytona_snapshot_sandbox` | a Dockerfile source with 2 CPUs, 4 GiB and 10 GiB, an idle auto-stop timer, and the tool the build installed | `a_process_step_runs_in_the_runner_vm`: the VM comes from the `petri-runner-*` snapshot with the requested CPUs, memory and disk, as a VM. `a_container_job_runs_nested_inside_the_vm`: a job's image is selected. Timers: Petri disables auto-stop, pause, delete and TTL (`daytona_tests::a_process_target_uses_the_vm_and_disables_automatic_stops_and_deletion`). A Dockerfile source is not exposed (gap 3) |
+| 6 | `daytona_full_lifecycle` | initialize, the platform is Linux, `pwd` works, the directory lists, delete | `a_process_step_runs_in_the_runner_sandbox` (`pwd`, the release deletes the sandbox) and `workspace_files_go_over_the_wire` (the listing). `ExecEnv` has no platform query; the executor reads the image's `PATH` at acquire instead |
+| 7 | `daytona_snapshot_sandbox` | a Dockerfile source with 2 CPUs, 4 GiB and 10 GiB, an idle auto-stop timer, and the tool the build installed | `a_process_step_runs_in_the_runner_sandbox`: the sandbox comes from the `petri-runner-*` snapshot with the requested CPUs, memory and disk, as a container. `a_container_job_runs_nested_inside_the_runner_sandbox`: a job's image is selected. Timers: Petri disables auto-stop, pause, delete and TTL (`daytona_tests::a_process_target_uses_the_vm_and_disables_automatic_stops_and_deletion`). A Dockerfile source is not exposed (gap 3) |
 | 8 | `daytona_artifact_sync_uploads_and_rewrites_pointer` | a 150 KiB local artifact is uploaded into the sandbox and its pointer rewritten | the transfer: `workspace_files_go_over_the_wire` writes a 150 KiB file and reads it back. Pointer rewriting is Fabro's artifact scheme |
 | 9 | `daytona_pipeline_artifact_offload_and_sync` | a pipeline over Daytona whose output above 100 KiB is offloaded to a blob and resolved | a run over Daytona: `crates/petri/lib/tests/daytona.rs::a_daytona_run_keeps_its_sandbox_stopped_and_prune_deletes_it`. The offload above 100 KiB is the Attractor steps' behaviour, proved on the host in `crates/attractor/steps/tests/steps.rs` and independent of the backend |
-| 10 | `daytona_git_checkpoint_remote_emits_events` | one checkpoint commit per stage inside the sandbox, a 40-character SHA on the event and in the checkpoint | Fabro's: checkpoints are Fabro's `ExecutionHooks` over Petri. Fabro's `a_daytona_run_commits_inside_the_sandbox_and_publishes_every_checkpoint` covers it (follow-up B9) |
+| 10 | `daytona_git_checkpoint_remote_emits_events` | one checkpoint commit per stage inside the sandbox, a 40-character SHA on the event and in the checkpoint | Fabro's: checkpoints are Fabro's `ExecutionHooks` over Petri. Fabro's `a_daytona_run_commits_inside_the_sandbox_and_publishes_every_checkpoint` covers it |
 | 11 | `daytona_git_checkpoint_without_metadata_branch` | no `fabro/meta` refs; the `Fabro-Run:` trailer without `Fabro-Checkpoint:` | Fabro's, as row 10 |
 | 12 | `daytona_asset_collection` | `run.artifacts.include` globs are collected from the remote sandbox into the artifact store, with no scratch cache | Fabro's collection over Petri's `list_directory` and `read_file`, both proved on Daytona in `workspace_files_go_over_the_wire` |
 | 13 | `daytona_ssh_access` | an SSH command is offered after initialize | none: gap 1 |
@@ -104,8 +105,8 @@ Behaviours the task named that no single Fabro test carried:
 | retention and prune | `a_kept_sandbox_is_stopped_and_reattached_later`; `crates/petri/lib/tests/daytona.rs::a_daytona_run_keeps_its_sandbox_stopped_and_prune_deletes_it`; the CLI cell in `fabro_terminal_blackbox.rs` |
 | output resync | `output_survives_idle_and_a_burst_is_delivered_or_its_loss_is_counted`: a 5000-line burst arrives whole, or the loss the provider counted is one stderr line and the exit status stands |
 | failure modes | `a_bad_image_fails_a_nested_job_routably`; `a_missing_daytona_plugin_fails_the_scope_routably` (runs everywhere); `daytona_tests::a_vm_process_target_with_sidecars_fails_before_snapshot_preparation` |
-| regional environments | `a_process_step_runs_in_the_runner_vm` checks the VM's region when `DAYTONA_TARGET` is set; `snapshots::tests::runner_snapshots_and_sandboxes_use_the_selected_region` covers the snapshot identity. Fabro's environment catalog and its regional settings stay Fabro's (follow-up B11) |
-| GitHub Actions on Daytona | `crates/github/acceptance/tests/backend_e2e.rs`: JavaScript and Docker actions on a VM job and a nested container job |
+| regional environments | `a_process_step_runs_in_the_runner_sandbox` checks the sandbox's region when `DAYTONA_TARGET` is set; `snapshots::tests::runner_snapshots_and_sandboxes_use_the_selected_region` covers the snapshot identity. Fabro's environment catalog and its regional settings stay Fabro's |
+| GitHub Actions on Daytona | `crates/github/acceptance/tests/backend_e2e.rs`: JavaScript and Docker actions on a sandbox job and a nested container job |
 
 ## Gaps
 
@@ -122,12 +123,13 @@ Behaviours the task named that no single Fabro test carried:
    Petri builds its runner snapshots from an image reference only, selected
    by placement label (`--runner-image LABEL=IMAGE`). A workflow that needs
    tools baked in points at an image that has them.
-4. **Not yet run live.** This machine has no `DAYTONA_API_KEY`, so the tier
-   was written and its gating proved without an account: once with no
-   credential (every live test skips with its notice) and once with a fake
-   key under `PETRI_REQUIRE_DAYTONA=1` (every live test fails with the
-   named reason). The first live run is `mise run test:daytona` by someone
-   with an account. Two assertions are the most likely to need attention on
-   that run: that `SIGTERM` reaches a backgrounded grandchild in the VM
-   (`term_and_a_timeout_end_a_step_in_the_vm`), and that a 5000-line burst
-   is either whole or reported lost (`output_survives_idle_...`).
+4. **Partial live validation.** The default container runner has passed
+   `a_process_step_runs_in_the_runner_sandbox` and
+   `a_container_job_runs_nested_inside_the_runner_sandbox` against the hosted
+   service with 2 CPUs, 4096 MiB memory and provider-selected disk. These
+   cover process output and exit codes, workspace reads/writes, nested
+   Docker, a one-shot container sharing files, and cleanup. A standalone
+   `petri run --backend daytona` also passed without resource or class
+   overrides. Deletion is asynchronous: the leak check waits up to 30 seconds
+   for the list endpoint to reflect it. The full tier, including the signal,
+   crash-recovery, streaming and preview cases, still needs live validation.

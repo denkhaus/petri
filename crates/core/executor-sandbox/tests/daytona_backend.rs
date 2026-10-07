@@ -1,6 +1,6 @@
 //! The sandbox executor over the Daytona plugin: a process scope in the
-//! runner VM, a container job nested inside it, exec exit codes, signals and
-//! timeouts, workspace I/O over the wire, output after idle and under a
+//! runner sandbox, a container job nested inside it, exec exit codes, signals
+//! and timeouts, workspace I/O over the wire, output after idle and under a
 //! burst, a route to a port, crash recovery onto the same sandbox, retention
 //! and reattachment, and the failure modes. Every live test skips without a
 //! Daytona credential and a plugin whose backend accepts it, unless
@@ -36,7 +36,7 @@ const SCOPE: ir::ScopeId = ir::ScopeId::new(1);
 const LEASE: u64 = 1;
 const INSTANCE: &str = "env-1";
 const ALPINE: &str = "alpine:3.20";
-/// How long a step inside a fresh VM gets to start and be seen.
+/// How long a step inside a fresh sandbox gets to start and be seen.
 const START: Duration = Duration::from_secs(120);
 /// The lines a fast burst of output prints.
 const BURST_LINES: usize = 5000;
@@ -54,12 +54,12 @@ fn executor(dir: &RunDir, retention: Retention) -> RoutingExecutor {
     RoutingExecutor::with_options(dir.path(), retention, options()).with_run_id(dir.run_id())
 }
 
-/// A process scope: the runner VM itself, no nested container.
-fn vm_scope() -> ScopeSpec {
+/// A process scope: the runner sandbox itself, no nested container.
+fn process_scope() -> ScopeSpec {
     ScopeSpec::new(SCOPE, INSTANCE)
 }
 
-/// A container job, nested inside the runner VM's Docker.
+/// A container job, nested inside the runner runner's Docker.
 fn container_scope(image: &str) -> ScopeSpec {
     ScopeSpec::new(SCOPE, INSTANCE).with_runtime(ir::RuntimeSpec::container(image))
 }
@@ -105,24 +105,32 @@ async fn workspace_len(env: &dyn ExecEnv, relative: &str) -> usize {
 
 /// Fails the test when the provider still holds a sandbox of this run.
 async fn assert_no_leftovers(observer: &DaytonaObserver, dir: &RunDir) {
-    let leftovers: Vec<String> = observer
-        .sandboxes(&dir.run_id())
-        .await
-        .into_iter()
-        .map(|status| format!("{} ({:?})", status.id, status.state))
-        .collect();
-    assert!(
-        leftovers.is_empty(),
-        "sandboxes were left behind: {leftovers:?}"
-    );
+    // Daytona accepts deletion before its list endpoint reflects the new
+    // state. Bound the wait so a real leak still fails the live test.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let leftovers = observer.sandboxes(&dir.run_id()).await;
+        if leftovers.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "sandboxes were left behind: {:?}",
+            leftovers
+                .iter()
+                .map(|status| format!("{} ({:?})", status.id, status.state))
+                .collect::<Vec<_>>()
+        );
+        time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
-/// The runner VM: a process step runs in it, its exit code and output cross
-/// the wire, the environment facts a step relies on are read at acquire, the
-/// acquired sandbox is recorded with the runner snapshot it came from, and
+/// The runner sandbox: a process step runs in it, its exit code and output
+/// cross the wire, the environment facts a step relies on are read at acquire,
+/// the acquired sandbox is recorded with the runner snapshot it came from, and
 /// the provider holds it with the resources Petri asked for.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_process_step_runs_in_the_runner_vm() {
+async fn a_process_step_runs_in_the_runner_sandbox() {
     if !is_daytona_ready().await {
         return;
     }
@@ -130,7 +138,7 @@ async fn a_process_step_runs_in_the_runner_vm() {
     let dir = RunDir::new("sandbox-daytona-step");
     let executor = executor(&dir, Retention::Never);
     let handle = executor
-        .acquire(&vm_scope(), &AcquireContext::bare())
+        .acquire(&process_scope(), &AcquireContext::bare())
         .await
         .expect("acquire");
     let env = handle.exec();
@@ -177,7 +185,7 @@ async fn a_process_step_runs_in_the_runner_vm() {
             .snapshot
             .as_deref()
             .is_some_and(|snapshot| snapshot.starts_with("petri-runner-")),
-        "the VM comes from a shared runner snapshot: {sandbox:?}"
+        "the sandbox comes from a shared runner snapshot: {sandbox:?}"
     );
     let status = observer
         .sandbox(&dir.run_id(), LEASE)
@@ -185,12 +193,12 @@ async fn a_process_step_runs_in_the_runner_vm() {
         .expect("the provider lists the run's sandbox by its labels");
     assert_eq!(status.id.as_str(), sandbox.instance.as_str());
     assert_eq!(status.state, SandboxState::Running);
-    assert_eq!(status.sandbox_kind, Some(SandboxKind::VirtualMachine));
+    assert_eq!(status.sandbox_kind, Some(SandboxKind::Container));
     let wanted = DaytonaResources::default();
     let resources = status.resources.expect("Daytona reports the allocation");
     assert_eq!(resources.cpu_cores, Some(wanted.cpu_cores));
     assert_eq!(resources.memory_mb, Some(wanted.memory_mb));
-    assert_eq!(resources.disk_mb, Some(wanted.disk_mb));
+    assert!(resources.disk_mb.is_some_and(|disk| disk > 0));
     if let Some(region) = env::var_os("DAYTONA_TARGET").filter(|value| !value.is_empty()) {
         assert_eq!(
             status.region.as_deref(),
@@ -210,11 +218,11 @@ async fn a_process_step_runs_in_the_runner_vm() {
     observer.shutdown().await;
 }
 
-/// `SIGTERM` ends a step and reaches its whole process group in the VM, so a
-/// backgrounded grandchild dies with it; a step's own deadline ends it as a
+/// `SIGTERM` ends a step and reaches its whole process group in the sandbox, so
+/// a backgrounded grandchild dies with it; a step's own deadline ends it as a
 /// timeout, promptly, whatever the provider observed on the way.
 #[tokio::test(flavor = "multi_thread")]
-async fn term_and_a_timeout_end_a_step_in_the_vm() {
+async fn term_and_a_timeout_end_a_step_in_the_runner_sandbox() {
     if !is_daytona_ready().await {
         return;
     }
@@ -222,7 +230,7 @@ async fn term_and_a_timeout_end_a_step_in_the_vm() {
     let dir = RunDir::new("sandbox-daytona-term");
     let executor = executor(&dir, Retention::Never);
     let handle = executor
-        .acquire(&vm_scope(), &AcquireContext::bare())
+        .acquire(&process_scope(), &AcquireContext::bare())
         .await
         .expect("acquire");
     let env = handle.exec();
@@ -285,7 +293,7 @@ async fn term_and_a_timeout_end_a_step_in_the_vm() {
     observer.shutdown().await;
 }
 
-/// Workspace files in the VM: parents are created for a write, a missing
+/// Workspace files in the sandbox: parents are created for a write, a missing
 /// file is `None`, the read limit is enforced before the whole file crosses
 /// the wire, a directory lists, bytes round-trip exactly (every byte value,
 /// and a file past 100 KiB), the step sees the same files, and a cwd that
@@ -299,7 +307,7 @@ async fn workspace_files_go_over_the_wire() {
     let dir = RunDir::new("sandbox-daytona-fs");
     let executor = executor(&dir, Retention::Never);
     let handle = executor
-        .acquire(&vm_scope(), &AcquireContext::bare())
+        .acquire(&process_scope(), &AcquireContext::bare())
         .await
         .expect("acquire");
     let env = handle.exec();
@@ -389,11 +397,11 @@ async fn workspace_files_go_over_the_wire() {
     observer.shutdown().await;
 }
 
-/// A container job runs in its own image nested inside the VM's Docker, the
-/// scope's environment reaches it, its workspace is the VM's, and a one-shot
-/// action container shares that workspace both ways.
+/// A container job runs in its own image nested inside the runner's Docker, the
+/// scope's environment reaches it, its workspace is the runner's, and a
+/// one-shot action container shares that workspace both ways.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_container_job_runs_nested_inside_the_vm() {
+async fn a_container_job_runs_nested_inside_the_runner_sandbox() {
     if !is_daytona_ready().await {
         return;
     }
@@ -464,7 +472,7 @@ async fn a_kept_sandbox_is_stopped_and_reattached_later() {
     let dir = RunDir::new("sandbox-daytona-keep");
     let keeper = executor(&dir, Retention::Always);
     let handle = keeper
-        .acquire(&vm_scope(), &AcquireContext::bare())
+        .acquire(&process_scope(), &AcquireContext::bare())
         .await
         .expect("acquire");
     handle
@@ -485,7 +493,7 @@ async fn a_kept_sandbox_is_stopped_and_reattached_later() {
 
     let later = executor(&dir, Retention::Never);
     let handle = later
-        .acquire(&vm_scope(), &AcquireContext::bare())
+        .acquire(&process_scope(), &AcquireContext::bare())
         .await
         .expect("reattach");
     assert_eq!(
@@ -519,7 +527,7 @@ async fn a_reacquire_attaches_and_fences_the_crashed_predecessor() {
     let dir = RunDir::new("sandbox-daytona-fence");
     let first = executor(&dir, Retention::Never);
     let handle = first
-        .acquire(&vm_scope(), &AcquireContext::bare())
+        .acquire(&process_scope(), &AcquireContext::bare())
         .await
         .expect("first acquire");
     let env = handle.exec();
@@ -549,7 +557,7 @@ async fn a_reacquire_attaches_and_fences_the_crashed_predecessor() {
 
     let second = executor(&dir, Retention::Never);
     let handle2 = second
-        .acquire(&vm_scope(), &AcquireContext::bare())
+        .acquire(&process_scope(), &AcquireContext::bare())
         .await
         .expect("second acquire");
     assert_eq!(
@@ -586,7 +594,7 @@ async fn output_survives_idle_and_a_burst_is_delivered_or_its_loss_is_counted() 
     let dir = RunDir::new("sandbox-daytona-output");
     let executor = executor(&dir, Retention::Never);
     let handle = executor
-        .acquire(&vm_scope(), &AcquireContext::bare())
+        .acquire(&process_scope(), &AcquireContext::bare())
         .await
         .expect("acquire");
     let env = handle.exec();
@@ -653,7 +661,7 @@ async fn a_preview_url_reaches_a_port_inside_the_sandbox() {
     let dir = RunDir::new("sandbox-daytona-preview");
     let executor = executor(&dir, Retention::Never);
     let handle = executor
-        .acquire(&vm_scope(), &AcquireContext::bare())
+        .acquire(&process_scope(), &AcquireContext::bare())
         .await
         .expect("acquire");
     let env = handle.exec();
@@ -763,7 +771,7 @@ async fn a_missing_daytona_plugin_fails_the_scope_routably() {
         options(),
     );
     let error = executor
-        .acquire(&vm_scope(), &AcquireContext::bare())
+        .acquire(&process_scope(), &AcquireContext::bare())
         .await
         .expect_err("no plugin, no sandbox");
     let message = error.to_string();

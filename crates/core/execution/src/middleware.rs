@@ -4,8 +4,9 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use driver::{
-    AdmissionResolution, AdmitRequest, DecisionError, DecisionResolver, DefaultDecisionResolver,
-    RoutingRequest, RoutingResolution, default_group_decision,
+    AdmissionResolution, AdmitRequest, DecisionError, DecisionResolver, DecisionRolls,
+    DefaultDecisionResolver, RoutingRequest, RoutingResolution, default_group_decision_rolled,
+    default_routing_with,
 };
 use engine::{
     Admission, DecisionId, Event, EventRecord, GroupDecision, Intervention, MiddlewareKey,
@@ -236,6 +237,8 @@ pub struct MiddlewarePipeline {
     execution:  ExecutionId,
     chain:      Arc<[Arc<dyn Middleware>]>,
     state:      Arc<RwLock<MiddlewareState>>,
+    /// Where the default decision's weighted draws come from.
+    rolls:      DecisionRolls,
 }
 
 impl MiddlewarePipeline {
@@ -251,7 +254,16 @@ impl MiddlewarePipeline {
             execution,
             chain: Arc::from(chain),
             state: Arc::new(RwLock::new(state)),
+            rolls: DecisionRolls::default(),
         })
+    }
+
+    /// Roll the default decision's weighted draws from `rolls` instead of the
+    /// operating system.
+    #[must_use]
+    pub fn with_rolls(mut self, rolls: DecisionRolls) -> Self {
+        self.rolls = rolls;
+        self
     }
 
     pub fn checkpoint(&self) -> MiddlewareState {
@@ -314,7 +326,7 @@ impl DecisionResolver for MiddlewarePipeline {
         let group_count = request.groups.len();
         let mut tasks = JoinSet::new();
         for (index, proposal) in request.groups.into_iter().enumerate() {
-            let baseline = default_group_decision(&proposal, restart_allowed)?;
+            let baseline = default_group_decision_rolled(&proposal, restart_allowed, &self.rolls)?;
             let proposal = Arc::new(proposal);
             let chain = self.chain.clone();
             let state = self.state.clone();
@@ -365,7 +377,7 @@ impl DecisionResolver for MiddlewarePipeline {
 
     fn route_now(&self, request: &RoutingRequest) -> Option<RoutingResolution> {
         if self.chain.is_empty() {
-            DefaultDecisionResolver.route_now(request)
+            default_routing_with(request, &self.rolls).ok()
         } else {
             None
         }
@@ -508,10 +520,6 @@ fn intervention(key: MiddlewareKey, decision: &RouteDecision) -> Intervention {
         RouteDecision::Emit(edge) => Intervention::Override {
             middleware: key,
             edge:       *edge,
-        },
-        RouteDecision::Jump(target) => Intervention::Jump {
-            middleware: key,
-            target:     *target,
         },
         RouteDecision::Block { reason } => Intervention::Block {
             middleware: key,

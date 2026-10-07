@@ -20,6 +20,8 @@ pub mod control;
 mod inspect;
 mod resume;
 mod session;
+#[cfg(test)]
+mod tests;
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -141,19 +143,21 @@ impl FileArgs {
 }
 
 /// `--model`, `--provider` and `--environment`: the launch-level settings a
-/// format's run configuration reads. A format whose LLM nodes may name no
-/// model reads the model default below its own defaults (the node, the
-/// graph, the run configuration); a format with named environments reads
-/// the environment selection over its files, as Fabro's own environment
-/// option does. A format without either ignores them.
+/// format's run configuration reads. A format whose LLM nodes name models
+/// reads the model choice over its defaults (the graph's, the run
+/// configuration's) but below a model a node names itself; a format with
+/// named environments reads the environment selection over its files. Both
+/// follow Fabro's own options. A format without either ignores them.
 #[derive(Args, Default)]
 struct ModelArgs {
-    /// The model a prompt or agent node runs on when neither it, the graph
-    /// nor the workflow's run configuration names one.
+    /// The model every prompt or agent node runs on, over the graph's and the
+    /// workflow's run configuration's defaults. A node that names its own
+    /// model keeps it.
     #[arg(long)]
     model:       Option<String>,
-    /// The provider of that model. Alone, the provider's default model in
-    /// the runner's catalog.
+    /// The provider for a node that names no model of its own, over the same
+    /// defaults. Alone, where nothing names a model, the provider's default
+    /// model in the runner's catalog.
     #[arg(long)]
     provider:    Option<String>,
     /// The execution environment to run in, by the id the workflow's run
@@ -216,21 +220,21 @@ impl ProviderArgs {
 
 #[derive(Args)]
 struct RunnerArgs {
-    /// Daytona offering for the runner: vm or container.
-    #[arg(long, default_value = "vm")]
-    daytona_kind:      DaytonaSandboxKind,
+    /// Daytona offering for the runner: container (default) or vm.
+    #[arg(long)]
+    daytona_kind:      Option<DaytonaSandboxKind>,
     /// Override a placement label's runner image. Repeatable; later values win.
     #[arg(long = "runner-image", value_name = "LABEL=IMAGE", value_parser = runner_image)]
     images:            Vec<(String, String)>,
-    /// CPUs in a Daytona runner snapshot (minimum 2).
-    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(2..))]
-    daytona_cpus:      u32,
-    /// Memory in a Daytona runner snapshot, in MiB (minimum 4096).
-    #[arg(long, default_value_t = 4096, value_parser = clap::value_parser!(u64).range(4096..))]
-    daytona_memory_mb: u64,
-    /// Disk in a Daytona runner snapshot, in MiB (minimum 4096).
-    #[arg(long, default_value_t = 20480, value_parser = clap::value_parser!(u64).range(4096..))]
-    daytona_disk_mb:   u64,
+    /// CPUs in a Daytona runner snapshot (default and minimum: 2).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(2..))]
+    daytona_cpus:      Option<u32>,
+    /// Memory in a Daytona runner snapshot, in MiB (default and minimum: 4096).
+    #[arg(long, value_parser = clap::value_parser!(u64).range(4096..))]
+    daytona_memory_mb: Option<u64>,
+    /// Disk in a Daytona runner snapshot, in MiB. Omit to let Daytona choose.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    daytona_disk_mb:   Option<u64>,
 }
 
 fn runner_image(value: &str) -> Result<(String, String), String> {
@@ -327,7 +331,7 @@ enum Command {
         target: FileArgs,
         /// The `events.json` a run wrote.
         log:    PathBuf,
-        /// The launch default the original run was given, so the graph
+        /// The launch settings the original run was given, so the graph
         /// lowers the same.
         #[command(flatten)]
         model:  ModelArgs,
