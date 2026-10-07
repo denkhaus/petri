@@ -281,21 +281,55 @@ struct PendingFailure {
     tripped:   Option<String>,
 }
 
+/// The graph's terminal node names: nodes with no outgoing edges, the
+/// places a route ends the flow instead of continuing it.
+pub fn terminal_targets(graph: &ir::Graph) -> Vec<SmolStr> {
+    graph
+        .body
+        .nodes
+        .iter()
+        .filter(|node| node.routing.edges().next().is_none())
+        .map(|node| node.name.clone())
+        .collect()
+}
+
 /// The middleware. Install it in the coordinator's chain when the graph's
 /// policy names a limit; a resumed run must install the same chain.
 pub struct CircuitBreaker {
     limit:      NonZeroU32,
     classifier: Arc<dyn FailureClassifier>,
+    /// The graph's terminal node names (no outgoing edges): the only
+    /// routes a tripped signature passes (fabro-51ad option a, narrowed
+    /// for the 2026-10-07 upstream merge). Empty — the `reference`
+    /// default — passes nothing.
+    terminals:  Arc<[SmolStr]>,
 }
 
 impl CircuitBreaker {
     pub fn new(limit: NonZeroU32, classifier: Arc<dyn FailureClassifier>) -> Self {
-        Self { limit, classifier }
+        Self {
+            limit,
+            classifier,
+            terminals: Arc::from(Vec::new()),
+        }
     }
 
     /// The breaker with the reference's heuristics.
     pub fn reference(limit: NonZeroU32) -> Self {
         Self::new(limit, Arc::new(ReferenceClassifier))
+    }
+
+    /// [`Self::reference`], knowing the graph's terminal targets: a tripped
+    /// signature passes only a route onto one of them — the graph's explicit
+    /// exit — and blocks every other route from the failing node. The plain
+    /// `reference` (the old engine's shape: the failing node carried its own
+    /// back/restart edges) passes nothing when tripped.
+    #[must_use]
+    pub fn reference_for_graph(limit: NonZeroU32, graph: &ir::Graph) -> Self {
+        Self {
+            terminals: Arc::from(terminal_targets(graph)),
+            ..Self::reference(limit)
+        }
     }
 
     fn read(state: &Value) -> Result<State, MiddlewareError> {
@@ -394,20 +428,21 @@ impl Middleware for CircuitBreaker {
         };
         if let Some(reason) = &pending.tripped {
             // The breaker's charter is to stop a run from LOOPING the
-            // same failure (fabro-51ad, option a): a route that leaves
-            // the cycle — the graph's own deadlock or boundary exit — is
-            // an explicit termination, not a loop, and passes. A back
-            // edge (or a loop-restart transition) continues the cycle
-            // and blocks; so does a decision with no route at all.
-            let continues_cycle = match &decision {
+            // same failure (fabro-51ad, option a; narrowed for the
+            // 2026-10-07 upstream merge): of the failing node's routes,
+            // only one onto a TERMINAL node — the graph's explicit exit —
+            // passes. A back edge, a loop-restart transition, and an
+            // ordinary continue edge that hands the loop to a successor
+            // node are all cycle continuations and block; so does a
+            // decision with no route at all.
+            let exits = match &decision {
                 RouteDecision::Emit(edge) => call.proposal.candidates.iter().any(|candidate| {
                     candidate.edge == *edge
-                        && (candidate.back
-                            || candidate.transition == EdgeTransition::Restart)
+                        && self.terminals.iter().any(|name| *name == candidate.target)
                 }),
-                _ => true,
+                _ => false,
             };
-            if continues_cycle {
+            if !exits {
                 return Ok(RouteDecision::Block {
                     reason: SmolStr::new(reason),
                 });
@@ -574,7 +609,7 @@ mod tests {
             state
         }
 
-        fn proposal(back: bool) -> Arc<RoutingProposal> {
+        fn proposal(target: &str, back: bool) -> Arc<RoutingProposal> {
             Arc::new(RoutingProposal {
                 group:      0,
                 tier:       None,
@@ -582,7 +617,7 @@ mod tests {
                 candidates: vec![RoutingCandidate {
                     edge:       EdgeId::new(7),
                     weight:     1,
-                    target:     SmolStr::new("target"),
+                    target:     SmolStr::new(target),
                     rank:       None,
                     transition: EdgeTransition::Continue,
                     back,
@@ -594,7 +629,8 @@ mod tests {
             breaker: &CircuitBreaker,
             state: Value,
             decision: RouteDecision,
-            back: bool,
+            target:  &str,
+            back:    bool,
         ) -> RouteDecision {
             let next = RouteNext::from_decision(Ok(decision));
             breaker
@@ -606,7 +642,7 @@ mod tests {
                             decision:   DecisionId::route(FiringId::new(3), Attempt::new(1)),
                         },
                         firing:   FiringId::new(3),
-                        proposal: proposal(back),
+                        proposal: proposal(target, back),
                         state,
                     },
                     next,
@@ -615,18 +651,30 @@ mod tests {
                 .expect("route")
         }
 
+        /// A breaker whose graph names `target` as terminal (the shape
+        /// [`CircuitBreaker::reference_for_graph`] builds).
+        fn breaker_with_terminal(name: &str) -> CircuitBreaker {
+            let mut breaker = CircuitBreaker::new(
+                NonZeroU32::new(3).expect("nonzero"),
+                Arc::new(Deterministic),
+            );
+            breaker.terminals = Arc::from(vec![SmolStr::new(name)]);
+            breaker
+        }
+
         /// fabro-51ad (option a): a tripped signature blocks the cycle's
         /// own continuation (a back edge) but passes the graph's explicit
-        /// exit from it.
+        /// exit from it — a route onto a terminal node.
         #[tokio::test]
         async fn a_tripped_breaker_passes_an_exit_route_and_blocks_a_back_edge() {
-            let breaker = CircuitBreaker::reference(NonZeroU32::new(3).expect("nonzero"));
+            let breaker = breaker_with_terminal("exit");
             let state = tripped_state(3);
 
             let exit = route_over(
                 &breaker,
                 state.clone(),
                 RouteDecision::Emit(EdgeId::new(7)),
+                "exit",
                 false,
             )
             .await;
@@ -636,6 +684,7 @@ mod tests {
                 &breaker,
                 state,
                 RouteDecision::Emit(EdgeId::new(7)),
+                "work",
                 true,
             )
             .await;
@@ -645,13 +694,37 @@ mod tests {
             );
         }
 
+        /// The 2026-10-07 upstream-merge regression pin: an ORDINARY
+        /// continue edge — the failing node handing the loop to a
+        /// successor node, which loops back on its own — is a cycle
+        /// continuation too, and blocks. The failing node's route passes
+        /// only onto a terminal, whatever edge shape it takes.
+        #[tokio::test]
+        async fn a_tripped_breaker_blocks_an_ordinary_continue_edge() {
+            let breaker = breaker_with_terminal("exit");
+            let state = tripped_state(3);
+
+            let onward = route_over(
+                &breaker,
+                state,
+                RouteDecision::Emit(EdgeId::new(7)),
+                "check",
+                false,
+            )
+            .await;
+            assert!(
+                matches!(onward, RouteDecision::Block { .. }),
+                "a non-terminal continue edge blocks: {onward:?}"
+            );
+        }
+
         /// A decision with no route at all still blocks with the trip
         /// reason, exactly as before the back-edge rule.
         #[tokio::test]
         async fn a_tripped_breaker_without_a_route_still_blocks() {
             let breaker = CircuitBreaker::reference(NonZeroU32::new(3).expect("nonzero"));
             let state = tripped_state(3);
-            let none = route_over(&breaker, state, RouteDecision::None, false).await;
+            let none = route_over(&breaker, state, RouteDecision::None, "exit", false).await;
             assert!(matches!(none, RouteDecision::Block { .. }), "{none:?}");
         }
     }
