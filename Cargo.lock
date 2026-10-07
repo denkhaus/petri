@@ -1243,7 +1243,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 [[package]]
 name = "lithos-llm"
 version = "0.1.0"
-source = "git+https://github.com/lithoscomputer/lithos-llm?branch=main#f40391aa8b3c3871bbac3dced2f4e26ddc46a743"
+source = "git+https://github.com/lithoscomputer/lithos-llm?branch=main#fd42e6b2805be8c5cf6764c6039cea88703df6bc"
 dependencies = [
  "async-trait",
  "futures-core",
@@ -1512,7 +1512,7 @@ dependencies = [
 [[package]]
 name = "pebble-agent"
 version = "0.1.0"
-source = "git+https://github.com/denkhaus/pebble?branch=fabro#e0294047aa2785903e49cb26389ea75ab6e6fcef"
+source = "git+https://github.com/denkhaus/pebble?branch=fabro#208f391c2b38f8b9c9eb02424d6f3e50f533b1c8"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1529,7 +1529,7 @@ dependencies = [
 [[package]]
 name = "pebble-coding-agent"
 version = "0.1.0"
-source = "git+https://github.com/denkhaus/pebble?branch=fabro#e0294047aa2785903e49cb26389ea75ab6e6fcef"
+source = "git+https://github.com/denkhaus/pebble?branch=fabro#208f391c2b38f8b9c9eb02424d6f3e50f533b1c8"
 dependencies = [
  "async-trait",
  "futures-util",
