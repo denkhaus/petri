@@ -110,41 +110,51 @@ impl Decision {
 /// prompt or agent hook evaluates. Absent fields are left out.
 #[derive(Clone, Debug, Serialize)]
 pub struct Context {
-    pub event:          HookEvent,
-    pub run_id:         String,
-    pub workflow_name:  String,
+    pub event:           HookEvent,
+    pub run_id:          String,
+    pub workflow_name:   String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd:            Option<String>,
+    pub cwd:             Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub node_id:        Option<String>,
+    pub node_id:         Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub node_label:     Option<String>,
+    pub node_label:      Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub handler_type:   Option<String>,
+    pub handler_type:    Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub status:         Option<String>,
+    pub status:          Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub edge_from:      Option<String>,
+    pub edge_from:       Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub edge_to:        Option<String>,
+    pub edge_to:         Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub edge_label:     Option<String>,
+    pub edge_label:      Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub failure_reason: Option<String>,
+    pub failure_reason:  Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub attempt:        Option<u32>,
+    pub attempt:         Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_attempts:   Option<u32>,
+    pub max_attempts:    Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_name:      Option<String>,
+    pub tool_name:       Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_input:     Option<Value>,
+    pub tool_input:      Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_call_id:   Option<String>,
+    pub tool_call_id:    Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_output:    Option<String>,
+    pub tool_output:     Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error_message:  Option<String>,
+    pub error_message:   Option<String>,
+    /// The completed stage's declared context updates (Fabro's `[[run.hooks]]`
+    /// contract, fabro-6558 family): a stage reports through
+    /// `context_updates` — the stage journal's `journal.painpoints`, a
+    /// planner's `current_seed_brief` — and the hook reads them here. Left
+    /// out for points that carry no outcome (an admitted graph, a run-level
+    /// event). Without this field every hook context reached the script
+    /// without the payload, so the journal wrote `"data":{}` for every
+    /// stage on the Petri line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_updates: Option<Value>,
 }
 
 impl Context {
@@ -169,6 +179,7 @@ impl Context {
             tool_call_id: None,
             tool_output: None,
             error_message: None,
+            context_updates: None,
         }
     }
 }
@@ -765,6 +776,14 @@ impl LocalHooks {
                     .and_then(Value::as_str)
                     .map(str::to_owned)
             });
+        // The stage's declared updates reach the hook (fabro-6558 family):
+        // Fabro's `[[run.hooks]]` scripts read them out of the context file,
+        // and the stage journal is built from exactly this payload.
+        context.context_updates = if outcome.context_updates.is_empty() {
+            None
+        } else {
+            serde_json::to_value(&outcome.context_updates).ok()
+        };
         let (_, report) = self
             .dispatch(HookPoint::AfterVisit, &context, self.env_for(view))
             .await;
