@@ -15,7 +15,7 @@ use std::{env, fs};
 
 use attractor_steps::pebble::PebbleClient;
 use attractor_steps::register;
-use attractor_steps::skills::{FabroHome, MISSING_CLASS, RESOLVED_EVENT, WARNING_EVENT};
+use attractor_steps::skills::{FabroHome, RESOLVED_EVENT, WARNING_EVENT};
 use frontend::{CompileInputs, MapFiles};
 use ir::{Graph, RunStatus, StepEvent, Value};
 use lithos_llm::types::{Role, ToolDefinition};
@@ -341,12 +341,17 @@ async fn directories_resolve_in_fabros_order_and_the_repository_wins() {
     );
 }
 
-/// A `/name` reference in the prompt expands to the winning skill's
-/// template before the model sees it (Fabro and Pebble expand the first
-/// input); a workflow-named directory overrides the repository's.
+/// A `/name` reference in a HARNESS-ASSEMBLED prompt stays LITERAL: Fabro's
+/// Pebble fork expands only a typed turn (`InputSource::Prompt`/`FollowUp`),
+/// because a synthesized prompt carries seed bodies and paths with
+/// slash-prefixed words of their own and expanding one killed the line five
+/// times on 2026-09-19 (fabro-4dd8, fabro-3fce). The skill stays reachable
+/// the model's own way — `use_skill` is offered and the workflow's directory
+/// still wins discovery, which
+/// `directories_resolve_in_fabros_order_and_the_repository_wins` pins.
 #[tokio::test]
-async fn a_slash_reference_in_the_prompt_expands_to_the_selected_skill() {
-    let dir = RunDir::new("skills-slash");
+async fn a_slash_reference_in_an_assembled_prompt_stays_literal() {
+    let dir = RunDir::new("skills-slash-literal");
     if repository(&dir).is_none() {
         return;
     }
@@ -370,14 +375,21 @@ async fn a_slash_reference_in_the_prompt_expands_to_the_selected_skill() {
     );
     let user = user_text(&provider, 0);
     assert!(
-        user.contains("WORKFLOW GREETING:") && user.contains("Ada"),
-        "the workflow's greet won and took the input: {user}"
+        user.contains("/greet Ada"),
+        "a harness-assembled prompt must reach the model verbatim: {user}"
     );
-    assert!(!user.contains("/greet"), "{user}");
-    assert!(!user.contains("REPOSITORY GREETING"), "{user}");
-    let activated = customs.pebble("SkillActivated");
-    assert_eq!(activated.len(), 1, "{activated:?}");
-    assert_eq!(activated[0].1["source"], "slash");
+    assert!(
+        !user.contains("WORKFLOW GREETING:") && !user.contains("REPOSITORY GREETING"),
+        "nothing may be expanded into a synthesized prompt (the 2026-09-19 kill class): {user}"
+    );
+    assert!(
+        skill_tool(&provider).is_some(),
+        "use_skill stays offered: the model loads a skill on purpose"
+    );
+    assert!(
+        customs.pebble("SkillActivated").is_empty(),
+        "no skill is activated behind the model's back"
+    );
     let resolved = customs.of_kind(RESOLVED_EVENT);
     let last = resolved[0].1["dirs"]
         .as_array()
@@ -394,15 +406,18 @@ async fn a_slash_reference_in_the_prompt_expands_to_the_selected_skill() {
     );
 }
 
-/// A prompt naming a skill the session does not have fails the node with
-/// its own class; a workflow-named directory that does not exist is
+/// A slash token in an ASSEMBLED prompt is literal text, not a lookup: the
+/// run must not die on it (the retired failure class), and nothing is
+/// activated. A workflow-named directory that does not exist is still
 /// reported; a session with no skills offers no skill tool and no section.
 #[tokio::test]
-async fn missing_skills_and_directories_are_diagnosed() {
+async fn a_missing_directory_is_diagnosed_while_an_assembled_slash_token_is_literal() {
     let dir = RunDir::new("skills-missing");
     if repository(&dir).is_none() {
         return;
     }
+    // The configured home HAS skills, and `/nope` is not one of them — under
+    // the fork contract that is simply text the model reads.
     let (report, customs, provider) = run(
         &dir,
         one_agent("/nope do the thing", ""),
@@ -410,20 +425,17 @@ async fn missing_skills_and_directories_are_diagnosed() {
         Some(fixtures().join("home")),
     )
     .await;
-    assert_eq!(report.status, RunStatus::Failed, "{:?}", report.status);
-    assert_eq!(status_of(&report, "a").as_deref(), Some("failure"));
-    let outcome = report
-        .state
-        .history()
-        .iter()
-        .find(|row| row.name == "a")
-        .expect("agent outcome")
-        .outcome
-        .clone();
-    let text = serde_json::to_string(&outcome).expect("outcome");
-    assert!(text.contains(MISSING_CLASS), "{text}");
-    assert!(text.contains("Unknown skill: /nope"), "{text}");
-    assert!(provider.requests().is_empty(), "the model was never called");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert_eq!(status_of(&report, "a").as_deref(), Some("success"));
+    assert!(
+        user_text(&provider, 0).contains("/nope do the thing"),
+        "the assembled prompt reaches the model verbatim"
+    );
     assert!(customs.pebble("SkillActivated").is_empty());
 
     let dir = RunDir::new("skills-missing-dir");
