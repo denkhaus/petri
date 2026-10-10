@@ -85,6 +85,12 @@ struct Entry {
     model:           Option<String>,
     max_tool_rounds: Option<u32>,
     agent:           Option<String>,
+    /// Fabro-side transport metadata: files the hook declares so the Fabro
+    /// bundler carries them in the workflow closure and the Fabro server
+    /// stages them host-side (a `sandbox = false` hook runs with no
+    /// workspace). Parsed and ignored here — the engine never resolves it.
+    #[expect(dead_code, reason = "parsed for schema acceptance; Fabro owns the transport")]
+    files:           Option<Vec<String>>,
 }
 
 /// Read the `[[run.hooks]]` entries of one settings-layer file. `source`
@@ -511,5 +517,24 @@ script = "a"
         assert_eq!(parse_duration_ms("2m"), Some(120_000));
         assert_eq!(parse_duration_ms("1h30m"), None);
         assert_eq!(parse_duration_ms("30"), None);
+    }
+
+    #[test]
+    fn an_entry_may_declare_fabro_side_files() {
+        let mut diags = Diagnostics::new();
+        let layer = read_layer(
+            "[[run.hooks]]
+name = \"shadow\"
+event = \"stage_complete\"
+sandbox = false
+files = [\"../../scripts/shadow.nu\"]
+script = \"true\"
+",
+            "workflow.toml",
+            &mut diags,
+        );
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+        assert_eq!(layer.len(), 1, "the entry must parse, not be dropped");
+        assert_eq!(layer[0].name, "shadow");
     }
 }
