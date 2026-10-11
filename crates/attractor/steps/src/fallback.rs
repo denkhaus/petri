@@ -71,6 +71,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::{fmt, iter};
 
 use frontend_attractor::fallbacks::ModelRef;
+use frontend_attractor::kinds::RETRY_REQUESTED_CLASS;
 use ir::{Attempt, FiringId, LogStream, StepEvent, Value};
 use lithos_llm::Client;
 use lithos_llm::catalog::{CatalogModel, CatalogProvider};
@@ -1017,6 +1018,27 @@ impl ModelFailure {
     pub fn class(&self) -> String {
         format!("llm:{}", self.kind)
     }
+
+    /// The class a stage reports for a retry decision (fabro retry fix,
+    /// 2026-10-11): every retry policy retries only `retry_requested`
+    /// (frontend `routing::retry_policy` -> `RetryOn::classes(&[
+    /// RETRY_REQUESTED_CLASS])`), and the ACP backend maps its failures to
+    /// exactly that class. The native Pebble backend emitted `llm:<kind>`
+    /// instead, so a rate-limited (or otherwise retryable) LLM failure
+    /// NEVER retried at the stage level even though the client classified
+    /// it `retry: safe`/`after` — observed: the loop's planner died on a
+    /// zai 429 with `retries: 0` (run 01M4NSBKV6ZBPAFFEFND65HEP9). A
+    /// failure the client says is retryable now rides the retry class; the
+    /// message keeps every provider detail. `never` failures (auth,
+    /// invalid request) keep `llm:<kind>` and fail the stage at once.
+    #[must_use]
+    pub fn stage_class(&self) -> String {
+        if self.retry == "never" {
+            self.class()
+        } else {
+            RETRY_REQUESTED_CLASS.to_string()
+        }
+    }
 }
 
 impl fmt::Display for ModelFailure {
@@ -1646,6 +1668,39 @@ mod tests {
         assert_eq!(failure.retry, "safe");
         assert_eq!(failure.status, Some(429));
         assert!(failure.eligible);
+    }
+
+    /// The stage class a retry decision reads (fabro retry fix, 2026-10-11):
+    /// a failure the client says is retryable rides `retry_requested` — the
+    /// only class every retry policy retries — while `never` keeps
+    /// `llm:<kind>` and fails the stage at once. Without this a native
+    /// (Pebble) agent stage never retried a 429 at all (observed: the loop
+    /// planner died with `retries: 0`, run 01M4NSBKV6ZBPAFFEFND65HEP9).
+    #[test]
+    fn a_retryable_model_failure_rides_the_retry_class() {
+        let error = |kind: ErrorKind| LlmError::new(kind, "test");
+        for retry in [RetryClassification::Safe, RetryClassification::After {
+            millis: 2_000,
+        }] {
+            let failure = ModelFailure::from_error(
+                &error(ErrorKind::RateLimit)
+                    .with_status(429)
+                    .with_retry(retry),
+            );
+            assert_eq!(
+                failure.stage_class(),
+                RETRY_REQUESTED_CLASS,
+                "a retryable LLM failure must ride the retry class: {failure:?}"
+            );
+        }
+        let never = ModelFailure::from_error(
+            &error(ErrorKind::Authentication).with_retry(RetryClassification::Never),
+        );
+        assert_eq!(
+            never.stage_class(),
+            "llm:authentication",
+            "a never-retry failure keeps its own class and fails the stage"
+        );
     }
 
     #[test]

@@ -360,7 +360,7 @@ impl Step for AgentStep {
                 Err(AgentError::Cancelled) => return Outcome::cancelled(),
                 Err(AgentError::Failed { class, message }) => return fail(message, &class),
                 Err(AgentError::Model(failure)) => {
-                    return fail(failure.to_string(), &failure.class());
+                    return fail(failure.to_string(), &failure.stage_class());
                 }
             };
         }
@@ -450,7 +450,9 @@ impl Step for AgentStep {
             Ok(session) => session,
             Err(AgentError::Cancelled) => return Outcome::cancelled(),
             Err(AgentError::Failed { class, message }) => return fail(message, &class),
-            Err(AgentError::Model(failure)) => return fail(failure.to_string(), &failure.class()),
+            Err(AgentError::Model(failure)) => {
+                return fail(failure.to_string(), &failure.stage_class());
+            }
         };
         let mut turns = 0;
         let result = Box::pin(run_session(
@@ -507,7 +509,7 @@ impl Step for AgentStep {
             }
             Err(AgentError::Cancelled) => Outcome::cancelled(),
             Err(AgentError::Failed { class, message }) => fail(message, &class),
-            Err(AgentError::Model(failure)) => fail(failure.to_string(), &failure.class()),
+            Err(AgentError::Model(failure)) => fail(failure.to_string(), &failure.stage_class()),
         };
         let custom = session.metrics(turns);
         outcome.metrics = Metrics {

@@ -359,7 +359,9 @@ impl Step for PromptStep {
             Ok(frozen) => frozen,
             Err(AgentError::Failed { class, message }) => return fail(message, &class),
             Err(AgentError::Cancelled) => return Outcome::cancelled(),
-            Err(AgentError::Model(failure)) => return fail(failure.to_string(), &failure.class()),
+            Err(AgentError::Model(failure)) => {
+                return fail(failure.to_string(), &failure.stage_class());
+            }
         };
         let mut plan = frozen.plan();
         fallback::Stage::of(&ctx).plan(&plan, &frozen.notices).await;
@@ -486,7 +488,7 @@ impl Step for PromptStep {
                         .logs
                         .send(completed("failed", None, turns, repairs, &usage))
                         .await;
-                    let mut outcome = fail(failure.to_string(), &failure.class());
+                    let mut outcome = fail(failure.to_string(), &failure.stage_class());
                     outcome.metrics = metrics(started, turns, &usage);
                     return outcome;
                 }
