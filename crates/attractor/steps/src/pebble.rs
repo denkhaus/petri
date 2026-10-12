@@ -103,34 +103,34 @@ pub(crate) enum Resume {
     /// plan the thread carries.
     Export {
         export: Box<CodingAgentExport>,
-        plan:   Plan,
+        plan: Plan,
     },
 }
 
 pub(crate) struct NativeSession {
-    agent:           CodingAgent,
+    agent: CodingAgent,
     /// The node's sink, kept for the node's name the bus keys on.
-    events:          Arc<PetriEvents>,
+    events: Arc<PetriEvents>,
     /// The node's fallback plan as the session was opened; the route
     /// reached is read off the agent's remaining routes.
-    plan:            Plan,
-    questions:       Arc<AgentQuestions>,
+    plan: Plan,
+    questions: Arc<AgentQuestions>,
     /// The node run's steering bus, with this session attached under the
     /// node's name: every delivered follow-up goes through it.
-    steering:        SteeringBus<SmolStr>,
+    steering: SteeringBus<SmolStr>,
     /// What the session's own compactions cost, folded by the sink.
-    compaction:      Arc<compaction::Accounting>,
-    cancel:          CancellationToken,
-    kill:            CancellationToken,
+    compaction: Arc<compaction::Accounting>,
+    cancel: CancellationToken,
+    kill: CancellationToken,
     _cancel_on_drop: DropGuard,
     /// What the session's children spent and did, for the metrics.
-    subagents:       Arc<Ledger>,
+    subagents: Arc<Ledger>,
     /// What the session's settled prompts used: their tokens, and their
     /// cost when every answer that used tokens was priced.
-    usage:           Usage,
-    inference:       Duration,
-    tool:            Duration,
-    prompts:         u64,
+    usage: Usage,
+    inference: Duration,
+    tool: Duration,
+    prompts: u64,
 }
 
 /// The Pebble profile the model selector resolves to, from the catalog's
@@ -255,15 +255,16 @@ impl NativeSession {
         let (skill_discovery, skill_labels) = skills::for_node(config, ctx);
         let compaction_accounting = Arc::new(compaction::Accounting::default());
         let events = Arc::new(PetriEvents {
-            sender:     ctx.logs.clone(),
-            masker:     ctx.secrets.masker(),
-            firing:     ctx.firing,
-            attempt:    ctx.attempt,
-            scope:      ctx.scope,
-            node:       ctx.node.clone(),
-            skills:     skill_labels,
+            sender: ctx.logs.clone(),
+            masker: ctx.secrets.masker(),
+            firing: ctx.firing,
+            attempt: ctx.attempt,
+            scope: ctx.scope,
+            node: ctx.node.clone(),
+            skills: skill_labels,
             compaction: compaction_accounting.clone(),
-            tools:      Mutex::new(Vec::new()),
+            tools: Mutex::new(Vec::new()),
+            deltas: Mutex::new(None),
         });
         // The plan's remaining routes, for Pebble to fail over to in order,
         // each with its own controls; an export starts with none of its own.
@@ -673,20 +674,49 @@ impl Redactor for PetriRedactor {
 /// the terminal: a fallback move and a server that did not start
 /// ([`stderr_line`]).
 struct PetriEvents {
-    sender:     ProgressSender,
-    masker:     Masker,
-    firing:     FiringId,
-    attempt:    Attempt,
-    scope:      ScopeId,
-    node:       SmolStr,
+    sender: ProgressSender,
+    masker: Masker,
+    firing: FiringId,
+    attempt: Attempt,
+    scope: ScopeId,
+    node: SmolStr,
     /// What names the skill directories Pebble reports having searched.
-    skills:     skills::Labels,
+    skills: skills::Labels,
     /// The session's own compactions, folded as Pebble reports them.
     compaction: Arc<compaction::Accounting>,
     /// The node's session's tools, set once the agent is built; what each
     /// child session's list is derived from.
-    tools:      Mutex<Vec<tools::Tool>>,
+    tools: Mutex<Vec<tools::Tool>>,
+    /// Fabro fork (stream volume, 2026-10-12): consecutive same-variant
+    /// streaming deltas coalesce into ONE mirrored event — pebble itself
+    /// calls Text/Reasoning/ToolCallOutput deltas "streaming noise", and
+    /// the run-stream mirror only needs appendable text, not token
+    /// granularity. A token-per-event mirror put 43,915 events / 46.8 MB
+    /// into ONE battery-heavy loop run (99 % of the run's stream) and
+    /// starved the store's read pool. The batched event keeps the first
+    /// delta's envelope (seq/timestamp) with the concatenated text.
+    deltas: Mutex<Option<DeltaRun>>,
 }
+
+/// One coalesced run of same-variant streaming deltas.
+struct DeltaRun {
+    variant: &'static str,
+    envelope: serde_json::Value,
+    text: String,
+}
+
+/// A streaming-delta variant Pebble classifies as noise, with its text.
+fn delta_variant(event: &CodingEvent) -> Option<(&'static str, &str)> {
+    match event {
+        CodingEvent::TextDelta { delta } => Some(("TextDelta", delta)),
+        CodingEvent::ReasoningDelta { delta } => Some(("ReasoningDelta", delta)),
+        CodingEvent::ToolCallOutputDelta { delta } => Some(("ToolCallOutputDelta", delta)),
+        _ => None,
+    }
+}
+
+/// Flush a pending delta run once its buffered text reaches this size.
+const DELTA_BATCH_BYTES: usize = 8 * 1024;
 
 impl PetriEvents {
     /// The session's tool list, kept for the children built from it.
@@ -730,7 +760,7 @@ impl PetriEvents {
         self.sender
             .send_acked(StepEvent::Log {
                 stream: LogStream::Stderr,
-                line:   self
+                line: self
                     .masker
                     .mask(&format!("mcp server `{server}` failed to start: {error}")),
             })
@@ -745,6 +775,38 @@ impl PetriEvents {
                 "error": error,
             }))))
             .await
+    }
+
+    /// Send one coalesced event for a pending delta run, if any. The
+    /// batched event keeps the run's first envelope with the concatenated
+    /// text under the same variant, so every consumer that appends delta
+    /// text sees exactly the same stream — just chunkier. The lock only
+    /// covers the take — the durable send must not hold a mutex guard.
+    async fn flush_deltas(&self) -> Result<(), EventSinkError> {
+        let Some(run) = self
+            .deltas
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        else {
+            return Ok(());
+        };
+        let DeltaRun {
+            variant,
+            mut envelope,
+            text,
+        } = run;
+        let mut inner = serde_json::Map::new();
+        inner.insert("delta".to_string(), serde_json::Value::String(text));
+        let mut batched = serde_json::Map::new();
+        batched.insert(variant.to_string(), serde_json::Value::Object(inner));
+        envelope["event"] = serde_json::Value::Object(batched);
+        self.sender
+            .send_acked(StepEvent::Custom(
+                json!({"kind": "pebble", "firing": self.firing, "attempt": self.attempt, "scope": self.scope, "node": self.node, "event": self.masker.mask_value(&envelope)}),
+            ))
+            .await
+            .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))
     }
 }
 
@@ -773,6 +835,46 @@ fn stderr_line(event: &CodingEvent) -> Option<String> {
 #[async_trait::async_trait]
 impl EventSink for PetriEvents {
     async fn record(&self, event: &CodingAgentEvent) -> Result<(), EventSinkError> {
+        // Fabro fork (stream volume): same-variant streaming deltas buffer
+        // instead of mirroring token-for-token — flush on size, on a
+        // variant change, or ahead of the next non-delta fact, so order
+        // and every structural event stay exactly as before.
+        if let Some((variant, delta)) = delta_variant(&event.event) {
+            let flush_now = {
+                let mut pending = self.deltas.lock().unwrap_or_else(PoisonError::into_inner);
+                let flush_now = pending.as_ref().is_some_and(|run| {
+                    run.variant != variant || run.text.len() + delta.len() >= DELTA_BATCH_BYTES
+                });
+                if !flush_now {
+                    if let Some(run) = pending.as_mut() {
+                        run.text.push_str(delta);
+                    } else {
+                        let value = serde_json::to_value(event).map_err(|e| {
+                            EventSinkError::new("Could not encode Pebble event").with_source(e)
+                        })?;
+                        *pending = Some(DeltaRun {
+                            variant,
+                            envelope: value,
+                            text: delta.to_string(),
+                        });
+                    }
+                }
+                flush_now
+            };
+            if flush_now {
+                self.flush_deltas().await?;
+                let value = serde_json::to_value(event).map_err(|e| {
+                    EventSinkError::new("Could not encode Pebble event").with_source(e)
+                })?;
+                *self.deltas.lock().unwrap_or_else(PoisonError::into_inner) = Some(DeltaRun {
+                    variant,
+                    envelope: value,
+                    text: delta.to_string(),
+                });
+            }
+            return Ok(());
+        }
+        self.flush_deltas().await?;
         let value = serde_json::to_value(event)
             .map_err(|e| EventSinkError::new("Could not encode Pebble event").with_source(e))?;
         self.sender
@@ -785,7 +887,7 @@ impl EventSink for PetriEvents {
             self.sender
                 .send_acked(StepEvent::Log {
                     stream: LogStream::Stderr,
-                    line:   self.masker.mask(&line),
+                    line: self.masker.mask(&line),
                 })
                 .await
                 .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))?;
@@ -815,8 +917,8 @@ impl EventSink for PetriEvents {
         // convention behind each; a skipped file or directory is Pebble's
         // report and the diagnostic is Petri's.
         let at = skills::Attribution {
-            node:    self.node.clone(),
-            firing:  self.firing,
+            node: self.node.clone(),
+            firing: self.firing,
             attempt: self.attempt,
         };
         if let Some(dirs) = skills::labeled(event, &self.skills) {
@@ -829,11 +931,180 @@ impl EventSink for PetriEvents {
         // The session's own compaction, as it completes: the envelope above
         // is Pebble's record of it, this is Petri's attribution.
         let at = compaction::Attribution {
-            node:    self.node.clone(),
-            firing:  self.firing,
+            node: self.node.clone(),
+            firing: self.firing,
             attempt: self.attempt,
         };
         self.compaction.observe(event, &self.sender, &at).await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod delta_coalescing_tests {
+    //! Fabro fork pin (stream volume): the pebble mirror coalesces
+    //! same-variant streaming deltas into ONE event per run — flushed on
+    //! the 8 KiB cap, a variant change, or the next structural fact. A
+    //! token-per-event mirror put 43,915 events / 46.8 MB into one
+    //! battery-heavy run (99 % of its stream) and starved the store's
+    //! read pool (2026-10-12).
+
+    use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
+
+    use pebble_coding_agent::events::{CodingAgentEvent, CodingEvent, EventSink};
+    use steps::Progress;
+
+    use super::super::pebble::{DeltaRun, PetriEvents};
+    use super::{Masker, StepEvent};
+    use crate::{compaction, skills};
+    use ir::{Attempt, FiringId, ScopeId};
+    use steps::ProgressSender;
+
+    fn sink() -> (Arc<PetriEvents>, tokio::sync::mpsc::Receiver<Progress>) {
+        let (sender, receiver) = ProgressSender::channel(64);
+        let events = Arc::new(PetriEvents {
+            sender,
+            masker: Masker::new(),
+            firing: FiringId::from(1u64),
+            attempt: Attempt::from(1u32),
+            scope: ScopeId::from(0u32),
+            node: "planner".into(),
+            skills: skills::Labels::new(None, &[], "ws"),
+            compaction: Arc::new(compaction::Accounting::default()),
+            tools: std::sync::Mutex::new(Vec::new()),
+            deltas: std::sync::Mutex::new(None),
+        });
+        (events, receiver)
+    }
+
+    fn delta(text: &str) -> CodingAgentEvent {
+        CodingAgentEvent::new(
+            "ses_test",
+            CodingEvent::ReasoningDelta {
+                delta: text.to_string(),
+            },
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+        )
+    }
+
+    /// Drain `n` progress events concurrently, answering each durable ack
+    /// the way the driver would — `send_acked` blocks until its record is
+    /// confirmed, so a sequential drain would deadlock the sink.
+    fn record_concurrently(
+        mut receiver: tokio::sync::mpsc::Receiver<Progress>,
+        n: usize,
+    ) -> tokio::task::JoinHandle<Vec<serde_json::Value>> {
+        tokio::spawn(async move {
+            let mut out = Vec::with_capacity(n);
+            for _ in 0..n {
+                let progress = receiver.recv().await.expect("progress event");
+                if let Some(ack) = progress.ack {
+                    let _ = ack.send(Ok(()));
+                }
+                let StepEvent::Custom(value) = progress.event else {
+                    panic!("expected a custom pebble event");
+                };
+                out.push(value);
+            }
+            out
+        })
+    }
+
+    #[tokio::test]
+    async fn consecutive_deltas_coalesce_into_one_mirror_event() {
+        let (events, receiver) = sink();
+        let recorder = record_concurrently(receiver, 2);
+        events.record(&delta("Let")).await.unwrap();
+        events.record(&delta(" me")).await.unwrap();
+        events.record(&delta(" work")).await.unwrap();
+        // Strukturereignis flusht den Lauf.
+        events
+            .record(&CodingAgentEvent::new(
+                "ses_test",
+                CodingEvent::SessionStarted {
+                    provider: Some("zai".to_string()),
+                    model: Some("glm-5.3".to_string()),
+                },
+                SystemTime::UNIX_EPOCH,
+            ))
+            .await
+            .unwrap();
+        let mirrored = recorder.await.unwrap();
+        assert_eq!(mirrored[0]["kind"], "pebble");
+        assert_eq!(
+            mirrored[0]["event"]["event"]["ReasoningDelta"]["delta"], "Let me work",
+            "the three token deltas arrive as ONE concatenated event"
+        );
+        assert!(
+            mirrored[1]["event"]["event"]
+                .as_object()
+                .is_some_and(|ev| ev.contains_key("SessionStarted")),
+            "the structural fact follows unbatched"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_variant_change_flushes_the_pending_run() {
+        let (events, receiver) = sink();
+        let recorder = record_concurrently(receiver, 3);
+        events.record(&delta("think")).await.unwrap();
+        events
+            .record(&CodingAgentEvent::new(
+                "ses_test",
+                CodingEvent::TextDelta {
+                    delta: "speak".into(),
+                },
+                SystemTime::UNIX_EPOCH,
+            ))
+            .await
+            .unwrap();
+        // Non-delta flushes the TextDelta run.
+        events
+            .record(&CodingAgentEvent::new(
+                "ses_test",
+                CodingEvent::SessionStarted {
+                    provider: Some("zai".to_string()),
+                    model: Some("glm-5.3".to_string()),
+                },
+                SystemTime::UNIX_EPOCH,
+            ))
+            .await
+            .unwrap();
+        let mirrored = recorder.await.unwrap();
+        assert_eq!(
+            mirrored[0]["event"]["event"]["ReasoningDelta"]["delta"],
+            "think"
+        );
+        assert_eq!(mirrored[1]["event"]["event"]["TextDelta"]["delta"], "speak");
+    }
+
+    #[tokio::test]
+    async fn the_batch_cap_flushes_without_a_structural_trigger() {
+        let (events, receiver) = sink();
+        let recorder = record_concurrently(receiver, 1);
+        let chunk = "x".repeat(1024);
+        for _ in 0..9 {
+            events.record(&delta(&chunk)).await.unwrap();
+        }
+        // 9 KiB buffered > 8 KiB cap: the first 8 arrived, the 9th opened a
+        // new run; one flush happened without any structural event.
+        let mirrored = recorder.await.unwrap();
+        // The cap check flushes BEFORE a delta would reach the limit, so a
+        // batch holds every chunk that fits strictly under 8 KiB: seven of
+        // the nine, the eighth opens the fresh run, the ninth joins it.
+        assert_eq!(
+            mirrored[0]["event"]["event"]["ReasoningDelta"]["delta"]
+                .as_str()
+                .map(str::len),
+            Some(7 * 1024),
+            "the cap flushes before the batch would reach 8 KiB"
+        );
+        let pending = events.deltas.lock().unwrap().take();
+        assert_eq!(
+            pending.map(|DeltaRun { text, .. }| text.len()),
+            Some(2 * 1024),
+            "the chunks past the flush start a fresh run"
+        );
     }
 }
