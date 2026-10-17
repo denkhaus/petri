@@ -103,34 +103,34 @@ pub(crate) enum Resume {
     /// plan the thread carries.
     Export {
         export: Box<CodingAgentExport>,
-        plan: Plan,
+        plan:   Plan,
     },
 }
 
 pub(crate) struct NativeSession {
-    agent: CodingAgent,
+    agent:           CodingAgent,
     /// The node's sink, kept for the node's name the bus keys on.
-    events: Arc<PetriEvents>,
+    events:          Arc<PetriEvents>,
     /// The node's fallback plan as the session was opened; the route
     /// reached is read off the agent's remaining routes.
-    plan: Plan,
-    questions: Arc<AgentQuestions>,
+    plan:            Plan,
+    questions:       Arc<AgentQuestions>,
     /// The node run's steering bus, with this session attached under the
     /// node's name: every delivered follow-up goes through it.
-    steering: SteeringBus<SmolStr>,
+    steering:        SteeringBus<SmolStr>,
     /// What the session's own compactions cost, folded by the sink.
-    compaction: Arc<compaction::Accounting>,
-    cancel: CancellationToken,
-    kill: CancellationToken,
+    compaction:      Arc<compaction::Accounting>,
+    cancel:          CancellationToken,
+    kill:            CancellationToken,
     _cancel_on_drop: DropGuard,
     /// What the session's children spent and did, for the metrics.
-    subagents: Arc<Ledger>,
+    subagents:       Arc<Ledger>,
     /// What the session's settled prompts used: their tokens, and their
     /// cost when every answer that used tokens was priced.
-    usage: Usage,
-    inference: Duration,
-    tool: Duration,
-    prompts: u64,
+    usage:           Usage,
+    inference:       Duration,
+    tool:            Duration,
+    prompts:         u64,
 }
 
 /// The Pebble profile the model selector resolves to, from the catalog's
@@ -255,16 +255,16 @@ impl NativeSession {
         let (skill_discovery, skill_labels) = skills::for_node(config, ctx);
         let compaction_accounting = Arc::new(compaction::Accounting::default());
         let events = Arc::new(PetriEvents {
-            sender: ctx.logs.clone(),
-            masker: ctx.secrets.masker(),
-            firing: ctx.firing,
-            attempt: ctx.attempt,
-            scope: ctx.scope,
-            node: ctx.node.clone(),
-            skills: skill_labels,
+            sender:     ctx.logs.clone(),
+            masker:     ctx.secrets.masker(),
+            firing:     ctx.firing,
+            attempt:    ctx.attempt,
+            scope:      ctx.scope,
+            node:       ctx.node.clone(),
+            skills:     skill_labels,
             compaction: compaction_accounting.clone(),
-            tools: Mutex::new(Vec::new()),
-            deltas: Mutex::new(None),
+            tools:      Mutex::new(Vec::new()),
+            deltas:     Mutex::new(None),
         });
         // The plan's remaining routes, for Pebble to fail over to in order,
         // each with its own controls; an export starts with none of its own.
@@ -674,19 +674,19 @@ impl Redactor for PetriRedactor {
 /// the terminal: a fallback move and a server that did not start
 /// ([`stderr_line`]).
 struct PetriEvents {
-    sender: ProgressSender,
-    masker: Masker,
-    firing: FiringId,
-    attempt: Attempt,
-    scope: ScopeId,
-    node: SmolStr,
+    sender:     ProgressSender,
+    masker:     Masker,
+    firing:     FiringId,
+    attempt:    Attempt,
+    scope:      ScopeId,
+    node:       SmolStr,
     /// What names the skill directories Pebble reports having searched.
-    skills: skills::Labels,
+    skills:     skills::Labels,
     /// The session's own compactions, folded as Pebble reports them.
     compaction: Arc<compaction::Accounting>,
     /// The node's session's tools, set once the agent is built; what each
     /// child session's list is derived from.
-    tools: Mutex<Vec<tools::Tool>>,
+    tools:      Mutex<Vec<tools::Tool>>,
     /// Fabro fork (stream volume, 2026-10-12): consecutive same-variant
     /// streaming deltas coalesce into ONE mirrored event — pebble itself
     /// calls Text/Reasoning/ToolCallOutput deltas "streaming noise", and
@@ -695,14 +695,14 @@ struct PetriEvents {
     /// into ONE battery-heavy loop run (99 % of the run's stream) and
     /// starved the store's read pool. The batched event keeps the first
     /// delta's envelope (seq/timestamp) with the concatenated text.
-    deltas: Mutex<Option<DeltaRun>>,
+    deltas:     Mutex<Option<DeltaRun>>,
 }
 
 /// One coalesced run of same-variant streaming deltas.
 struct DeltaRun {
-    variant: &'static str,
+    variant:  &'static str,
     envelope: serde_json::Value,
-    text: String,
+    text:     String,
 }
 
 /// A streaming-delta variant Pebble classifies as noise, with its text.
@@ -760,7 +760,7 @@ impl PetriEvents {
         self.sender
             .send_acked(StepEvent::Log {
                 stream: LogStream::Stderr,
-                line: self
+                line:   self
                     .masker
                     .mask(&format!("mcp server `{server}` failed to start: {error}")),
             })
@@ -887,7 +887,7 @@ impl EventSink for PetriEvents {
             self.sender
                 .send_acked(StepEvent::Log {
                     stream: LogStream::Stderr,
-                    line: self.masker.mask(&line),
+                    line:   self.masker.mask(&line),
                 })
                 .await
                 .map_err(|error| EventSinkError::new(error.to_string()).with_source(error))?;
@@ -917,8 +917,8 @@ impl EventSink for PetriEvents {
         // convention behind each; a skipped file or directory is Pebble's
         // report and the diagnostic is Petri's.
         let at = skills::Attribution {
-            node: self.node.clone(),
-            firing: self.firing,
+            node:    self.node.clone(),
+            firing:  self.firing,
             attempt: self.attempt,
         };
         if let Some(dirs) = skills::labeled(event, &self.skills) {
@@ -931,8 +931,8 @@ impl EventSink for PetriEvents {
         // The session's own compaction, as it completes: the envelope above
         // is Pebble's record of it, this is Petri's attribution.
         let at = compaction::Attribution {
-            node: self.node.clone(),
-            firing: self.firing,
+            node:    self.node.clone(),
+            firing:  self.firing,
             attempt: self.attempt,
         };
         self.compaction.observe(event, &self.sender, &at).await;
@@ -949,19 +949,20 @@ mod delta_coalescing_tests {
     //! battery-heavy run (99 % of its stream) and starved the store's
     //! read pool (2026-10-12).
 
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime};
 
+    use ir::{Attempt, FiringId, ScopeId};
     use pebble_coding_agent::events::{CodingAgentEvent, CodingEvent, EventSink};
-    use steps::Progress;
+    use steps::{Progress, ProgressSender};
+    use tokio::sync::mpsc;
+    use tokio::task::JoinHandle;
 
     use super::super::pebble::{DeltaRun, PetriEvents};
     use super::{Masker, StepEvent};
     use crate::{compaction, skills};
-    use ir::{Attempt, FiringId, ScopeId};
-    use steps::ProgressSender;
 
-    fn sink() -> (Arc<PetriEvents>, tokio::sync::mpsc::Receiver<Progress>) {
+    fn sink() -> (Arc<PetriEvents>, mpsc::Receiver<Progress>) {
         let (sender, receiver) = ProgressSender::channel(64);
         let events = Arc::new(PetriEvents {
             sender,
@@ -972,8 +973,8 @@ mod delta_coalescing_tests {
             node: "planner".into(),
             skills: skills::Labels::new(None, &[], "ws"),
             compaction: Arc::new(compaction::Accounting::default()),
-            tools: std::sync::Mutex::new(Vec::new()),
-            deltas: std::sync::Mutex::new(None),
+            tools: Mutex::new(Vec::new()),
+            deltas: Mutex::new(None),
         });
         (events, receiver)
     }
@@ -992,9 +993,9 @@ mod delta_coalescing_tests {
     /// the way the driver would — `send_acked` blocks until its record is
     /// confirmed, so a sequential drain would deadlock the sink.
     fn record_concurrently(
-        mut receiver: tokio::sync::mpsc::Receiver<Progress>,
+        mut receiver: mpsc::Receiver<Progress>,
         n: usize,
-    ) -> tokio::task::JoinHandle<Vec<serde_json::Value>> {
+    ) -> JoinHandle<Vec<serde_json::Value>> {
         tokio::spawn(async move {
             let mut out = Vec::with_capacity(n);
             for _ in 0..n {
@@ -1024,7 +1025,7 @@ mod delta_coalescing_tests {
                 "ses_test",
                 CodingEvent::SessionStarted {
                     provider: Some("zai".to_string()),
-                    model: Some("glm-5.3".to_string()),
+                    model:    Some("glm-5.3".to_string()),
                 },
                 SystemTime::UNIX_EPOCH,
             ))
@@ -1065,7 +1066,7 @@ mod delta_coalescing_tests {
                 "ses_test",
                 CodingEvent::SessionStarted {
                     provider: Some("zai".to_string()),
-                    model: Some("glm-5.3".to_string()),
+                    model:    Some("glm-5.3".to_string()),
                 },
                 SystemTime::UNIX_EPOCH,
             ))
