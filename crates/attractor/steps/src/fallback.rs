@@ -1019,24 +1019,24 @@ impl ModelFailure {
         format!("llm:{}", self.kind)
     }
 
-    /// The class a stage reports for a retry decision (fabro retry fix,
-    /// 2026-10-11): every retry policy retries only `retry_requested`
-    /// (frontend `routing::retry_policy` -> `RetryOn::classes(&[
-    /// RETRY_REQUESTED_CLASS])`), and the ACP backend maps its failures to
-    /// exactly that class. The native Pebble backend emitted `llm:<kind>`
-    /// instead, so a rate-limited (or otherwise retryable) LLM failure
-    /// NEVER retried at the stage level even though the client classified
-    /// it `retry: safe`/`after` — observed: the loop's planner died on a
-    /// zai 429 with `retries: 0` (run 01M4NSBKV6ZBPAFFEFND65HEP9). A
-    /// failure the client says is retryable now rides the retry class; the
-    /// message keeps every provider detail. `never` failures (auth,
-    /// invalid request) keep `llm:<kind>` and fail the stage at once.
+    /// The class a stage reports for a retry decision (fabro retry fix
+    /// 2026-10-11; retryability-by-kind 2026-10-17, fabro-95d4): every
+    /// retry policy retries only `retry_requested` (frontend
+    /// `routing::retry_policy` -> `RetryOn::classes(&[
+    /// RETRY_REQUESTED_CLASS])`). Only failures where re-sending the SAME
+    /// request is meaningful ride that class: rate limiting (the throttle
+    /// clears, observed as the zai 429 that killed the loop planner with
+    /// `retries: 0`, run 01M4NSBKV6ZBPAFFEFND65HEP9), and network/timeout
+    /// (no usable answer ever arrived). A 5xx server failure PROCESSED the
+    /// request and failed — the same context is not retryable — and a
+    /// spent quota never clears, so both keep `llm:<kind>` and fail the
+    /// stage. `retry_requested` is a promise a retry comes: a terminal
+    /// failure must not make it. The message keeps every provider detail.
     #[must_use]
     pub fn stage_class(&self) -> String {
-        if self.retry == "never" {
-            self.class()
-        } else {
-            RETRY_REQUESTED_CLASS.to_string()
+        match self.kind.as_str() {
+            "rate_limit" | "network" | "timeout" => RETRY_REQUESTED_CLASS.to_string(),
+            _ => self.class(),
         }
     }
 }
@@ -1700,6 +1700,46 @@ mod tests {
             never.stage_class(),
             "llm:authentication",
             "a never-retry failure keeps its own class and fails the stage"
+        );
+    }
+
+    #[test]
+    fn retryability_is_decided_by_failure_kind_not_client_retryability() {
+        let error = |kind: ErrorKind| LlmError::new(kind, "test");
+        // The same-context rule (fabro-95d4): no usable answer arrived, so
+        // re-sending the same request is meaningful.
+        for kind in [ErrorKind::RateLimit, ErrorKind::Network, ErrorKind::Timeout] {
+            let failure = ModelFailure::from_error(
+                &error(kind.clone()).with_retry(RetryClassification::Safe),
+            );
+            assert_eq!(
+                failure.stage_class(),
+                RETRY_REQUESTED_CLASS,
+                "a {kind:?} failure rides the retry class: {failure:?}"
+            );
+        }
+        // A 5xx server failure processed the request and failed: the same
+        // context is NOT retryable, however the client classifies it —
+        // and the terminal class must not promise a retry.
+        let server = ModelFailure::from_error(
+            &error(ErrorKind::Server)
+                .with_status(503)
+                .with_retry(RetryClassification::Safe),
+        );
+        assert_eq!(
+            server.stage_class(),
+            "llm:server",
+            "a 5xx keeps llm:server even when the client says retryable: {server:?}"
+        );
+        // A spent quota never clears: the stage must not spin on it.
+        let quota = ModelFailure::from_error(
+            &error(ErrorKind::QuotaExceeded)
+                .with_retry(RetryClassification::After { millis: 2_000 }),
+        );
+        assert_eq!(
+            quota.stage_class(),
+            "llm:quota_exceeded",
+            "a spent quota keeps its own class: {quota:?}"
         );
     }
 
