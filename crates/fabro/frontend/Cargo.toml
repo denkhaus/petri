@@ -28,6 +28,7 @@ toml = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 attractor-steps = { workspace = true }
+executor = { workspace = true }
 execution = { workspace = true }
 runtime = { workspace = true }
 steps = { workspace = true }

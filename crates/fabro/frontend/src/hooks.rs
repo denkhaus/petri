@@ -89,8 +89,17 @@ struct Entry {
     /// bundler carries them in the workflow closure and the Fabro server
     /// stages them host-side (a `sandbox = false` hook runs with no
     /// workspace). Parsed and ignored here — the engine never resolves it.
-    #[expect(dead_code, reason = "parsed for schema acceptance; Fabro owns the transport")]
+    #[expect(
+        dead_code,
+        reason = "parsed for schema acceptance; Fabro owns the transport"
+    )]
     files:           Option<Vec<String>>,
+    /// Secret names whose values the host injects into the hook's own
+    /// process environment at execution (a host-side command hook has no
+    /// other credential channel: it runs where no workspace exists and
+    /// the worker environment is scrubbed). Valid only on a command hook
+    /// that runs on the host; see the lowering rule.
+    secrets:         Option<Vec<String>>,
 }
 
 /// Read the `[[run.hooks]]` entries of one settings-layer file. `source`
@@ -274,6 +283,38 @@ fn resolve(
     if !ok {
         return None;
     }
+    // A declared secret is a host credential reaching one hook process:
+    // only a command hook that runs on the host can receive one. Anything
+    // else is a configuration error, never a silent no-op.
+    if let Some(secrets) = &entry.secrets {
+        let host_command = matches!(kind, HookKind::Command { .. }) && entry.sandbox == Some(false);
+        match (secrets.is_empty(), host_command) {
+            (true, _) => {
+                diags.error(
+                    "fabro.hooks.secrets",
+                    span.clone(),
+                    format!("`{path}` in `{source}`: `secrets` must name at least one secret"),
+                );
+                ok = false;
+            }
+            (false, false) => {
+                diags.error(
+                    "fabro.hooks.secrets",
+                    span.clone(),
+                    format!(
+                        "`{path}` in `{source}`: `secrets` applies to a command hook with \
+                         `sandbox = false` only — a sandboxed hook must never see a host \
+                         credential, and no other kind runs a command to receive one"
+                    ),
+                );
+                ok = false;
+            }
+            (false, true) => {}
+        }
+    }
+    if !ok {
+        return None;
+    }
     if event == HookEvent::CheckpointSaved {
         diags.warning(
             "fabro.hooks.checkpoint_saved",
@@ -298,6 +339,7 @@ fn resolve(
         blocking: entry.blocking,
         timeout_ms,
         sandbox: entry.sandbox,
+        secrets: entry.secrets.clone(),
         source: Some(source.to_owned()),
     })
 }
@@ -489,6 +531,7 @@ script = "a"
             blocking:   None,
             timeout_ms: None,
             sandbox:    None,
+            secrets:    None,
             source:     None,
         };
         let merged = merge(vec![

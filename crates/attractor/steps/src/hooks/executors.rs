@@ -142,10 +142,11 @@ pub async fn execute(
     env: Option<&Arc<dyn ExecEnv>>,
     client: Option<&PebbleClient>,
     http: &HttpClients,
+    secrets: &[(String, String)],
 ) -> Execution {
     match &hook.kind {
         HookKind::Command { command } => {
-            Execution::of(command_hook(hook, command, context, env).await)
+            Execution::of(command_hook(hook, command, context, env, secrets).await)
         }
         HookKind::Http { url, headers, tls } => {
             Execution::of(http_hook(hook, url, headers, *tls, context, http).await)
@@ -200,6 +201,7 @@ async fn command_hook(
     command: &str,
     context: &Context,
     env: Option<&Arc<dyn ExecEnv>>,
+    secrets: &[(String, String)],
 ) -> Executed {
     let payload = serde_json::to_vec(context).unwrap_or_default();
     let vars = env_vars(context);
@@ -211,9 +213,12 @@ async fn command_hook(
                     .into(),
             );
         };
+        // A sandboxed hook never receives declared secrets: the sandbox
+        // must not see a host credential. Lowering rejects the combination,
+        // so this arm only holds hooks that declared none.
         return sandbox_command(hook, command, &payload, vars, env.as_ref()).await;
     }
-    host_command(hook, command, &payload, vars, env.map(Arc::as_ref)).await
+    host_command(hook, command, &payload, vars, env.map(Arc::as_ref), secrets).await
 }
 
 /// In the sandbox: `bash -c`, the context on stdin and in a file the command
@@ -322,6 +327,7 @@ async fn host_command(
     payload: &[u8],
     mut vars: BTreeMap<String, String>,
     env: Option<&dyn ExecEnv>,
+    secrets: &[(String, String)],
 ) -> Executed {
     // The context reaches a host hook on stdin AND, when a readable copy
     // can be placed for it, as a file named by `FABRO_HOOK_CONTEXT` — one
@@ -329,6 +335,10 @@ async fn host_command(
     // channel a script may rely on (fabro-b714). The wrapper removes the
     // file when the command ends, wherever it ends up.
     let context = context_file(payload).await;
+    // The hook's declared secrets reach exactly this process's
+    // environment, resolved and masked by the provider; they are never in
+    // the worker's own environment, so no other descendant inherits them.
+    vars.extend(secrets.iter().cloned());
     let script = match &context {
         Some(path) => {
             vars.insert(

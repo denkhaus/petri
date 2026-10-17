@@ -302,11 +302,16 @@ struct Config {
 
 /// The local hook service.
 pub struct LocalHooks {
-    config: Mutex<Option<Arc<Config>>>,
-    run:    Mutex<Option<RunInfo>>,
-    client: Mutex<Option<PebbleClient>>,
-    envs:   ScopeEnvironments,
-    http:   executors::HttpClients,
+    config:  Mutex<Option<Arc<Config>>>,
+    run:     Mutex<Option<RunInfo>>,
+    client:  Mutex<Option<PebbleClient>>,
+    envs:    ScopeEnvironments,
+    http:    executors::HttpClients,
+    /// The embedding host's secrets, set once per run beside [`Self::set_run`]:
+    /// a host command hook's declared `secrets` resolve against this provider
+    /// and reach that hook's process as environment variables — and nowhere
+    /// else.
+    secrets: Mutex<Option<Arc<dyn executor::SecretProvider>>>,
 }
 
 tokio::task_local! {
@@ -335,7 +340,16 @@ impl LocalHooks {
             client: Mutex::new(None),
             envs,
             http: executors::HttpClients::default(),
+            secrets: Mutex::new(None),
         }
+    }
+
+    /// Hand the run's secret provider to the service, so a host command
+    /// hook's declared `secrets` resolve against the same values the run's
+    /// `{{ secrets.* }}` interpolation reads. Mirrors [`Self::set_run`]:
+    /// configured once per run by the embedding host that owns the values.
+    pub fn set_secrets(&self, secrets: Arc<dyn executor::SecretProvider>) {
+        *self.secrets.lock().unwrap_or_else(PoisonError::into_inner) = Some(secrets);
     }
 
     /// The scope environments the service runs sandbox-placed hooks in: the
@@ -482,8 +496,46 @@ impl LocalHooks {
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         let mut merged = Decision::Proceed;
+        let secrets_provider = self
+            .secrets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
         for hook in matched {
             let started = Instant::now();
+            // A declared secret resolves before the hook runs: the value is
+            // fetched here and put straight into the hook process's
+            // environment, and nowhere else. An unresolvable name fails the
+            // hook loudly instead of running it without its credential.
+            let secrets = match resolve_hook_secrets(&hook.definition, secrets_provider.as_deref())
+            {
+                Ok(secrets) => secrets,
+                Err(message) => {
+                    report.warnings.push(format!(
+                        "hook `{}` could not run: {message}",
+                        hook.definition.name
+                    ));
+                    let duration = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    report.hooks.push(HookRun {
+                        name:        hook.definition.name.clone(),
+                        state:       "unsupported".into(),
+                        duration_ms: Some(duration),
+                        message:     Some(message.clone()),
+                        usage:       None,
+                    });
+                    // A blocking hook fails closed on its own missing
+                    // credential; a non-blocking one stays a warning.
+                    if blocking && hook.definition.is_blocking() {
+                        merged = merged.merge(Decision::Block {
+                            reason: Some(message),
+                        });
+                        if merged.is_block() {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+            };
             let executors::Execution {
                 outcome: result,
                 usage,
@@ -497,6 +549,7 @@ impl LocalHooks {
                         env.as_ref(),
                         client.as_ref(),
                         &self.http,
+                        &secrets,
                     ),
                 )
                 .await;
@@ -581,6 +634,33 @@ impl LocalHooks {
         }
         (merged, report)
     }
+}
+
+/// Resolve a hook's declared secret names against the run's provider.
+///
+/// Each value is fetched for the hook process's environment and exposed
+/// only here — the provider's registration keeps it masked in every log.
+/// An absent provider or name is an error the caller records loudly, never
+/// a silent credential-less run of a hook that declared a need.
+fn resolve_hook_secrets(
+    hook: &HookDefinition,
+    provider: Option<&dyn executor::SecretProvider>,
+) -> Result<Vec<(String, String)>, String> {
+    let Some(names) = &hook.secrets else {
+        return Ok(Vec::new());
+    };
+    let Some(provider) = provider else {
+        return Err("hook declares `secrets` but the host installed no secret provider".to_owned());
+    };
+    names
+        .iter()
+        .map(|name| {
+            provider
+                .resolve(name)
+                .map(|secret| (name.clone(), secret.expose().to_string()))
+                .map_err(|error| format!("secret `{name}`: {error}"))
+        })
+        .collect()
 }
 
 /// Fabro's matcher: absent matches every occurrence; a regex is tested
@@ -1172,6 +1252,7 @@ mod tests {
                 blocking:   None,
                 timeout_ms: None,
                 sandbox:    None,
+                secrets:    None,
                 source:     None,
             },
             matcher:    pattern.and_then(|p| regex::Regex::new(p).ok()),

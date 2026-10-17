@@ -13,7 +13,7 @@ use std::{env, fs, process};
 
 use attractor_steps::acp::ENVELOPE_KIND;
 use attractor_steps::agent::THREAD_EVENT;
-use attractor_steps::hooks::{REPORT_EVENT, WARNING_EVENT};
+use attractor_steps::hooks::{LocalHooks, REPORT_EVENT, WARNING_EVENT};
 use attractor_steps::pebble::PebbleClient;
 use attractor_steps::{
     AGENT_KIND, BranchStep, CommandStep, FanInStep, ForkStep, HumanStep, PROMPT_KIND, StageStep,
@@ -25,6 +25,7 @@ use execution::hooks::{
     HookService, HookServiceHandle,
 };
 use execution::host::{self, HostRun};
+use executor::MapSecrets;
 use frontend::{CompileInputs, Lowered, MapFiles};
 use ir::{Graph, RunStatus, StepEvent, Value};
 use lithos_llm::types::{ErrorKind, Message, Role, Speed};
@@ -2867,4 +2868,205 @@ script = "echo stage_complete:$FABRO_NODE_ID >> hooks.log"
         .collect();
     assert_eq!(events.len(), 1, "{events:?}");
     assert_eq!(events[0].1["report"]["hooks"][0]["state"], "executed");
+}
+
+/// Every recorded `HookRun` of the named hook, from the adapter notes and
+/// the step-driven reports alike.
+fn hook_runs_named(customs: &Customs, name: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for (_, report) in customs.hook_notes() {
+        for hook in report["hooks"].as_array().into_iter().flatten() {
+            if hook["name"] == name {
+                out.push(hook.clone());
+            }
+        }
+    }
+    for (_, event) in customs.reports() {
+        for hook in event["report"]["hooks"].as_array().into_iter().flatten() {
+            if hook["name"] == name {
+                out.push(hook.clone());
+            }
+        }
+    }
+    out
+}
+
+/// A host command hook's declared `secrets` resolve against the host's
+/// provider and reach exactly that hook's process environment — no other
+/// surface holds the value.
+#[tokio::test]
+async fn a_host_hook_receives_its_declared_secrets() {
+    let dir = RunDir::new("hooks-secrets");
+    let token_file = dir.path().join("token.txt");
+    let graph = lower(
+        r#"digraph W {
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        work [shape=parallelogram, script="echo worked > worked.txt"]
+        start -> work -> exit
+    }"#,
+        &format!(
+            r#"
+[[run.hooks]]
+name = "token-writer"
+event = "stage_complete"
+script = "printf %s \"$HOOK_TOKEN\" > {file}"
+sandbox = false
+secrets = ["HOOK_TOKEN"]
+"#,
+            file = token_file.display()
+        ),
+    );
+    let local = Arc::new(LocalHooks::default());
+    local.set_secrets(Arc::new(MapSecrets::from_pairs(&[(
+        "HOOK_TOKEN",
+        "token-value-4711",
+    )])));
+    let (report, customs) = run_hosted(&dir, graph, None, local).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert_eq!(
+        read(&token_file),
+        "token-value-4711",
+        "the hook's process saw the resolved secret"
+    );
+    let runs = hook_runs_named(&customs, "token-writer");
+    assert!(!runs.is_empty(), "the hook is on the record");
+    assert_eq!(runs[0]["state"], "executed");
+}
+
+/// A declared secret the provider cannot resolve fails the hook loudly:
+/// the run stays green (the hook is non-blocking), but the report records
+/// the hook as unable to run and names the missing secret.
+#[tokio::test]
+async fn an_unresolvable_declared_secret_fails_the_hook_loudly() {
+    let dir = RunDir::new("hooks-secrets-missing");
+    let graph = lower(
+        r#"digraph W {
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        work [shape=parallelogram, script="echo worked > worked.txt"]
+        start -> work -> exit
+    }"#,
+        r#"
+[[run.hooks]]
+name = "needs-token"
+event = "stage_complete"
+script = "echo ran >> ran.txt"
+sandbox = false
+secrets = ["ABSENT_TOKEN"]
+"#,
+    );
+    let local = Arc::new(LocalHooks::default());
+    local.set_secrets(Arc::new(MapSecrets::from_pairs(&[("OTHER", "value")]))); // Some(
+    // value the hook did not ask for.
+    let (report, customs) = run_hosted(&dir, graph, None, local).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "a non-blocking hook stays non-blocking: {:?}",
+        report.state.errors()
+    );
+    let runs = hook_runs_named(&customs, "needs-token");
+    assert!(!runs.is_empty(), "the hook is on the record");
+    let hook = &runs[0];
+    assert_eq!(hook["state"], "unsupported");
+    assert!(
+        hook["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("secret `ABSENT_TOKEN`")),
+        "the missing secret is named: {hook}"
+    );
+}
+
+/// A blocking hook fails closed when its declared secret is missing: the
+/// run does not start work it could not credential.
+#[tokio::test]
+async fn a_blocking_hook_fails_closed_without_its_secret() {
+    let dir = RunDir::new("hooks-secrets-blocking");
+    let graph = lower(
+        r#"digraph W {
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        work [shape=parallelogram, script="echo worked > worked.txt"]
+        start -> work -> exit
+    }"#,
+        r#"
+[[run.hooks]]
+name = "gate"
+event = "run_start"
+blocking = true
+script = "echo ran >> ran.txt"
+sandbox = false
+secrets = ["ABSENT_TOKEN"]
+"#,
+    );
+    let local = Arc::new(LocalHooks::default());
+    local.set_secrets(Arc::new(MapSecrets::from_pairs(&[("OTHER", "value")])));
+    let (report, _customs) = run_hosted(&dir, graph, None, local).await;
+    assert_eq!(report.status, RunStatus::Failed);
+    assert!(!workspace(&dir).join("worked.txt").exists());
+    assert_eq!(status_of(&report, "start").as_deref(), Some("failure"));
+    assert!(
+        output_of(&report, "start")["failure_reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("secret `ABSENT_TOKEN`")),
+        "the block names the missing secret: {}",
+        output_of(&report, "start")
+    );
+}
+
+/// `secrets` on anything but a host command hook is a lowering error, so
+/// the combination can never reach execution and silently deliver nothing.
+#[test]
+fn secrets_reject_every_placement_but_a_host_command_hook() {
+    let dot = r"digraph W {
+        start [shape=Mdiamond]
+        exit [shape=Msquare]
+        start -> exit
+    }";
+    for (label, toml) in [
+        (
+            "sandbox command hook",
+            r#"
+[[run.hooks]]
+event = "stage_complete"
+script = "true"
+secrets = ["TOKEN"]
+"#,
+        ),
+        (
+            "host http hook",
+            r#"
+[[run.hooks]]
+event = "stage_complete"
+url = "https://example.invalid/"
+sandbox = false
+secrets = ["TOKEN"]
+"#,
+        ),
+        (
+            "empty declaration",
+            r#"
+[[run.hooks]]
+event = "stage_complete"
+script = "true"
+sandbox = false
+secrets = []
+"#,
+        ),
+    ] {
+        let files = MapFiles(BTreeMap::from([(
+            "wf/workflow.toml".to_string(),
+            toml.to_string(),
+        )]));
+        let lowered = frontend_fabro::load("wf/w.fabro", dot, &files, &CompileInputs::new());
+        assert!(lowered.diagnostics.has_errors(), "{label} must not lower");
+        let text = format!("{:?}", lowered.diagnostics);
+        assert!(text.contains("secrets"), "{label} names the field: {text}");
+    }
 }

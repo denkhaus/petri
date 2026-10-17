@@ -199,6 +199,13 @@ pub struct HookDefinition {
     /// Command hooks only: run in the sandbox (the default) or on the host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox:    Option<bool>,
+    /// Host command hooks only: secret names whose values the hook's own
+    /// process receives as environment variables, resolved by the
+    /// embedding host's secret provider at execution. A sandboxed hook
+    /// never declares them — the sandbox must not see a host credential —
+    /// and a hook of any other kind runs no command to receive them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets:    Option<Vec<String>>,
     /// Which layer the entry came from, for diagnostics and receipts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source:     Option<String>,

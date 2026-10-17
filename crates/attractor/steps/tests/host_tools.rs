@@ -89,6 +89,7 @@ fn command_hook(name: &str, event: HookEvent, script: &str) -> HookDefinition {
         blocking: None,
         timeout_ms: None,
         sandbox: None,
+        secrets: None,
         source: Some("workflow.toml".to_owned()),
     }
 }
