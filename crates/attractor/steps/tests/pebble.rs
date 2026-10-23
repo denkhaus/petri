@@ -5,6 +5,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use attractor_steps::agent::InterruptGrace;
 use attractor_steps::pebble::PebbleClient;
 use attractor_steps::pebble::environment::PebbleEnvironment;
 use attractor_steps::register;
@@ -24,7 +25,7 @@ use runtime::engine::{EngineState, Event, EventRecord, ReplayMismatch};
 use runtime::executor::sandbox::HostExecutor;
 use runtime::executor::{AcquireContext, Executor, MapSecrets, Retention, ScopeOutcome, ScopeSpec};
 use runtime::frontend::{CompileInputs, NoFiles};
-use runtime::steps::{Answer, Question};
+use runtime::steps::{Answer, Interrupt, Question};
 use runtime::{RunOptions, Runtime};
 use serde_json::{Value, json};
 use smol_str::SmolStr;
@@ -470,6 +471,65 @@ async fn steering_and_attributed_events_reach_the_native_session() {
         events
             .iter()
             .any(|event| event["event"]["event"].get("ToolCallCompleted").is_some())
+    );
+}
+
+/// fabro-d4f2: a plain interrupt parks the turn — the incident class where
+/// the run then sat in `running` forever waiting for a next input no host
+/// would deliver. The interrupt grace bounds the park: past it the attempt
+/// settles as an `interrupted` failure, so routing and stall machinery see
+/// a terminal state. The grace override keeps the wait inside a test budget
+/// (production runs the 60s default).
+#[tokio::test]
+async fn an_interrupt_without_follow_up_fails_the_attempt_after_the_grace() {
+    let dir = RunDir::new("pebble-interrupt-grace");
+    let gate = dir.path().join("release");
+    let command = format!("while [[ ! -f '{}' ]]; do sleep 0.01; done", gate.display());
+    let (client, provider) = scripted_client(vec![
+        ScriptedCall::response(tool_call_response(
+            "shell",
+            "gate",
+            json!({"command":command}),
+        )),
+        ScriptedCall::PendingOpen,
+    ]);
+    let (send, mut receive) = mpsc::channel(1);
+    let rt = runtime(&dir, client)
+        .observe(Arc::new(NativeStarted(send)))
+        .capability(InterruptGrace(Duration::from_millis(300)));
+    let driver = rt.driver(graph(""));
+    let handle = driver.handle();
+    let run = tokio::spawn(driver.run());
+    let firing = timeout(Duration::from_secs(10), receive.recv())
+        .await
+        .expect("native event")
+        .expect("firing");
+    // The round is streaming when the interrupt lands — the incident's
+    // shape: the model call is open and producing.
+    provider.wait_for_call().await;
+    assert_eq!(
+        handle.deliver(firing, Interrupt::new().to_control()).await,
+        DeliverDisposition::Delivered
+    );
+    let report = timeout(Duration::from_secs(10), run)
+        .await
+        .expect("the grace settles the parked turn")
+        .expect("run task");
+    let node = output_of(&report, "a");
+    // The run settles — the anti-wedge proof — and the attempt records the
+    // interrupt-class failure. Whether the RUN fails outright is the graph's
+    // `on_failure` policy; the engine's contract is the terminal attempt.
+    assert_eq!(node["outcome"], "failed");
+    assert_eq!(
+        node["failure_class"], "interrupted",
+        "the parked turn settles as an interrupt-class failure"
+    );
+    assert!(
+        node["failure_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("interrupted")),
+        "{}",
+        node["failure_reason"]
     );
 }
 

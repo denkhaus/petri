@@ -180,6 +180,20 @@ pub const THREAD_EVENT: &str = "attractor.thread";
 /// Pebble's own `RoundInterrupted` precedes it in the backend envelope.
 pub const INTERRUPTED_EVENT: &str = "attractor.turn.interrupted";
 
+/// How long a plain interrupt parks the turn before the attempt settles as
+/// an [`INTERRUPTED_CLASS`](frontend_attractor::kinds::INTERRUPTED_CLASS)
+/// failure: the host has one window to deliver the session's next input as
+/// steering, and a run whose host interrupts and never steers reaches a
+/// terminal failed state instead of sitting in `running` forever
+/// (fabro-d4f2, user decision 2026-10-20: 60s).
+pub const INTERRUPT_RESOLVE_GRACE: Duration = Duration::from_secs(60);
+
+/// Overrides [`INTERRUPT_RESOLVE_GRACE`] for a host that wants a different
+/// window: install it as a runtime capability. Absent, the default applies.
+/// Tests use it to keep the grace inside a test budget.
+#[derive(Clone, Copy, Debug)]
+pub struct InterruptGrace(pub Duration);
+
 pub struct AgentStep;
 
 impl AgentConfig {
@@ -547,6 +561,11 @@ async fn run_session(
     let execution = ctx
         .capability::<ExecutionIdentity>()
         .map(|identity| identity.execution);
+    // The interrupt settle window: the host's override when it installed
+    // one, else the 60s default (fabro-d4f2).
+    let interrupt_grace = ctx
+        .capability::<InterruptGrace>()
+        .map_or(INTERRUPT_RESOLVE_GRACE, |window| window.0);
     let (outcome, text) = loop {
         // Every turn, the repair turns included, runs on the same plan: a
         // provider-local failure moves the conversation to the next route,
@@ -560,6 +579,7 @@ async fn run_session(
                 &prompt,
                 &mut ctx.control,
                 ctx.env.grace(),
+                interrupt_grace,
                 config.timeout_ms.map(Duration::from_millis),
             )
             .await;

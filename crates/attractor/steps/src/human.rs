@@ -27,7 +27,9 @@ use std::future::pending;
 use std::time::Duration;
 
 use frontend_attractor::Policy;
-use frontend_attractor::kinds::{HUMAN_KIND, RETRY_REQUESTED_CLASS, StageOutcome};
+use frontend_attractor::kinds::{
+    HUMAN_KIND, INTERRUPTED_CLASS, RETRY_REQUESTED_CLASS, StageOutcome,
+};
 use frontend_attractor::labels::strip_accelerator;
 use ir::{Control, LogStream, Outcome, StepKindId, Value};
 use serde::Deserialize;
@@ -329,7 +331,7 @@ impl HumanConfig {
         self.finish(
             Stage::failed(
                 "human interaction interrupted before an answer was provided",
-                "interrupted",
+                INTERRUPTED_CLASS,
                 self.on_failure,
             ),
             ctx,

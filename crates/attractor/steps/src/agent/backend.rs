@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use execution::hooks::{HookPoint, HookServiceHandle};
-use frontend_attractor::kinds::RETRY_REQUESTED_CLASS;
+use frontend_attractor::kinds::{INTERRUPTED_CLASS, RETRY_REQUESTED_CLASS};
 use ir::{Control, Value};
 use pebble_coding_agent::{CodingAgentExport, ShutdownReason};
 use serde::Deserialize;
@@ -68,6 +68,9 @@ impl From<AcpError> for AgentError {
     fn from(error: AcpError) -> Self {
         match error {
             AcpError::Cancelled => Self::Cancelled,
+            // The interrupted turn's grace ran out with no next input: a
+            // terminal settle, never a retry (fabro-d4f2).
+            AcpError::Interrupted => Self::failed(INTERRUPTED_CLASS, error.to_string()),
             AcpError::StopReason(reason) => Self::failed(
                 RETRY_REQUESTED_CLASS,
                 format!("the agent stopped with `{reason}`"),
@@ -153,16 +156,19 @@ impl Session {
     /// terminated and asks for a retry (class `retry_requested`), as Fabro's
     /// timed-out turn is a retryable handler error. A native Pebble session
     /// ignores it; the driver's interview-aware timer owns that deadline.
+    /// `interrupt_grace` bounds how long a plain interrupt parks the turn
+    /// before the attempt settles as an `interrupted` failure.
     pub(crate) async fn prompt(
         &mut self,
         text: &str,
         control: &mut mpsc::Receiver<Control>,
         grace: Duration,
+        interrupt_grace: Duration,
         deadline: Option<Duration>,
     ) -> Result<String, AgentError> {
         match self {
             Self::Acp(client) => {
-                let turn = client.prompt(text, control, grace);
+                let turn = client.prompt(text, control, grace, interrupt_grace);
                 let result = match deadline {
                     Some(deadline) => timeout(deadline, turn).await.ok(),
                     None => Some(turn.await),
@@ -180,7 +186,7 @@ impl Session {
                 };
                 result.map(|turn| turn.text).map_err(Into::into)
             }
-            Self::Pebble(session) => session.prompt(text, control).await,
+            Self::Pebble(session) => session.prompt(text, control, interrupt_grace).await,
         }
     }
     /// The native session's fallback plan at the route it reached, after

@@ -116,6 +116,14 @@ impl StageOutcome {
 /// class the lowered retry policy retries on.
 pub const RETRY_REQUESTED_CLASS: &str = "retry_requested";
 
+/// The failure class an interrupted step settles under: a host's interrupt
+/// stopped the turn and no next input arrived to continue it, so the attempt
+/// fails terminally (never `retry_requested` — re-sending the same turn is
+/// not what an interrupt asks for). The human gate already settles under
+/// this class; agent turns join it when their interrupt grace runs out
+/// (fabro-d4f2).
+pub const INTERRUPTED_CLASS: &str = "interrupted";
+
 /// The day the `outcome=success` condition alias expires. The alias names
 /// this date in its warning and carries a `REMOVE AFTER 2026-10-04` comment.
 /// `on_failure="succeed"` and `auto_status` are no longer shims: Fabro's

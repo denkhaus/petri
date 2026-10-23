@@ -107,6 +107,8 @@ pub enum AcpError {
     },
     #[error("the turn ended with stop reason `{0}`")]
     StopReason(String),
+    #[error("the turn was interrupted and no next input arrived within the grace")]
+    Interrupted,
     #[error("cancelled")]
     Cancelled,
 }
@@ -671,12 +673,15 @@ impl Client {
     /// and sent as a follow-up prompt when the turn ends), an interrupt
     /// (`session/cancel`; the turn ends with `cancelled` and the session
     /// continues with its next input) and cancellation (`session/cancel`,
-    /// then the process is stopped).
+    /// then the process is stopped). `interrupt_grace` bounds the wait for
+    /// that next input after a plain interrupt: past it the turn settles as
+    /// [`AcpError::Interrupted`] instead of parking forever (fabro-d4f2).
     pub async fn prompt(
         &mut self,
         text: &str,
         control: &mut mpsc::Receiver<Control>,
         grace: Duration,
+        interrupt_grace: Duration,
     ) -> Result<Turn, AcpError> {
         let session = self
             .session_id
@@ -744,7 +749,10 @@ impl Client {
                     turn.text.clear();
                     interrupted_event(&self.logs, &self.stage, &session).await;
                     if pending.is_empty() {
-                        pending.push_back(self.next_input(control, &session, grace).await?);
+                        pending.push_back(
+                            self.next_input(control, &session, grace, interrupt_grace)
+                                .await?,
+                        );
                     }
                 }
                 "cancelled" => return Err(AcpError::Cancelled),
@@ -757,25 +765,37 @@ impl Client {
     /// After a plain interrupt: wait for the next text the host delivers,
     /// which is the session's next prompt. A further interrupt carrying text
     /// supplies it too; one without has nothing to stop. Anything else on
-    /// the channel cancels.
+    /// the channel cancels. The wait is bounded by `interrupt_grace`: a host
+    /// that interrupts and never steers settles the turn as
+    /// [`AcpError::Interrupted`] rather than parking the run forever
+    /// (fabro-d4f2).
     async fn next_input(
         &mut self,
         control: &mut mpsc::Receiver<Control>,
         session: &str,
         grace: Duration,
+        interrupt_grace: Duration,
     ) -> Result<String, AcpError> {
-        loop {
-            let Some(Control::Deliver(value)) = control.recv().await else {
-                self.cancel(session, grace).await;
-                return Err(AcpError::Cancelled);
-            };
-            let text = match Interrupt::from_value(&value) {
-                Some(interrupt) => interrupt.steer,
-                None => steer_text(&value),
-            };
-            if let Some(text) = text {
-                return Ok(text);
+        let wait = async {
+            loop {
+                let Some(Control::Deliver(value)) = control.recv().await else {
+                    self.cancel(session, grace).await;
+                    return Err(AcpError::Cancelled);
+                };
+                let text = match Interrupt::from_value(&value) {
+                    Some(interrupt) => interrupt.steer,
+                    None => steer_text(&value),
+                };
+                if let Some(text) = text {
+                    return Ok(text);
+                }
             }
+        };
+        if let Ok(result) = time::timeout(interrupt_grace, wait).await {
+            result
+        } else {
+            self.cancel(session, grace).await;
+            Err(AcpError::Interrupted)
         }
     }
 

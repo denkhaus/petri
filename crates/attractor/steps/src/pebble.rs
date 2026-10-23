@@ -57,6 +57,7 @@ use std::time::Duration;
 use environment::{InheritedEnv, PebbleEnvironment, ScopePortRoutes, elapsed_ms};
 use execution::hooks::HookServiceHandle;
 use executor::Masker;
+use frontend_attractor::kinds::INTERRUPTED_CLASS;
 use ir::{Attempt, Control, FiringId, LogStream, ScopeId, StepEvent, Value};
 use lithos_llm::Client;
 use lithos_llm::catalog::Metadata;
@@ -75,6 +76,7 @@ use serde_json::json;
 use smol_str::SmolStr;
 use steps::{Interrupt, ProgressError, ProgressSender, SECRET_UNAVAILABLE_CLASS, Steer, StepCtx};
 use tokio::sync::mpsc;
+use tokio::time::sleep;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::acp::resolve_env;
@@ -438,11 +440,15 @@ impl NativeSession {
 
     /// One prompt turn. A model error comes back typed as
     /// [`AgentError::Model`]. Pebble runs the plan's remaining routes inside
-    /// the turn and reports each move on its stream.
+    /// the turn and reports each move on its stream. A plain interrupt parks
+    /// the turn; `interrupt_grace` bounds the park — past it the attempt
+    /// settles as an [`INTERRUPTED_CLASS`] failure instead of waiting for an
+    /// input that may never come (fabro-d4f2).
     pub(crate) async fn prompt(
         &mut self,
         prompt: &str,
         control: &mut mpsc::Receiver<Control>,
+        interrupt_grace: Duration,
     ) -> Result<String, AgentError> {
         let questions = self.questions.clone();
         let cancel = self.cancel.clone();
@@ -456,21 +462,76 @@ impl NativeSession {
             tokio::pin!(prompt);
             let mut closed = false;
             // A plain interrupt parked the prompt: the next delivered text
-            // is its next input and goes as steering.
+            // is its next input and goes as steering. While it parks, the
+            // interrupt grace runs (fabro-d4f2).
             let mut awaiting_input = false;
-            loop {
-                tokio::select! {
-                    biased;
-                    message = control.recv(), if !closed => match message {
-                        Some(Control::Deliver(value)) if !cancel.is_cancelled() => {
-                            if !questions.answer(&value) { deliver(&self.steering, &mut awaiting_input, &value); }
+            'turn: loop {
+                // The round runs; steering and interrupts reach it live.
+                loop {
+                    tokio::select! {
+                        biased;
+                        message = control.recv(), if !closed => match message {
+                            Some(Control::Deliver(value))
+                                if !cancel.is_cancelled() && !questions.answer(&value) =>
+                            {
+                                let was_awaiting = awaiting_input;
+                                deliver(&self.steering, &mut awaiting_input, &value);
+                                if awaiting_input && !was_awaiting {
+                                    // The round parks on the plain
+                                    // interrupt; the grace arms below.
+                                    break;
+                                }
+                            },
+                            Some(Control::Kill) => { kill.cancel(); cancel.cancel(); },
+                            Some(Control::Cancel) => cancel.cancel(),
+                            None => { closed = true; cancel.cancel(); },
+                            _ => {},
                         },
-                        Some(Control::Kill) => { kill.cancel(); cancel.cancel(); },
-                        Some(Control::Cancel) => cancel.cancel(),
-                        None => { closed = true; cancel.cancel(); },
-                        _ => {},
-                    },
-                    report = &mut prompt => break report,
+                        report = &mut prompt => break 'turn report,
+                    }
+                }
+                // The round is parked on a plain interrupt. The grace bounds
+                // the park: steering resumes the round and disarms it, a
+                // further plain interrupt stops nothing and does not restart
+                // the clock, and the grace expiring settles the attempt as
+                // an interrupt-class failure so the run cannot sit in
+                // `running` forever.
+                let grace = sleep(interrupt_grace);
+                tokio::pin!(grace);
+                loop {
+                    tokio::select! {
+                        biased;
+                        message = control.recv(), if !closed => match message {
+                            Some(Control::Deliver(value))
+                                if !cancel.is_cancelled() && !questions.answer(&value) =>
+                            {
+                                let was_awaiting = awaiting_input;
+                                deliver(&self.steering, &mut awaiting_input, &value);
+                                if !awaiting_input && was_awaiting {
+                                    // Steering resumed the round; the
+                                    // grace disarms.
+                                    continue 'turn;
+                                }
+                            },
+                            Some(Control::Kill) => { kill.cancel(); cancel.cancel(); },
+                            Some(Control::Cancel) => cancel.cancel(),
+                            None => { closed = true; cancel.cancel(); },
+                            _ => {},
+                        },
+                        () = &mut grace => {
+                            tracing::warn!(
+                                grace_ms = u64::try_from(interrupt_grace.as_millis())
+                                    .unwrap_or(u64::MAX),
+                                "interrupted turn parked past the grace; failing the attempt"
+                            );
+                            return Err(AgentError::failed(
+                                INTERRUPTED_CLASS,
+                                "the turn was interrupted and no next input arrived within the \
+                                 grace",
+                            ));
+                        },
+                        report = &mut prompt => break 'turn report,
+                    }
                 }
             }
         };
