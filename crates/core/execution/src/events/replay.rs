@@ -249,7 +249,10 @@ impl RunReplay {
 
     /// Read the records past the ones consumed, fold them, and hand back
     /// their events: the coordinator log's first, then each execution's in
-    /// declaration order. Empty when the store holds nothing new.
+    /// declaration order. Empty when the store holds nothing new — also a
+    /// store that holds no coordinator record yet: a run created but not
+    /// started is nothing to derive, not a violation ([`replay_run`] still
+    /// refuses an empty log; a completeness verdict needs the start).
     ///
     /// # Errors
     ///
@@ -273,7 +276,13 @@ impl RunReplay {
             state.apply(&record.body)?;
         }
         if state.root.is_none() {
-            return Err(StateError::MissingRunStart.into());
+            // Nothing was folded and no start was ever seen: the store
+            // holds no coordinator record yet — a run created but not
+            // started, which a consumer following it live passes before its
+            // worker appends the start. There is nothing to derive. Records
+            // without a start cannot reach here; the fold above rejects
+            // them through `apply`'s check.
+            return Ok(Vec::new());
         }
         let mut tails = Vec::new();
         for (execution, declared) in &state.executions {

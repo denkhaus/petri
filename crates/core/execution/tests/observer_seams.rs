@@ -471,3 +471,161 @@ async fn a_gap_fails_the_advance_and_leaves_the_replay_where_it_stood() {
         "the prefix held plus the rest is the full engine log"
     );
 }
+
+/// A run's store exists before its worker appends the start: a consumer
+/// following the run live (the projector) advances over a store that holds
+/// no coordinator record yet. That derives nothing — the run has not
+/// started, a state the incremental replay may observe — while the full
+/// replay still refuses the same store: a completeness verdict needs the
+/// start.
+#[tokio::test]
+async fn an_advance_over_a_store_that_holds_no_start_yet_derives_nothing() {
+    let dir = RunDir::new("run-replay-unstarted");
+    let rt = Runtime::standard().options(RunOptions::new(dir.path()));
+    let mut b = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    let first = add_script(&mut b, "first", scope, "echo one");
+    let second = add_script(&mut b, "second", scope, "echo two");
+    b.link(first, second);
+    let report = host::run(&rt, b.build()).await.expect("the run completes");
+    assert_eq!(report.status, RunStatus::Success);
+    let source = testkit::read_run_dir(dir.path()).await;
+    let empty = empty_copy(&*source).await;
+
+    let mut replay = RunReplay::new();
+    let events = replay
+        .advance(&*empty)
+        .await
+        .expect("a run that has not started is nothing to derive");
+    assert!(events.is_empty(), "no record, no event");
+
+    let error = replay_run(&*empty)
+        .await
+        .expect_err("the full replay still refuses a store without a start");
+    assert!(
+        matches!(
+            error,
+            ReplayError::State(execution::StateError::MissingRunStart)
+        ),
+        "the refusal names the missing start: {error}"
+    );
+}
+
+/// The same replay, advanced once over the empty store, then over the run
+/// whole, derives the events of the full replay: the create-to-start
+/// window leaves no trace in the state the incremental replay keeps.
+#[tokio::test]
+async fn a_replay_advanced_before_the_start_still_derives_the_run_whole() {
+    let dir = RunDir::new("run-replay-prestart");
+    let rt = Runtime::standard().options(RunOptions::new(dir.path()));
+    let mut b = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    let start = add_script(&mut b, "start", scope, "echo start");
+    let end = add_script(&mut b, "end", scope, "echo end");
+    b.link(start, end);
+    let report = host::run(&rt, b.build()).await.expect("the run completes");
+    assert_eq!(report.status, RunStatus::Success);
+    let source = testkit::read_run_dir(dir.path()).await;
+    let full = replay_run(&*source).await.expect("the run projects");
+
+    let target = empty_copy(&*source).await;
+    let mut replay = RunReplay::new();
+    let before = replay
+        .advance(&*target)
+        .await
+        .expect("the empty store derives nothing");
+    assert!(before.is_empty(), "no record, no event");
+    let logs = stored_logs(&*source, &full).await;
+    for (log, records) in &logs {
+        target
+            .append(log, records)
+            .await
+            .expect("the run whole appends");
+    }
+    let events = replay
+        .advance(&*target)
+        .await
+        .expect("the started run advances");
+    assert_eq!(events, full, "the pre-start advance leaves no trace");
+}
+
+/// Records without a start still fail the advance: the store admits no
+/// coordinator log that does not begin with RunStarted (its appends
+/// validate, so a startless log appears only through corruption or a
+/// foreign writer), and the replay refuses it instead of deriving
+/// anything. A log not beginning with the start dies in the decode's
+/// format check — the version lives in the start.
+#[tokio::test]
+async fn records_without_a_start_fail_the_advance() {
+    let dir = RunDir::new("run-replay-startless");
+    let rt = Runtime::standard().options(RunOptions::new(dir.path()));
+    let mut b = GraphBuilder::new();
+    let scope = ScopeId::new(0);
+    let first = add_script(&mut b, "first", scope, "echo one");
+    let second = add_script(&mut b, "second", scope, "echo two");
+    b.link(first, second);
+    let report = host::run(&rt, b.build()).await.expect("the run completes");
+    assert_eq!(report.status, RunStatus::Success);
+    let source = testkit::read_run_dir(dir.path()).await;
+    let full = replay_run(&*source).await.expect("the run projects");
+    assert!(
+        of_log(&full, EventSource::Coordinator).len() >= 2,
+        "the completed run recorded more than its start"
+    );
+
+    let startless = Startless {
+        inner: Arc::clone(&source),
+    };
+    let mut replay = RunReplay::new();
+    let error = replay
+        .advance(&startless)
+        .await
+        .expect_err("records without a start fail the advance");
+    assert!(
+        matches!(
+            &error,
+            ReplayError::Store(execution::StoreError::UnsupportedFormat { .. })
+        ),
+        "the refusal names the log's missing start: {error}"
+    );
+}
+
+/// A run's store with its coordinator start hidden: reads hold the log
+/// without its first record, the shape a store never admits (its appends
+/// validate), so a consumer's checks face a startless log.
+struct Startless {
+    inner: Arc<dyn RunLogs>,
+}
+
+#[async_trait::async_trait]
+impl RunLogs for Startless {
+    fn locator(&self) -> String {
+        self.inner.locator()
+    }
+
+    async fn append(&self, log: &LogId, records: &[Record]) -> Result<(), StoreError> {
+        self.inner.append(log, records).await
+    }
+
+    async fn read(&self, log: &LogId) -> Result<Vec<Record>, StoreError> {
+        let mut records = self.inner.read(log).await?;
+        if *log == LogId::Coordinator {
+            records.retain(|record| record.seq != 0);
+        }
+        Ok(records)
+    }
+
+    async fn read_from(&self, log: &LogId, seq: u64) -> Result<Vec<Record>, StoreError> {
+        let mut records = self.read(log).await?;
+        records.retain(|record| record.seq >= seq);
+        Ok(records)
+    }
+
+    async fn put_blob(&self, bytes: &[u8]) -> Result<Digest, StoreError> {
+        self.inner.put_blob(bytes).await
+    }
+
+    async fn get_blob(&self, digest: store::Digest) -> Result<Option<Vec<u8>>, StoreError> {
+        self.inner.get_blob(digest).await
+    }
+}
