@@ -224,4 +224,14 @@ impl Session {
             Self::Pebble(session) => session.metrics(),
         }
     }
+    /// Completed, non-error calls of the observation tool this session
+    /// made (fabro fork, ADR-0038). Only a native session can call host
+    /// tools; an ACP session reports zero, so a `required` node on ACP
+    /// fails the contract truthfully.
+    pub(crate) fn observation_calls(&self) -> u64 {
+        match self {
+            Self::Acp(_) => 0,
+            Self::Pebble(session) => session.observation_calls(),
+        }
+    }
 }

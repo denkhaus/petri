@@ -1821,6 +1821,67 @@ fn agent_nodes_carry_fabros_compaction_settings() {
     assert!(node(&graph, "p").step.config.get("compaction").is_none());
 }
 
+/// The observation presence contract (fabro fork, ADR-0038):
+/// `x.observations` lowers into an agent node's config, only as
+/// `"required"`, and only on agent nodes — a prompt, command, or
+/// structural stage has no session and could never satisfy it.
+#[test]
+fn observation_contract_lowers_only_on_agent_nodes() {
+    let graph = lower_ok(&dot(r#"
+        graph [backend="api", default_model="openai/gpt-5.6-sol"]
+        a [prompt="Work.", "x.observations"="required"]
+        b [prompt="Plain."]
+        start -> a -> b -> exit
+    "#));
+    assert_eq!(
+        node(&graph, "a").step.config["observations"],
+        json!("required"),
+        "the agent node carries the lowered mode"
+    );
+    assert!(
+        node(&graph, "b").step.config.get("observations").is_none(),
+        "a node without the attribute carries nothing"
+    );
+
+    let mode = codes_of(&dot(r#"
+        graph [backend="api", default_model="openai/gpt-5.6-sol"]
+        a [prompt="Work.", "x.observations"="daily"]
+        start -> a -> exit
+    "#));
+    assert!(
+        mode.contains(&"attractor.observations_mode".to_string()),
+        "every value but \"required\" refuses: {mode:?}"
+    );
+
+    let kind = codes_of(&dot(r#"
+        graph [backend="api", default_model="openai/gpt-5.6-sol"]
+        p [shape=tab, prompt="Answer.", "x.observations"="required"]
+        start -> p -> exit
+    "#));
+    assert!(
+        kind.contains(&"attractor.observations_kind".to_string()),
+        "a prompt node refuses the attribute: {kind:?}"
+    );
+    let kind = codes_of(&dot(r#"
+        c [shape=parallelogram, script="true", "x.observations"="required"]
+        start -> c -> exit
+    "#));
+    assert!(
+        kind.contains(&"attractor.observations_kind".to_string()),
+        "a command node refuses the attribute: {kind:?}"
+    );
+
+    let backend = codes_of(&dot(r#"
+        graph [backend="acp", default_model="openai/gpt-5.6-sol"]
+        a [prompt="Work.", "x.observations"="required"]
+        start -> a -> exit
+    "#));
+    assert!(
+        backend.contains(&"attractor.observations_backend".to_string()),
+        "an acp node cannot call host tools and refuses the contract: {backend:?}"
+    );
+}
+
 /// The language alone: a `workflow.toml` beside the file, a
 /// `.fabro/project.toml` at the root and a settings-layer variable are not
 /// this frontend's to read. The same DOT lowers to the same graph with and

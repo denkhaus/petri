@@ -51,6 +51,7 @@ pub mod tools;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -257,16 +258,17 @@ impl NativeSession {
         let (skill_discovery, skill_labels) = skills::for_node(config, ctx);
         let compaction_accounting = Arc::new(compaction::Accounting::default());
         let events = Arc::new(PetriEvents {
-            sender:     ctx.logs.clone(),
-            masker:     ctx.secrets.masker(),
-            firing:     ctx.firing,
-            attempt:    ctx.attempt,
-            scope:      ctx.scope,
-            node:       ctx.node.clone(),
-            skills:     skill_labels,
-            compaction: compaction_accounting.clone(),
-            tools:      Mutex::new(Vec::new()),
-            deltas:     Mutex::new(None),
+            sender:       ctx.logs.clone(),
+            masker:       ctx.secrets.masker(),
+            firing:       ctx.firing,
+            attempt:      ctx.attempt,
+            scope:        ctx.scope,
+            node:         ctx.node.clone(),
+            skills:       skill_labels,
+            compaction:   compaction_accounting.clone(),
+            tools:        Mutex::new(Vec::new()),
+            observations: AtomicU64::new(0),
+            deltas:       Mutex::new(None),
         });
         // The plan's remaining routes, for Pebble to fail over to in order,
         // each with its own controls; an export starts with none of its own.
@@ -582,6 +584,15 @@ impl NativeSession {
         self.agent.id().to_owned()
     }
 
+    /// Completed, non-error observation-tool calls this session (and its
+    /// inherited sub-agents) made — the presence contract's counter (fabro
+    /// fork, ADR-0038).
+    pub(crate) fn observation_calls(&self) -> u64 {
+        self.events
+            .observations
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub(crate) fn metrics(&self) -> BTreeMap<SmolStr, Value> {
         let mut metrics = BTreeMap::from([
             ("pebble.prompts".into(), json!(self.prompts)),
@@ -591,6 +602,10 @@ impl NativeSession {
                 json!(elapsed_ms(self.inference)),
             ),
             ("pebble.tool_ms".into(), json!(elapsed_ms(self.tool))),
+            (
+                "pebble.observation_calls".into(),
+                json!(self.observation_calls()),
+            ),
             (subagents::METRIC.into(), self.subagents.metrics()),
         ]);
         metrics.extend(self.compaction.metrics());
@@ -735,19 +750,24 @@ impl Redactor for PetriRedactor {
 /// the terminal: a fallback move and a server that did not start
 /// ([`stderr_line`]).
 struct PetriEvents {
-    sender:     ProgressSender,
-    masker:     Masker,
-    firing:     FiringId,
-    attempt:    Attempt,
-    scope:      ScopeId,
-    node:       SmolStr,
+    sender:       ProgressSender,
+    masker:       Masker,
+    firing:       FiringId,
+    attempt:      Attempt,
+    scope:        ScopeId,
+    node:         SmolStr,
     /// What names the skill directories Pebble reports having searched.
-    skills:     skills::Labels,
+    skills:       skills::Labels,
     /// The session's own compactions, folded as Pebble reports them.
-    compaction: Arc<compaction::Accounting>,
+    compaction:   Arc<compaction::Accounting>,
     /// The node's session's tools, set once the agent is built; what each
     /// child session's list is derived from.
-    tools:      Mutex<Vec<tools::Tool>>,
+    tools:        Mutex<Vec<tools::Tool>>,
+    /// Fabro fork (ADR-0038): completed, non-error calls of the
+    /// observation tool this session (and its sub-agents, which inherit
+    /// the tool) made — the presence contract's counter, read at stage
+    /// completion.
+    observations: AtomicU64,
     /// Fabro fork (stream volume, 2026-10-12): consecutive same-variant
     /// streaming deltas coalesce into ONE mirrored event — pebble itself
     /// calls Text/Reasoning/ToolCallOutput deltas "streaming noise", and
@@ -756,7 +776,7 @@ struct PetriEvents {
     /// into ONE battery-heavy loop run (99 % of the run's stream) and
     /// starved the store's read pool. The batched event keeps the first
     /// delta's envelope (seq/timestamp) with the concatenated text.
-    deltas:     Mutex<Option<DeltaRun>>,
+    deltas:       Mutex<Option<DeltaRun>>,
 }
 
 /// One coalesced run of same-variant streaming deltas.
@@ -997,6 +1017,21 @@ impl EventSink for PetriEvents {
             attempt: self.attempt,
         };
         self.compaction.observe(event, &self.sender, &at).await;
+        // Fabro fork (ADR-0038): the presence contract's counter. Every
+        // completed, non-error observation-tool call counts — including a
+        // sub-agent's, since sub-agents inherit the run tools and their
+        // observations are this stage's observations.
+        if let CodingEvent::ToolCallCompleted {
+            ref tool_name,
+            is_error: false,
+            ..
+        } = event.event
+        {
+            if tool_name.as_str() == crate::agent::OBSERVATION_TOOL_NAME {
+                self.observations
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         Ok(())
     }
 }
@@ -1035,6 +1070,7 @@ mod delta_coalescing_tests {
             skills: skills::Labels::new(None, &[], "ws"),
             compaction: Arc::new(compaction::Accounting::default()),
             tools: Mutex::new(Vec::new()),
+            observations: std::sync::atomic::AtomicU64::new(0),
             deltas: Mutex::new(None),
         });
         (events, receiver)

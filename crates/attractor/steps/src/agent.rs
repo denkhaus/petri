@@ -158,7 +158,28 @@ pub struct AgentConfig {
     pub item_data:            Option<String>,
     #[serde(default)]
     pub nodes:                Value,
+    /// Fabro fork (ADR-0038): the observation presence contract, lowered
+    /// from the node's `x.observations` attribute. A `required` node's
+    /// session must call [`OBSERVATION_TOOL_NAME`] at least once before
+    /// the stage can succeed; see `run_session`.
+    #[serde(default)]
+    pub observations:         Option<ObservationsMode>,
 }
+
+/// The observation presence contract's mode, as `x.observations` writes
+/// it (fabro fork, ADR-0038). One mode today; the serde enum refuses
+/// every other value at config deserialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationsMode {
+    Required,
+}
+
+/// The host tool whose completed, non-error calls satisfy the
+/// observation presence contract (fabro fork, ADR-0038). The fabro
+/// workspace registers the tool under this exact name; a fabro-test
+/// probe pins the join end to end.
+pub const OBSERVATION_TOOL_NAME: &str = "fabro_observation_record";
 
 fn default_output_retries() -> u64 {
     2
@@ -608,6 +629,23 @@ async fn run_session(
             }
         }
     };
+
+    // Fabro fork (ADR-0038): the observation presence contract. A node
+    // that declares x.observations="required" must record at least one
+    // durable observation through the host tool before the stage
+    // succeeds; the explicit "nothing durable to record" note satisfies
+    // it. Only completed, non-error calls count — an errored call
+    // recorded nothing. The class matches an exhausted output-contract
+    // repair so failure promotion applies unchanged.
+    if config.observations == Some(ObservationsMode::Required) && session.observation_calls() == 0 {
+        return Err(AgentError::failed(
+            "bad_output",
+            "the stage declares x.observations=\"required\" but never called \
+             fabro_observation_record; record a painpoint, a note, or the explicit \
+             \"nothing durable to record\" note before finishing"
+                .to_string(),
+        ));
+    }
 
     let mut stage = Stage::new(StageOutcome::Succeeded, config.on_failure);
     fork_preamble_policy::consume_tombstones(&policy, &mut stage.context_updates);

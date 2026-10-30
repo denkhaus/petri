@@ -44,6 +44,23 @@ impl Ctx<'_> {
             &format!("node `{}`", node.id),
             &mut self.diags,
         );
+        // Fabro fork (ADR-0038): the observation presence contract is an
+        // agent-node attribute. Every other kind refuses it here — a
+        // prompt, command, human, or structural stage has no agent
+        // session and could never satisfy the contract, so a silent drop
+        // would be a stage-validity rule that never fires.
+        if node.attrs.contains("x.observations") && kind != Kind::Agent {
+            self.diags.error(
+                "attractor.observations_kind",
+                node.attrs.span_of("x.observations", &node.span),
+                format!(
+                    "node `{}` carries x.observations but is a {} node; the observation \
+                     presence contract is only valid on agent nodes",
+                    node.id,
+                    kind.name()
+                ),
+            );
+        }
         let explicit = self.explicit_timeout(node);
 
         let mut meta = json!({
@@ -314,6 +331,28 @@ impl Ctx<'_> {
                 }
             } else {
                 config.insert("backend".into(), Value::String(backend));
+            }
+        }
+        // Fabro fork (ADR-0038): lower the observation presence contract.
+        // Only agent nodes reach this with the attribute (the node pass
+        // refuses every other kind), and only the API backend can satisfy
+        // it — an ACP agent cannot call host tools, so the contract on an
+        // ACP node is refused here rather than failing every completion.
+        if let Some(mode) = node.attrs.text("x.observations") {
+            if mode != "required" {
+                self.diags.error(
+                    "attractor.observations_mode",
+                    node.attrs.span_of("x.observations", &node.span),
+                    "x.observations must be \"required\"",
+                );
+            } else if acp_backend {
+                self.diags.error(
+                    "attractor.observations_backend",
+                    node.attrs.span_of("x.observations", &node.span),
+                    "x.observations requires the api backend; an acp agent cannot call host tools",
+                );
+            } else {
+                config.insert("observations".into(), Value::String(mode));
             }
         }
         for key in ["model", "provider", "reasoning_effort"] {
