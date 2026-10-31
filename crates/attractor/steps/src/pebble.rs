@@ -51,7 +51,7 @@ pub mod tools;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::error::Error;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -588,9 +588,7 @@ impl NativeSession {
     /// inherited sub-agents) made — the presence contract's counter (fabro
     /// fork, ADR-0038).
     pub(crate) fn observation_calls(&self) -> u64 {
-        self.events
-            .observations
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.events.observations.load(Ordering::Relaxed)
     }
 
     pub(crate) fn metrics(&self) -> BTreeMap<SmolStr, Value> {
@@ -1028,8 +1026,7 @@ impl EventSink for PetriEvents {
         } = event.event
         {
             if tool_name.as_str() == crate::agent::OBSERVATION_TOOL_NAME {
-                self.observations
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.observations.fetch_add(1, Ordering::Relaxed);
             }
         }
         Ok(())
@@ -1045,6 +1042,7 @@ mod delta_coalescing_tests {
     //! battery-heavy run (99 % of its stream) and starved the store's
     //! read pool (2026-10-12).
 
+    use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime};
 
@@ -1070,7 +1068,7 @@ mod delta_coalescing_tests {
             skills: skills::Labels::new(None, &[], "ws"),
             compaction: Arc::new(compaction::Accounting::default()),
             tools: Mutex::new(Vec::new()),
-            observations: std::sync::atomic::AtomicU64::new(0),
+            observations: AtomicU64::new(0),
             deltas: Mutex::new(None),
         });
         (events, receiver)

@@ -6,7 +6,6 @@
 //! failure promotion applies as it does to an exhausted repair.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use attractor_steps::agent::OBSERVATION_TOOL_NAME;
@@ -20,7 +19,7 @@ use frontend_attractor::RunSettings;
 use ir::Graph;
 use lithos_llm::Client;
 use pebble_coding_agent::test_support::{
-    ScriptedCall, ScriptedProvider, scripted_client, text_response, tool_call_response,
+    ScriptedCall, scripted_client, text_response, tool_call_response,
 };
 use pebble_coding_agent::tools::{RegisteredTool, ToolSource};
 use runtime::driver::ExecutionReport;
@@ -216,9 +215,3 @@ async fn a_node_without_the_attribute_needs_no_call() {
     let report = run(&rt, graph(false)).await;
     assert_eq!(output_of(&report, "a")["outcome"], json!("succeeded"));
 }
-
-// The unused-import boundary differs between toolchain versions of the
-// test kit; the provider handle is only needed by the scripted arms that
-// read requests back, which these arms do not.
-#[allow(unused)]
-fn provider_type_witness(_: &ScriptedProvider) {}
