@@ -8,6 +8,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use execution::ExecutionIdentity;
 use executor::{ProcessSpec, StdinMode};
 use frontend_attractor::Policy;
 use frontend_attractor::kinds::{COMMAND_KIND, StageOutcome};
@@ -276,7 +277,27 @@ async fn execute(config: CommandConfig, mut ctx: StepCtx) -> Result<Outcome, Ste
         None => config.stdin.clone(),
     };
     let stdin = stdin_text(&stdin_value);
-    let env = resolve_env_refs(&config.env, ctx.secrets.as_ref())?;
+    let mut env = resolve_env_refs(&config.env, ctx.secrets.as_ref())?;
+    // Stage self-awareness: the script's own meta-level, bound the way
+    // hooks see theirs (`FABRO_RUN_ID`, `FABRO_NODE_ID`) plus the stage
+    // position a checkpoint or observation record carries. The engine's
+    // identity wins over a node-declared value of the same name: a graph
+    // must not spoof what the platform attributes its records by. A driver
+    // built outside the coordinator has no identity, so the run and the
+    // execution bind only when the coordinator drives the run; the node
+    // and the firing come from the step itself and always bind.
+    env.insert("FABRO_NODE_ID".into(), ctx.node.clone());
+    env.insert(
+        "FABRO_FIRING".into(),
+        SmolStr::from(ctx.firing.raw().to_string()),
+    );
+    if let Some(identity) = ctx.capability::<ExecutionIdentity>() {
+        env.insert("FABRO_RUN_ID".into(), SmolStr::from(identity.run.as_str()));
+        env.insert(
+            "FABRO_EXECUTION".into(),
+            SmolStr::from(identity.execution.raw().to_string()),
+        );
+    }
     let spec = ProcessSpec::new(
         program,
         &args.iter().map(String::as_str).collect::<Vec<_>>(),

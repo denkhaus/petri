@@ -82,7 +82,7 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::acp::resolve_env;
 use crate::agent::backend::AgentError;
-use crate::agent::{AgentConfig, INTERRUPTED_EVENT};
+use crate::agent::{AgentConfig, INTERRUPTED_EVENT, OBSERVATION_TOOL_NAME};
 use crate::compaction::{self, CompactionPolicyHandle};
 use crate::fallback::{self, Disposition, Plan};
 use crate::hooks::tools::ToolHooks;
@@ -1024,10 +1024,9 @@ impl EventSink for PetriEvents {
             is_error: false,
             ..
         } = event.event
+            && tool_name.as_str() == OBSERVATION_TOOL_NAME
         {
-            if tool_name.as_str() == crate::agent::OBSERVATION_TOOL_NAME {
-                self.observations.fetch_add(1, Ordering::Relaxed);
-            }
+            self.observations.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
     }

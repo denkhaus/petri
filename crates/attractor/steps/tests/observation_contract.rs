@@ -12,8 +12,8 @@ use attractor_steps::agent::OBSERVATION_TOOL_NAME;
 use attractor_steps::host_tools::HostTools;
 use attractor_steps::pebble::PebbleClient;
 use attractor_steps::register;
+use execution::RunKey;
 use execution::host::{self, HostRun};
-use execution::{ExecutionObserver, RunKey};
 use frontend::{CompileInputs, Diagnostics, NoFiles};
 use frontend_attractor::RunSettings;
 use ir::Graph;
@@ -21,7 +21,7 @@ use lithos_llm::Client;
 use pebble_coding_agent::test_support::{
     ScriptedCall, scripted_client, text_response, tool_call_response,
 };
-use pebble_coding_agent::tools::{RegisteredTool, ToolSource};
+use pebble_coding_agent::tools::{RegisteredTool, ToolError, ToolSource};
 use runtime::driver::ExecutionReport;
 use runtime::executor::Retention;
 use runtime::{RunOptions, Runtime};
@@ -81,11 +81,7 @@ fn observation_tool(failing: bool) -> HostTools {
                     },
                     "required": ["category", "text"],
                 }),
-                |_, _| async {
-                    Err(pebble_coding_agent::tools::ToolError::execution(
-                        "the recording surface is down",
-                    ))
-                },
+                |_, _| async { Err(ToolError::execution("the recording surface is down")) },
             )
         } else {
             RegisteredTool::function(
