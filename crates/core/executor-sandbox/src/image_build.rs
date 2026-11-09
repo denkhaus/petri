@@ -259,7 +259,11 @@ fn pack_context(root: &Path) -> Result<Vec<u8>, String> {
 }
 
 /// Appends `dir`'s contents under `prefix`, skipping `.git` at every
-/// level.
+/// level and `.dockerignore` at the root: the packed context is a plain
+/// source tree the DAEMON builds, and the repository's own
+/// `.dockerignore` (tuned for the runtime image's staged-binary
+/// context) would exclude everything from an environment build — the
+/// daemon applies it when it unpacks the context tar.
 fn append_tree(
     archive: &mut tar::Builder<Vec<u8>>,
     dir: &Path,
@@ -268,7 +272,7 @@ fn append_tree(
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name == ".git" {
+        if name == ".git" || (name == ".dockerignore" && prefix.is_empty()) {
             continue;
         }
         let path = entry.path();
