@@ -297,7 +297,7 @@ environments as `[environments.<id>]` tables of the settings layer,
 `petri.launch_environment` compile variable, the goal its run resolved as
 the `petri.launch_goal` compile variable, and the MCP catalog as
 `Fabro::with_mcp_catalog_toml`; `crates/fabro/FORMAT.md`, "The files"),
-minted GitHub tokens, image builds from `image.dockerfile`, and the choice of
+minted GitHub tokens, and the choice of
 which runner version serves a run. Petri keeps local replay
 (`petri inspect`, `replay_run`, resume from the run's store) and local
 sandbox recovery (the plugin's lease, fence and reacquire on resume)

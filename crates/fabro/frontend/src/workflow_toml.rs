@@ -29,15 +29,20 @@
 //!   the scope environment, with `{{ secrets.NAME }}` as a `$secret` reference
 //!   resolved at spawn; `resources` are the Daytona runner size. The other keys
 //!   Fabro's environment table accepts (`cwd`, `network`, `lifecycle`,
-//!   `labels`, `image.dockerfile`) are the Fabro platform's: known, read by
-//!   nothing here, and accepted silently in every layer, as `[workflow] engine`
-//!   is ([`ENVIRONMENT_KEYS`]). A warning is for a key the lowering reads but
-//!   cannot apply as Fabro does: an image on the `local` provider (which Fabro
-//!   ignores on the host) and `resources` off Daytona. A key neither Petri nor
-//!   Fabro's table knows warns as ignored. Both tables are read from every
-//!   settings layer and merged key by key, the host's settings layer under
-//!   `.fabro/project.toml` under `workflow.toml` ([`EnvironmentLayers`]), so a
-//!   bundle can name an environment the host's catalog declares.
+//!   `labels`) are the Fabro platform's: known, read by nothing here, and
+//!   accepted silently in every layer, as `[workflow] engine` is
+//!   ([`ENVIRONMENT_KEYS`]). `image.dockerfile` is LIVE since ADR-0042: inline
+//!   text only (the `{path}` form and a finished `image.docker` beside it
+//!   refuse loudly), on the `docker` provider the executor builds the image at
+//!   scope acquisition over the run's bound repository as context and the scope
+//!   runs on the built `petri-env-<hash>` tag; a run that bound no repository
+//!   errors rather than falling back. A warning is for a key the lowering reads
+//!   but cannot apply as Fabro does: an image on the `local` provider (which
+//!   Fabro ignores on the host) and `resources` off Daytona. A key neither
+//!   Petri nor Fabro's table knows warns as ignored. Both tables are read from
+//!   every settings layer and merged key by key, the host's settings layer
+//!   under `.fabro/project.toml` under `workflow.toml` ([`EnvironmentLayers`]),
+//!   so a bundle can name an environment the host's catalog declares.
 //! - `[run.prepare]`: setup steps that run as command nodes between `start` and
 //!   its successors, in the selected environment, before any workflow node.
 //!   Each step gets the section's `timeout` (default five minutes) and
