@@ -50,6 +50,7 @@ jobs:
         image,
         options,
         credentials,
+        ..
     } = &scope.runtime.target
     else {
         unreachable!()

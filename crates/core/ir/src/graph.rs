@@ -797,7 +797,25 @@ pub enum RuntimeTarget {
         /// only inside the executor's acquire.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         credentials: Option<RegistryCredentials>,
+        /// An environment's build declaration (ADR-0042): when set, the
+        /// executor builds the image at scope acquisition — before the
+        /// sandbox is created — and the scope runs on the built
+        /// `petri-env-<hash>` tag; `image` is ignored (frontends leave
+        /// it empty). The build context is the run's bound repository.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        build:       Option<ContainerBuild>,
     },
+}
+
+/// What an environment's `image.dockerfile` lowers to: the inline
+/// Dockerfile text and the host-side context root.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainerBuild {
+    /// Inline Dockerfile text, as the frontend resolved it.
+    pub dockerfile: SmolStr,
+    /// The host-side context root: the run's bound repository
+    /// (`petri.repository`).
+    pub context:    SmolStr,
 }
 
 /// Registry auth for pulling an image. The password is a secret name, resolved
@@ -861,6 +879,7 @@ impl RuntimeSpec {
                 image:       SmolStr::new(image),
                 options:     ContainerOptions::default(),
                 credentials: None,
+                build:       None,
             },
             requirements: Vec::new(),
         }

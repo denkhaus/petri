@@ -673,6 +673,7 @@ pub fn containerize(
                 ..ir::ContainerOptions::default()
             },
             credentials: None,
+            build:       None,
         };
     }
 }

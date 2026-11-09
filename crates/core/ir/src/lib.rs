@@ -44,11 +44,11 @@ pub use flow::{
     RunStatus, SandboxInstance, Status, StatusKind, StepEvent, Token, UnderlyingFailure,
 };
 pub use graph::{
-    Backoff, Budget, Candidate, Completion, Edge, EdgeTransition, Exhaustion, ExpandTarget,
-    Expansion, ExprOrValue, Fallthrough, Graph, GraphBody, Guard, JoinPolicy, Node, PickPolicy,
-    RegistryCredentials, ResultProjection, RetryOn, RetryPolicy, Routing, RoutingGroup, RunPolicy,
-    RuntimeSpec, RuntimeTarget, Scope, SelectGroup, SelectionPolicy, ServiceSpec, StepRef, Tier,
-    TimeoutPolicy, WorkspacePolicy,
+    Backoff, Budget, Candidate, Completion, ContainerBuild, Edge, EdgeTransition, Exhaustion,
+    ExpandTarget, Expansion, ExprOrValue, Fallthrough, Graph, GraphBody, Guard, JoinPolicy, Node,
+    PickPolicy, RegistryCredentials, ResultProjection, RetryOn, RetryPolicy, Routing, RoutingGroup,
+    RunPolicy, RuntimeSpec, RuntimeTarget, Scope, SelectGroup, SelectionPolicy, ServiceSpec,
+    StepRef, Tier, TimeoutPolicy, WorkspacePolicy,
 };
 pub use ids::{
     Attempt, CancelScopeId, EdgeId, EnvironmentId, ExecutionId, ExprId, FiringId, Generation,

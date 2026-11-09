@@ -25,6 +25,7 @@ async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tar.workspace = true
 smol_str.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -40,3 +41,4 @@ reqwest.workspace = true
 
 [build-dependencies]
 sha2.workspace = true
+tar.workspace = true

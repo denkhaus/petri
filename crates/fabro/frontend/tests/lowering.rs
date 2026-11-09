@@ -64,7 +64,9 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
                 start -> a -> exit
             "#),
             &files,
-            &CompileInputs::new(),
+            // The environment fixture below declares a live dockerfile
+            // build (ADR-0042), whose context is the bound repository.
+            &CompileInputs::new().with_var(frontend::REPOSITORY_VAR, "/srv/repo"),
         )
         .diagnostics
         .iter()
@@ -89,7 +91,7 @@ fn workflow_toml_sections_warn_or_reject_and_never_pass_silently() {
          [run.checkpoint]\nexclude_globs = []\n[run.artifacts]\ninclude = []\n\
          [run.execution]\nmode = \"normal\"\n[run.agent]\nfabro_tools = true\n\
          [environments.review]\nprovider = \"docker\"\n[environments.review.network]\n\
-         mode = \"none\"\n[environments.review.image]\ndockerfile = { path = \"Dockerfile\" }\n",
+         mode = \"none\"\n[environments.review.image]\ndockerfile = \"FROM ubuntu:24.04\"\n",
     );
     assert!(
         platform_only.iter().all(|d| !d.is_error()),
@@ -772,6 +774,72 @@ fn agent_nodes_carry_the_reference_subagent_configuration() {
     );
 }
 
+/// `image.dockerfile` (inline, the docker provider) lowers onto the
+/// scope's container target as a build declaration (ADR-0042): the
+/// image is empty, the Dockerfile text rides beside it, and the bound
+/// repository is the context root. Without a bound repository there is
+/// no context — an error, never a silent fall-back to a finished
+/// image. The serialized shape is the contract the executor reads.
+#[test]
+fn environment_dockerfile_lowers_onto_the_container_build() {
+    let workflow = "_version = 1\n[run.environment]\nid = \"build\"\n\
+                    [environments.build]\nprovider = \"docker\"\n\
+                    [environments.build.image]\ndockerfile = \"FROM ubuntu:24.04\"\n";
+    let lowered = load(
+        "wf/workflow.fabro",
+        &dot("c [shape=parallelogram, script=\"true\"]\nstart -> c -> exit"),
+        &files(&[("wf/workflow.toml", workflow)]),
+        &CompileInputs::new().with_var(frontend::REPOSITORY_VAR, "/srv/repo"),
+    );
+    assert!(
+        !lowered.diagnostics.has_errors(),
+        "{:?}",
+        lowered.diagnostics
+    );
+    let graph = lowered.graph.expect("lowers");
+    let scope = graph
+        .body
+        .scopes
+        .first()
+        .expect("the run declares one scope");
+    let target = serde_json::to_value(&scope.runtime.target).expect("serializes");
+    let container = &target["Container"];
+    assert_eq!(
+        container["image"],
+        json!(""),
+        "the build replaces the image"
+    );
+    assert_eq!(
+        container["build"]["dockerfile"],
+        json!("FROM ubuntu:24.04"),
+        "the inline text rides the build declaration"
+    );
+    assert_eq!(
+        container["build"]["context"],
+        json!("/srv/repo"),
+        "the bound repository is the context root"
+    );
+    assert!(
+        container.get("credentials").is_none(),
+        "a build declares no pull credentials: {container}"
+    );
+
+    let lowered = load(
+        "wf/workflow.fabro",
+        &dot("c [shape=parallelogram, script=\"true\"]\nstart -> c -> exit"),
+        &files(&[("wf/workflow.toml", workflow)]),
+        &CompileInputs::new(),
+    );
+    assert!(
+        lowered
+            .diagnostics
+            .iter()
+            .any(|d| d.code.to_string() == "attractor.environment.build_context"),
+        "a build without a bound repository errors: {:?}",
+        lowered.diagnostics
+    );
+}
+
 /// `[run.clone]` lowers onto the launch parameter with `enabled` as the
 /// layers set it and the repository the host bound beside it; the depth is
 /// the full history whatever the layers ask — checkpoint publishing bundles
@@ -1341,7 +1409,6 @@ fn environments_come_from_every_layer_and_the_bundle_wins() {
 fn platform_environment_keys_are_known_and_unknown_ones_warn() {
     let project = "[run.environment]\nid = \"fabro-dev\"\n\
                    [environments.fabro-dev]\nprovider = \"daytona\"\n\
-                   [environments.fabro-dev.image]\ndockerfile = { path = \"Dockerfile\" }\n\
                    [environments.fabro-dev.resources]\ncpu = 8\nmemory = \"16GB\"\n\
                    [environments.fabro-dev.lifecycle]\nauto_stop = \"30m\"\n\
                    [environments.fabro-dev.labels]\nrepo = \"fabro-sh/fabro\"\n";

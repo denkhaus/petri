@@ -28,6 +28,7 @@ mod env;
 pub mod fingerprint;
 mod gate;
 mod host;
+mod image_build;
 pub mod in_process;
 #[cfg(test)]
 mod in_process_tests;
@@ -88,7 +89,7 @@ pub const CONTAINER_WORKSPACE: &str = "/workspace";
 const DOCKER_HOST_ALIAS: &str = "host.docker.internal";
 
 /// The backend name this crate's errors carry.
-const BACKEND: &str = "sandbox";
+pub(crate) const BACKEND: &str = "sandbox";
 
 pub(crate) fn acquire_failed(error: &sandbox_driver::Error) -> EnvError {
     if let sandbox_driver::Error::Provider(error) = error
@@ -205,7 +206,7 @@ impl SandboxExecutor {
                 },
                 |labels, provider| async move {
                     let mut spec = self
-                        .build_spec(scope, &labels, &name, ctx, &*provider)
+                        .build_spec(scope, &labels, &name, ctx, &provider)
                         .await?;
                     if !self.simulated {
                         spec.network = self.options.network.clone();
@@ -327,7 +328,7 @@ impl SandboxExecutor {
         labels: &[(String, String)],
         name: &str,
         ctx: &AcquireContext,
-        provider: &dyn SandboxProvider,
+        provider: &Arc<dyn SandboxProvider>,
     ) -> Result<SandboxSpec, EnvError> {
         if self.simulated {
             // A name, a working directory string and the run's labels:
@@ -364,6 +365,35 @@ impl SandboxExecutor {
             return Ok(spec);
         }
         if self.options.backend != SandboxBackend::Daytona {
+            // A build declaration (ADR-0042): ensure the environment
+            // image exists on the daemon — built from the run's bound
+            // repository on a throwaway holder, cached by content tag —
+            // and run the scope on the built tag. The rewrite happens
+            // on a clone, exactly like the runner-image rewrite below:
+            // the scope's own spec stays what it lowered to.
+            if let ir::RuntimeTarget::Container {
+                build: Some(build), ..
+            } = &scope.runtime.target
+            {
+                let built = image_build::ensure_environment_image(
+                    provider,
+                    &image_build::EnvironmentBuild {
+                        dockerfile: build.dockerfile.to_string(),
+                        context:    build.context.to_string(),
+                    },
+                    &format!("{name}-env-build"),
+                )
+                .await?;
+                tracing::info!(%built, "environment image ensured");
+                let mut runner = scope.clone();
+                if let ir::RuntimeTarget::Container { image, build, .. } =
+                    &mut runner.runtime.target
+                {
+                    *image = built.into();
+                    *build = None;
+                }
+                return build_spec(&runner, labels, name, ctx);
+            }
             if self.options.backend == SandboxBackend::Docker
                 && matches!(scope.runtime.target, RuntimeTarget::HostProcess)
             {
@@ -372,6 +402,7 @@ impl SandboxExecutor {
                     image:       self.options.runner_image(&scope.runtime)?.into(),
                     options:     ContainerOptions::default(),
                     credentials: None,
+                    build:       None,
                 };
                 return build_spec(&runner, labels, name, ctx);
             }
@@ -424,6 +455,7 @@ fn build_daytona_spec(
             image,
             options,
             credentials,
+            ..
         } => {
             let mut config = docker_provider_config(
                 registry_auth(credentials.as_ref(), ctx)?,
@@ -488,6 +520,7 @@ fn build_spec(
         image,
         options,
         credentials,
+        ..
     } = &scope.runtime.target
     else {
         return Err(EnvError::backend(

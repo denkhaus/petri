@@ -33,6 +33,7 @@ fn container_offering_supports_process_and_nested_container_jobs() {
                 image:       "alpine:3.20".into(),
                 options:     ContainerOptions::default(),
                 credentials: None,
+                build:       None,
             };
         }
         let spec = build_daytona_spec(&scope, &AcquireContext::bare(), &snapshot).unwrap();
@@ -90,6 +91,7 @@ fn container_jobs_keep_options_services_and_credentials_inside_the_vm() {
                 username:        "user".into(),
                 password_secret: "REGISTRY_PASSWORD".into(),
             }),
+            build:       None,
         },
         requirements: Vec::new(),
     };

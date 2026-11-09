@@ -528,7 +528,43 @@ impl Ctx<'_> {
                 image:       SmolStr::new(image),
                 options:     ir::ContainerOptions::default(),
                 credentials: None,
+                build:       None,
             };
+        }
+        // A build declaration overrides the image (ADR-0042): the
+        // executor builds this environment's image at scope
+        // acquisition and the scope runs on the built tag. The context
+        // is the bound repository — a run that checked no repository
+        // out has nothing to build from, which is an error, not a
+        // silent fall-back to a stale image.
+        if environment.dockerfile.is_some() && environment.provider == "docker" {
+            match (&environment.dockerfile, &self.repository) {
+                (Some(dockerfile), Some(repository)) => {
+                    scope.runtime.target = ir::RuntimeTarget::Container {
+                        image:       SmolStr::new(""),
+                        options:     ir::ContainerOptions::default(),
+                        credentials: None,
+                        build:       Some(ir::ContainerBuild {
+                            dockerfile: SmolStr::new(dockerfile),
+                            context:    SmolStr::new(repository),
+                        }),
+                    };
+                }
+                (Some(_), None) => {
+                    self.diags.push(Diagnostic::error(
+                        "attractor.environment.build_context",
+                        Span::file(&self.settings_path()),
+                        format!(
+                            "environment `{}` declares `image.dockerfile`, but the run bound no \
+                             repository (`petri.repository`) — the build context IS the \
+                             repository",
+                            environment.id
+                        ),
+                    ));
+                    return;
+                }
+                (None, _) => {}
+            }
         }
     }
 

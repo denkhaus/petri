@@ -489,3 +489,93 @@ async fn a_one_shot_action_container_shares_the_workspace() {
         "the sandbox's one-shots went with it"
     );
 }
+
+/// A git repository with one committed marker file, the build context.
+fn git_repo_with_marker(marker: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "petri-env-build-ctx-{}-{marker}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("context dir");
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    std::fs::write(dir.join("marker.txt"), format!("marker {marker}\n")).expect("marker");
+    git(&["add", "marker.txt"]);
+    git(&[
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@test",
+        "commit",
+        "-qm",
+        "marker",
+    ]);
+    dir
+}
+
+/// An environment with `image.dockerfile` builds its image at scope
+/// acquisition (ADR-0042): the holder runs, the daemon builds the
+/// Dockerfile over the run's repository as context, the scope's
+/// sandbox starts from the built tag, and the holder leaves nothing
+/// behind.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_environment_dockerfile_builds_the_scope_image_from_the_repository() {
+    if !is_docker_ready().await {
+        return;
+    }
+    let context = git_repo_with_marker("one");
+    let scope = ScopeSpec::new(SCOPE, INSTANCE).with_runtime(ir::RuntimeSpec {
+        target:       ir::RuntimeTarget::Container {
+            image:       "".into(),
+            options:     Default::default(),
+            credentials: None,
+            build:       Some(ir::ContainerBuild {
+                dockerfile: "FROM alpine:3.20\nCOPY marker.txt /marker.txt\n".into(),
+                context:    context.to_string_lossy().into_owned().into(),
+            }),
+        },
+        requirements: Vec::new(),
+    });
+    let dir = RunDir::new("sandbox-env-image-build");
+    let executor = executor(&dir, Retention::Never);
+    let handle = executor
+        .acquire(&scope, &AcquireContext::bare())
+        .await
+        .expect("acquire builds the environment image");
+    let env = handle.exec();
+
+    let mut process = env
+        .spawn(ProcessSpec::new("sh", &["-c", "cat /marker.txt"]))
+        .await
+        .expect("spawn");
+    let mut lines = process.lines().expect("lines");
+    let mut seen = Vec::new();
+    while let Some(line) = lines.recv().await {
+        seen.push(line.line);
+    }
+    let status = process.wait().await.expect("wait");
+    assert_eq!(status.code, Some(0), "the built image carries the context");
+    assert_eq!(seen, vec!["marker one".to_owned()]);
+
+    let prefix = dir.container_prefix();
+    let report = executor.release(handle, ScopeOutcome::Succeeded).await;
+    assert!(report.is_clean(), "{report:?}");
+    assert!(
+        list_containers(&prefix).await.is_empty(),
+        "the holder leaves nothing behind"
+    );
+    let _ = std::fs::remove_dir_all(&context);
+}

@@ -939,33 +939,92 @@ impl Reader<'_> {
                 .or_else(|| base.get(key).map(|value| (value, base_table.as_str())))
         };
         let mut environment = Environment {
-            id:        id.clone(),
-            provider:  provider.clone(),
-            image:     None,
-            env:       BTreeMap::new(),
-            cpu_cores: None,
-            memory_mb: None,
-            disk_mb:   None,
+            id:         id.clone(),
+            provider:   provider.clone(),
+            image:      None,
+            dockerfile: None,
+            env:        BTreeMap::new(),
+            cpu_cores:  None,
+            memory_mb:  None,
+            disk_mb:    None,
         };
-        // `image.docker` only: `image.dockerfile` is the platform's, which
-        // builds the image there; the scope here runs on `image.docker` or
-        // the backend's default runner image.
+        // `image.docker` and `image.dockerfile`: the dockerfile is the
+        // platform's build declaration — inline text the engine builds
+        // at scope acquisition (ADR-0042); the scope runs on the built
+        // tag, `image.docker` names a finished image instead.
         if let Some((image, table)) = field("image")
             && let Some(image) = image.as_table()
-            && let Some(docker) = image.get("docker").and_then(toml::Value::as_str)
         {
-            if provider == "local" {
-                // Fabro ignores the image on the host, and a server's
-                // catalog may carry one on a `local` environment (its
-                // seeded default keeps the image whatever the provider).
-                self.ignored_in(
-                    &at(&format!("{table}.image.docker")),
-                    &format!("environments.{id}.image"),
-                    "the `local` provider runs on the host; an image applies to `docker` and \
-                     `daytona`",
-                );
-            } else {
-                environment.image = Some(docker.to_string());
+            if let Some(docker) = image.get("docker").and_then(toml::Value::as_str) {
+                if provider == "local" {
+                    // Fabro ignores the image on the host, and a server's
+                    // catalog may carry one on a `local` environment (its
+                    // seeded default keeps the image whatever the provider).
+                    self.ignored_in(
+                        &at(&format!("{table}.image.docker")),
+                        &format!("environments.{id}.image"),
+                        "the `local` provider runs on the host; an image applies to `docker` and \
+                         `daytona`",
+                    );
+                } else {
+                    environment.image = Some(docker.to_string());
+                }
+            }
+            if let Some(dockerfile) = image.get("dockerfile") {
+                // A live key since ADR-0042: the engine builds this
+                // image at scope acquisition. Inline text only — the
+                // `{ path }` form is Fabro's persist-time inlining; a
+                // runner that reads no files here refuses it loudly
+                // rather than ignoring the build. The same refusal
+                // covers a finished image AND a build declared together.
+                if dockerfile.is_str() && image.get("docker").is_some() {
+                    self.unsupported_in(
+                        &at(&format!("{table}.image")),
+                        "workflow_toml.environments.image",
+                        format!(
+                            "`[environments.{id}.image]` names a finished image (`docker`) and \
+                             declares a build (`dockerfile`) — set one",
+                        ),
+                        "set `image.docker` for a finished image, or `image.dockerfile` to \
+                         build at scope acquisition",
+                    );
+                } else if let Some(text) = dockerfile.as_str() {
+                    match provider.as_str() {
+                        "docker" => environment.dockerfile = Some(text.to_string()),
+                        // v1 builds on the docker provider only; the other
+                        // providers would silently never act on the key.
+                        "local" => self.ignored_in(
+                            &at(&format!("{table}.image.dockerfile")),
+                            &format!("environments.{id}.image"),
+                            "the `local` provider runs on the host; a dockerfile builds for the \
+                             `docker` provider",
+                        ),
+                        _ => self.ignored_in(
+                            &at(&format!("{table}.image.dockerfile")),
+                            &format!("environments.{id}.image"),
+                            "the `daytona` provider builds no image; name `image.docker` or \
+                             move the environment to the `docker` provider",
+                        ),
+                    }
+                } else if dockerfile.is_table() {
+                    self.unsupported_in(
+                        &at(&format!("{table}.image.dockerfile")),
+                        "workflow_toml.environments.image.dockerfile",
+                        format!(
+                            "`[environments.{id}.image] dockerfile` uses the `{{ path }}` form, \
+                             which is Fabro's persist-time inlining; this runner reads no files \
+                             here",
+                        ),
+                        "write the Dockerfile inline (a string), or go through Fabro's \
+                         persisting materialization",
+                    );
+                } else {
+                    self.ignored_in(
+                        &at(&format!("{table}.image.dockerfile")),
+                        &format!("environments.{id}.image.dockerfile"),
+                        "image.dockerfile is inline Dockerfile text",
+                    );
+                }
             }
         }
         if let Some((resources, table)) = field("resources")

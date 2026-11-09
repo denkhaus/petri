@@ -1742,6 +1742,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "smol_str",
+ "tar",
  "thiserror",
  "tokio",
  "tokio-util",
