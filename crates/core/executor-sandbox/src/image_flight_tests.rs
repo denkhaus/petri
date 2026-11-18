@@ -1,12 +1,34 @@
 //! Fork-only presence and behavior pins for the environment cook's
-//! single-flight machinery (work#1440). A `just vendor import` from a
-//! wrong fork state rewrites `vendor/PINS.toml` cleanly and would
-//! silently drop the feature; these tests keep it observable.
+//! single-flight machinery (work#1440, work#1454). A `just vendor
+//! import` from a wrong fork state rewrites `vendor/PINS.toml` cleanly
+//! and would silently drop the feature; these tests keep it observable.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use super::image_flight;
+
+/// 2020-01-01T00:00:00Z: an mtime no fresh clone would carry.
+fn aged_mtime() -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(1_577_836_800)
+}
+
+/// Stamps every regular file under `root` with `mtime`, so a fixture
+/// can masquerade as a fresh clone or an aged checkout.
+fn stamp_mtimes(dir: &Path, mtime: SystemTime) {
+    for entry in std::fs::read_dir(dir).expect("read fixture dir") {
+        let path = entry.expect("fixture entry").path();
+        if path.is_dir() {
+            stamp_mtimes(&path, mtime);
+        } else {
+            std::fs::File::open(&path)
+                .expect("open fixture file")
+                .set_modified(mtime)
+                .expect("stamp fixture mtime");
+        }
+    }
+}
 
 /// A throwaway git checkout fixture: a directory with `.git`, one
 /// tracked-looking file, a nested file, and the two skip-rule
@@ -53,6 +75,54 @@ fn manifest_digest_is_stable_and_skips_the_pack_skip_list() {
     assert_ne!(one, grown, "a changed file must move the digest");
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// THE clone-stability pin (work#1454): every run checkout is a FRESH
+/// clone/pack, so the same trunk tip arrives under a different set of
+/// mtimes in every root. Two roots carrying IDENTICAL content but
+/// different mtimes MUST digest equal — under the mtime manifest they
+/// did not, so the tag-keyed single-flight guard never grouped
+/// concurrent cooks (seven distinct `petri-env-` tags for one trunk
+/// tip in 13 minutes, fabro container logs 2026-11-18). There is no
+/// end-to-end concurrent-cook harness in this suite — the cook path
+/// runs only against a real docker provider — so "same content, one
+/// build" rests on this pin composed with `guard_for_is_per_tag`:
+/// equal digests mint the equal tag that maps to one guard, hence one
+/// build.
+#[test]
+fn manifest_digest_is_clone_stable_across_different_mtimes() {
+    let aged = context_fixture("clone-aged");
+    let fresh = context_fixture("clone-fresh");
+    stamp_mtimes(&aged, aged_mtime());
+    stamp_mtimes(&fresh, SystemTime::now());
+    let one = image_flight::manifest_digest("FROM busybox", &aged).expect("aged digest");
+    let two = image_flight::manifest_digest("FROM busybox", &fresh).expect("fresh digest");
+    assert_eq!(
+        one, two,
+        "identical content must digest equal across different mtimes"
+    );
+    let _ = std::fs::remove_dir_all(&aged);
+    let _ = std::fs::remove_dir_all(&fresh);
+}
+
+/// Content-sensitivity pin (work#1454): two roots identical except ONE
+/// file's content — SAME size, SAME mtimes — MUST digest differently.
+/// This is the over-normalization guard: it proves content itself
+/// moves the digest, not merely size or time, and under the mtime
+/// manifest such an equal-size edit aliased into the other root's tag.
+#[test]
+fn manifest_digest_tracks_content_beyond_size_and_mtime() {
+    let one_root = context_fixture("content-a");
+    let other_root = context_fixture("content-b");
+    // "kept" -> "kepT": four bytes either way, mtimes frozen equal.
+    std::fs::write(other_root.join("nested/keep.txt"), "kepT").expect("swap content");
+    stamp_mtimes(&one_root, aged_mtime());
+    stamp_mtimes(&other_root, aged_mtime());
+    let one = image_flight::manifest_digest("FROM busybox", &one_root).expect("first digest");
+    let two = image_flight::manifest_digest("FROM busybox", &other_root).expect("second digest");
+    assert_ne!(one, two, "an equal-size content edit must move the digest");
+    let _ = std::fs::remove_dir_all(&one_root);
+    let _ = std::fs::remove_dir_all(&other_root);
 }
 
 /// A directory without `.git` is refused: the context must be a git

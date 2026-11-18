@@ -21,9 +21,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+use std::io::Read as _;
 use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::SystemTime;
 use std::{fs, io};
 
 use sha2::{Digest as _, Sha256};
@@ -102,17 +102,33 @@ pub(crate) fn forget(tags: &[String]) {
 
 /// Computes the environment's content digest over the Dockerfile text
 /// and a MANIFEST of the context tree — each file's path, size, and
-/// mtime — instead of the packed tar (work#1440 rider: the tar is
-/// packed only when the cook must build). The skip rules mirror
-/// `pack_context`'s: `.git` at every level, `.dockerignore` at the
-/// root only.
+/// CONTENT (streamed in 64 KiB chunks) — instead of the packed tar
+/// (work#1440 rider: the tar is packed only when the cook must build).
+/// The skip rules mirror `pack_context`'s: `.git` at every level,
+/// `.dockerignore` at the root only.
 ///
-/// Known approximation: the manifest walks the working tree while the
-/// packed tar comes from a fresh clone of HEAD, so a DIRTY checkout
-/// whose edits leave every path/size/mtime identical would hash to the
-/// tag of the committed tree. Run checkouts are clean (the checkout
-/// pipeline), and a divergence costs a stale-but-valid image, not a
-/// broken one.
+/// The manifest is CLONE-STABLE (work#1454): an earlier mtime-based
+/// manifest minted a different `petri-env-<digest12>` tag per fresh
+/// run checkout of the SAME trunk tip, so the tag-keyed single-flight
+/// guard never grouped concurrent cooks — seven distinct tags for one
+/// tip within thirteen minutes, four near-simultaneous duplicate
+/// builds (fabro container logs, 2026-11-18). The price of content is
+/// a full READ of the context tree on every cook: ~250 MB for the
+/// fabro checkout, a couple of seconds, paid once per tip change —
+/// cheap against a duplicate multi-gigabyte image build.
+///
+/// Rejected alternative (work#1454): `git ls-files -s` blob shas are
+/// faster, but they index the STAGED state, so unstaged working-tree
+/// edits would diverge from the packed tar.
+///
+/// A dirty working tree now hashes to its TRUE content — the old
+/// "known approximation" (a dirty checkout aliasing the committed
+/// tree whenever its edits left every path/size/mtime identical) is
+/// gone. The digest walks the working tree while `pack_context` tars
+/// a fresh clone of HEAD, so digest and tar agree exactly for a clean
+/// checkout — run checkouts are clean (the checkout pipeline) — and a
+/// dirty tree now mints its own tag rather than silently reusing the
+/// committed tree's image.
 pub(crate) fn manifest_digest(dockerfile: &str, root: &Path) -> Result<String, String> {
     if !root.join(".git").exists() {
         return Err(format!(
@@ -132,7 +148,9 @@ pub(crate) fn manifest_digest(dockerfile: &str, root: &Path) -> Result<String, S
 }
 
 /// Appends `dir`'s manifest entries under `prefix`, sorted by name so
-/// the digest is deterministic regardless of directory order.
+/// the digest is deterministic regardless of directory order. Each
+/// regular file contributes path, size, and STREAMED CONTENT — the
+/// content read is what makes the digest clone-stable (work#1454).
 fn append_manifest(hash: &mut Sha256, dir: &Path, prefix: &str) -> Result<(), String> {
     let io = |error: io::Error| {
         format!(
@@ -164,14 +182,16 @@ fn append_manifest(hash: &mut Sha256, dir: &Path, prefix: &str) -> Result<(), St
         if metadata.is_dir() {
             append_manifest(hash, &path, &arc)?;
         } else {
-            let mtime = metadata
-                .modified()
-                .map_err(io)?
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|since| since.as_nanos())
-                .unwrap_or_default();
             hash.update(metadata.len().to_le_bytes().as_slice());
-            hash.update(mtime.to_le_bytes().as_slice());
+            let mut file = fs::File::open(&path).map_err(io)?;
+            let mut chunk = [0u8; 64 * 1024];
+            loop {
+                let read = file.read(&mut chunk).map_err(io)?;
+                if read == 0 {
+                    break;
+                }
+                hash.update(&chunk[..read]);
+            }
         }
     }
     Ok(())
