@@ -11,6 +11,15 @@ publish = false
 [lib]
 name = "executor_sandbox"
 
+[features]
+# Fork feature (work#1440): the cook's mint-time eviction rides the
+# denkhaus sandbox-driver fork's `OneShot::evict_lru_images`, which
+# upstream lithoscomputer/sandbox-driver (this workspace's `main`-branch
+# dependency) lacks. Off — the default — the crate builds and tests
+# against upstream; fabro's workspace, which patches sandbox-driver to
+# vendor/sandbox-driver, switches it on for every cook.
+env-image-evict = []
+
 [lints]
 workspace = true
 

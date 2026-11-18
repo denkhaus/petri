@@ -254,9 +254,13 @@ impl HumanConfig {
     /// question after a resume is a new question with a new secret name.
     /// A review gate's text is Fabro's review sentence and carries the
     /// validated reference.
+    ///
+    /// Fork (denkhaus/work#1300 fix A): the id is URL-safe (`gate~12`, not
+    /// `gate#12`) — it travels a URL path segment on the answer door, and
+    /// `#` made every question unanswerable behind the production proxy.
     pub fn question(&self, ctx: &StepCtx) -> Question {
         let mut question = Question::new(
-            format!("{}#{}", self.node, ctx.firing.raw()),
+            crate::fork_url_safe::id(&[self.node.as_str(), &ctx.firing.raw().to_string()]),
             self.label.clone(),
         );
         question.options = self

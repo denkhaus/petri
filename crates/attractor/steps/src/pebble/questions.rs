@@ -8,9 +8,11 @@
 //! `attractor/human` gates answers agent questions; Pebble never sees Petri's
 //! control types, and Petri never reads a terminal inside Pebble.
 //!
-//! Identity: a question's id is `<node>#<firing>/agent/<session>/<tool
-//! call>/<index>`, so the receipt records the Pebble session and tool call
-//! beside the workflow node, firing and attempt the dispatcher adds.
+//! Identity: a question's id is the URL-safe join
+//! `<node>~<firing>~agent~<session>~<tool call>~<index>` (fork
+//! denkhaus/work#1300 fix A), so the receipt records the Pebble session
+//! and tool call beside the workflow node, firing and attempt the
+//! dispatcher adds.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -75,13 +77,20 @@ impl AgentQuestions {
         }
     }
 
+    /// Fork (denkhaus/work#1300 fix A): the id is URL-safe — the
+    /// historical `<node>#<firing>/agent/…` composite carried `#` and
+    /// `/`, which the production proxy rejects percent-encoded, making
+    /// every call-scoped question unanswerable. The components are
+    /// `~`-joined and escaped by [`crate::fork_url_safe`].
     fn question_id(&self, tool_call_id: &str, index: usize) -> String {
-        format!(
-            "{}#{}/agent/{}/{tool_call_id}/{index}",
-            self.node,
-            self.firing.raw(),
-            self.session.get().map_or("?", String::as_str)
-        )
+        crate::fork_url_safe::id(&[
+            self.node.as_str(),
+            &self.firing.raw().to_string(),
+            "agent",
+            self.session.get().map_or("?", String::as_str),
+            tool_call_id,
+            &index.to_string(),
+        ])
     }
 }
 

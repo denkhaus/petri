@@ -405,8 +405,8 @@ async fn an_agent_question_and_a_human_gate_share_the_scripted_interviewer() {
         .find(|q| q["node"] == "agent")
         .expect("the agent's question");
     let id = agent["question"].as_str().expect("id");
-    assert!(id.contains("/agent/"), "{id}");
-    assert!(id.contains("/ask/0"), "tool call id and index: {id}");
+    assert!(id.contains("~agent~"), "{id}");
+    assert!(id.contains("~ask~0"), "tool call id and index: {id}");
     assert_eq!(agent["reply"]["choice"], "option_2");
     assert_eq!(agent["kind"], "multiple_choice");
     let gate = questions

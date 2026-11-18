@@ -15,27 +15,38 @@
 //! capabilities that already exist; no protocol change rides this.
 //!
 //! The tag is the cache: `petri-env-<hash12>` over the Dockerfile text
-//! and the packed context, so an unchanged environment costs one
-//! holder lifecycle and a tag-presence check, and the daemon's layer
-//! cache makes even a changed context cheap where layers did not move.
+//! and a context MANIFEST (work#1440: path/size/mtime per file, not
+//! the packed tar — the tar is packed only when the cook must build),
+//! so an unchanged environment costs one manifest walk, and the
+//! daemon's layer cache makes even a changed context cheap where
+//! layers did not move. Concurrent first cooks of the same tag
+//! single-flight through a process-wide guard (work#1440): the first
+//! caller builds, the rest block and reuse; after every successful
+//! cook a mint-time eviction caps the `petri-env` population at the
+//! newest few images, so concurrent gears no longer mint one full
+//! layer set each and fill the Docker disk.
 //!
-//! Known v1 residuals (accepted in the plan): the context upload
-//! happens before the `reuse` check can see the tag, so a cache hit
-//! still packs and uploads once per acquire; and the build one-shot
-//! runs a trivial `/bin/sh -c 'exit 0'` from the freshly built tag, so
-//! an environment image without a shell cannot be built this way.
+//! Known v2 residuals (accepted): the build one-shot runs a trivial
+//! `/bin/sh -c 'exit 0'` from the freshly built tag, so an environment
+//! image without a shell cannot be built this way; and the in-process
+//! fast path trusts the ledger — an out-of-band `docker rmi` between
+//! cook and use surfaces as an image-missing sandbox create, not as a
+//! rebuild (the daemon-side sweep keeps its evictions in sync through
+//! `forget`).
 
 use std::path::Path;
-use std::process::Command as StdCommand;
+use std::process::{Command as StdCommand, id};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{env, fs, io};
 
 use sandbox_driver::{
     Error as DriverError, ExecControls, OneShotImage, OneShotSpec, Sandbox, SandboxProvider,
     SandboxSource, SandboxSpec,
 };
-use sha2::{Digest as _, Sha256};
+use tokio::task::spawn_blocking;
 
-use crate::EnvError;
+use crate::{EnvError, image_flight};
 
 /// The holder's base: the smallest image that can run `tar` and `sh`.
 /// The daemon pulls it once; it exists only to hold the context.
@@ -68,6 +79,10 @@ pub(crate) struct EnvironmentBuild {
 /// Ensures the environment image exists on the daemon and returns the
 /// tag the scope must run on. A failure fails the scope's acquisition
 /// (a routable error; the run records `scope.failed`).
+///
+/// Single-flight per tag (work#1440): concurrent first cooks of the
+/// same tag yield exactly one full build — the rest block on the
+/// process-wide guard and reuse the built image.
 pub(crate) async fn ensure_environment_image(
     provider: &Arc<dyn SandboxProvider>,
     build: &EnvironmentBuild,
@@ -75,25 +90,48 @@ pub(crate) async fn ensure_environment_image(
 ) -> Result<String, EnvError> {
     let dockerfile = build.dockerfile.clone();
     let context = build.context.clone();
-    let context_tar = tokio::task::spawn_blocking(move || pack_context(Path::new(&context)))
+    // The digest walks the tree, not the tar: cheap enough to pay on
+    // every cook, and the tar is packed only on a manifest miss.
+    let digest_context = context.clone();
+    let digest_dockerfile = dockerfile.clone();
+    let hex = spawn_blocking(move || {
+        image_flight::manifest_digest(&digest_dockerfile, Path::new(&digest_context))
+    })
+    .await
+    .map_err(|error| backend_error(format!("the manifest digest task failed: {error}")))?
+    .map_err(|message| backend_error(format!("hashing the build context failed: {message}")))?;
+    let tag = format!("{}{hex}", image_flight::ENV_TAG_PREFIX);
+
+    // The single-flight seam: the first caller of this tag holds the
+    // guard through its build; every concurrent caller blocks here and
+    // proceeds once the image exists.
+    let guard = image_flight::guard_for(&tag);
+    let _single_flight = guard.lock().await;
+    // A tag THIS process already cooked needs no holder, no pack, no
+    // build one-shot — the ledger dropped it if the sweep evicted it.
+    if image_flight::is_built(&tag) {
+        tracing::debug!(%tag, "env image cook: in-process fast path");
+        return Ok(tag);
+    }
+
+    let context_tar = spawn_blocking(move || pack_context(Path::new(&context)))
         .await
         .map_err(|error| backend_error(format!("the context pack task failed: {error}")))?
         .map_err(|message| backend_error(format!("packing the build context failed: {message}")))?;
-
-    let mut hash = Sha256::new();
-    hash.update(dockerfile.as_bytes());
-    hash.update(&context_tar);
-    let digest = hash.finalize();
-    let hex: String = digest[..6]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    let tag = format!("petri-env-{hex}");
 
     let holder = create_holder(provider, holder_name)
         .await
         .map_err(|error| backend_error(format!("creating the build holder failed: {error}")))?;
     let outcome = build_on_holder(&holder, &dockerfile, &context_tar, &tag).await;
+    if outcome.is_ok() {
+        image_flight::note_built(&tag);
+        // Mint-time eviction (work#1440): rides the SAME holder — it is
+        // the only driver seam the cook holds — so it must run before
+        // the holder goes away. Gated on the fork feature: upstream
+        // sandbox-driver has no `evict_lru_images`.
+        #[cfg(feature = "env-image-evict")]
+        evict_beyond_ceiling(&holder).await;
+    }
     // The holder is machinery: it never outlives the attempt, whatever
     // the attempt's result.
     if let Err(problem) = holder.stop().await {
@@ -104,6 +142,39 @@ pub(crate) async fn ensure_environment_image(
     }
     outcome?;
     Ok(tag)
+}
+
+/// Caps the daemon's `petri-env` population at the newest
+/// [`image_flight::ENV_IMAGE_CEILING`] images after a successful cook.
+/// Eviction is a backstop the cook must survive: unsupported providers
+/// and daemon errors are warnings, and the evicted references leave
+/// the in-process fast path so a later cook re-adjudicates presence.
+#[cfg(feature = "env-image-evict")]
+async fn evict_beyond_ceiling(holder: &Arc<dyn Sandbox>) {
+    let Some(one_shot) = holder.one_shot() else {
+        return;
+    };
+    match one_shot
+        .evict_lru_images(
+            image_flight::ENV_TAG_PREFIX,
+            image_flight::ENV_IMAGE_CEILING,
+        )
+        .await
+    {
+        Ok(evicted) if evicted.is_empty() => {}
+        Ok(evicted) => {
+            tracing::info!(
+                count = evicted.len(),
+                ?evicted,
+                "env image cook: mint-time eviction"
+            );
+            image_flight::forget(&evicted);
+        }
+        Err(problem) => tracing::warn!(
+            %problem,
+            "env image cook: mint-time eviction unavailable"
+        ),
+    }
 }
 
 /// Creates the holder sandbox. Its labels mark it as build machinery;
@@ -199,11 +270,10 @@ async fn run_one_shot(
     let stderr = String::from_utf8_lossy(&result.result.stderr);
     Err(backend_error(format!(
         "{what} failed: {}{}",
-        result
-            .result
-            .exit_code
-            .map(|code| format!("exit {code}"))
-            .unwrap_or_else(|| "no exit observed".to_owned()),
+        result.result.exit_code.map_or_else(
+            || "no exit observed".to_owned(),
+            |code| format!("exit {code}")
+        ),
         if stderr.trim().is_empty() {
             String::new()
         } else {
@@ -224,11 +294,11 @@ fn pack_context(root: &Path) -> Result<Vec<u8>, String> {
             root.display()
         ));
     }
-    let temp = std::env::temp_dir().join(format!(
+    let temp = env::temp_dir().join(format!(
         "petri-env-ctx-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .map(|since| since.as_millis())
             .unwrap_or_default()
     ));
@@ -244,7 +314,7 @@ fn pack_context(root: &Path) -> Result<Vec<u8>, String> {
         .status()
         .map_err(|error| format!("running git clone failed: {error}"))?;
     if !status.success() {
-        let _ = std::fs::remove_dir_all(&temp);
+        let _ = fs::remove_dir_all(&temp);
         return Err("git clone of the context failed".to_owned());
     }
 
@@ -254,7 +324,7 @@ fn pack_context(root: &Path) -> Result<Vec<u8>, String> {
     let bytes = archive
         .into_inner()
         .map_err(|error| format!("finishing the context tar failed: {error}"))?;
-    let _ = std::fs::remove_dir_all(&temp);
+    let _ = fs::remove_dir_all(&temp);
     Ok(bytes)
 }
 
@@ -264,12 +334,8 @@ fn pack_context(root: &Path) -> Result<Vec<u8>, String> {
 /// `.dockerignore` (tuned for the runtime image's staged-binary
 /// context) would exclude everything from an environment build — the
 /// daemon applies it when it unpacks the context tar.
-fn append_tree(
-    archive: &mut tar::Builder<Vec<u8>>,
-    dir: &Path,
-    prefix: &str,
-) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
+fn append_tree(archive: &mut tar::Builder<Vec<u8>>, dir: &Path, prefix: &str) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if name == ".git" || (name == ".dockerignore" && prefix.is_empty()) {
@@ -281,7 +347,7 @@ fn append_tree(
         } else {
             format!("{prefix}/{name}")
         };
-        let metadata = std::fs::metadata(&path)?;
+        let metadata = fs::metadata(&path)?;
         if metadata.is_dir() {
             archive.append_dir(&arc, &path)?;
             append_tree(archive, &path, &arc)?;

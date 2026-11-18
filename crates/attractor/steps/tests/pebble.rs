@@ -902,9 +902,9 @@ async fn an_agent_question_rides_the_core_question_protocol() {
     assert_eq!(output_of(&report, "a")["text"], "Editing CHANGELOG.");
     let asked = answerer.asked.lock().expect("not poisoned").clone();
     assert_eq!(asked.len(), 1);
-    assert!(asked[0].id.starts_with("a#"), "{}", asked[0].id);
-    assert!(asked[0].id.contains("/agent/"), "{}", asked[0].id);
-    assert!(asked[0].id.ends_with("/ask/0"), "{}", asked[0].id);
+    assert!(asked[0].id.starts_with("a~"), "{}", asked[0].id);
+    assert!(asked[0].id.contains("~agent~"), "{}", asked[0].id);
+    assert!(asked[0].id.ends_with("~ask~0"), "{}", asked[0].id);
     assert_eq!(asked[0].kind.as_deref(), Some("multiple_choice"));
     assert_eq!(asked[0].options.len(), 2);
     assert_eq!(asked[0].options[1].key, "option_2");

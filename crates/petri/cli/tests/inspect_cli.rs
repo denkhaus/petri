@@ -517,7 +517,7 @@ fn inspect_shows_a_sensitive_answer_as_a_secret_reference_only() {
     assert!(
         answer["payload"]["$answer"]["text"]["$secret"]
             .as_str()
-            .is_some_and(|name| name.starts_with("answer:gate#")),
+            .is_some_and(|name| name.starts_with("answer:gate~")),
         "{answer:#}"
     );
     // The interview receipt rides the same document, with the answer as its
@@ -536,7 +536,7 @@ fn inspect_shows_a_sensitive_answer_as_a_secret_reference_only() {
     assert!(
         question["reply"]["text"]["$secret"]
             .as_str()
-            .is_some_and(|name| name.starts_with("answer:gate#")),
+            .is_some_and(|name| name.starts_with("answer:gate~")),
         "{question:#}"
     );
     for file in snapshot(&run_dir).values() {

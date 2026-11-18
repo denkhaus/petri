@@ -27,6 +27,7 @@ pub mod fallback;
 pub mod fidelity;
 pub mod fork_context_tokens;
 pub mod fork_preamble_policy;
+pub mod fork_url_safe;
 pub mod hooks;
 pub mod host_tools;
 pub mod human;

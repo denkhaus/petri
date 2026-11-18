@@ -29,6 +29,9 @@ pub mod fingerprint;
 mod gate;
 mod host;
 mod image_build;
+mod image_flight;
+#[cfg(test)]
+mod image_flight_tests;
 pub mod in_process;
 #[cfg(test)]
 mod in_process_tests;
