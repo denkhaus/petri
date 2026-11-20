@@ -178,3 +178,68 @@ fn ceiling_and_prefix_keep_their_decided_shape() {
     assert_eq!(image_flight::ENV_TAG_PREFIX, "petri-env-");
     assert_eq!(image_flight::ENV_IMAGE_CEILING, 6);
 }
+
+// Cross-process single-flight pins (work#1463). The cooks run one
+// process per gear, so the in-process guard/ledger see only THIS
+// process's cooks; the daemon presence probe is the cross-process
+// half. No end-to-end concurrent-cook harness exists in this suite
+// (the cook path runs only against a real docker provider), so the
+// pins drive `image_build::cook_path` — the exact decision the ensure
+// path composes with its ledger miss and the probe — the pure seam
+// the item named for the simulation.
+mod cross_process {
+    use sandbox_driver::Error;
+
+    use crate::image_build::{CookPath, cook_path};
+    use crate::image_flight;
+
+    /// Pin (a) of work#1463, red under the old code: two cooks from
+    /// two "processes" — the second's ledger is empty (a fresh process
+    /// static) — MUST let the second reuse WITHOUT a build when the
+    /// daemon already holds the tag. Observed before the fix: every
+    /// process held its own empty ledger and guard registry and built
+    /// (three mints of one tag, 2026-11-19 fabro container logs).
+    #[test]
+    fn a_daemon_present_second_process_reuses_without_a_build() {
+        let tag = "petri-env-flight-cross-present";
+        image_flight::forget(&[tag.to_owned()]); // the ledger starts EMPTY (fresh process)
+        assert!(
+            !image_flight::is_built(tag),
+            "the pin must start from a ledger miss, as a fresh process does"
+        );
+        assert_eq!(
+            cook_path(Ok(true), tag),
+            CookPath::Reuse,
+            "a presence hit must reuse"
+        );
+        assert!(
+            image_flight::is_built(tag),
+            "the reused tag joins the fast-path ledger"
+        );
+        image_flight::forget(&[tag.to_owned()]);
+    }
+
+    /// A daemon miss builds, and does NOT pre-seed the ledger: only a
+    /// successful cook may (the build path's own `note_built`).
+    #[test]
+    fn a_daemon_absent_cook_builds_without_touching_the_ledger() {
+        let tag = "petri-env-flight-cross-absent";
+        image_flight::forget(&[tag.to_owned()]);
+        assert_eq!(cook_path(Ok(false), tag), CookPath::Build);
+        assert!(
+            !image_flight::is_built(tag),
+            "the decision alone must not mark the tag built"
+        );
+    }
+
+    /// A probe failure fails OPEN to Build — a duplicate build whose
+    /// layers the daemon dedupes, never a stuck cook.
+    #[test]
+    fn an_unavailable_probe_fails_open_to_build() {
+        let tag = "petri-env-flight-cross-unavail";
+        image_flight::forget(&[tag.to_owned()]);
+        let probe = Err(Error::unsupported(sandbox_driver::Capability::OneShot));
+        assert_eq!(cook_path(probe, tag), CookPath::Build);
+        assert!(!image_flight::is_built(tag));
+    }
+}

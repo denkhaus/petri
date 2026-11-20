@@ -21,10 +21,13 @@
 //! daemon's layer cache makes even a changed context cheap where
 //! layers did not move. Concurrent first cooks of the same tag
 //! single-flight through a process-wide guard (work#1440): the first
-//! caller builds, the rest block and reuse; after every successful
-//! cook a mint-time eviction caps the `petri-env` population at the
-//! newest few images, so concurrent gears no longer mint one full
-//! layer set each and fill the Docker disk.
+//! caller builds, the rest block and reuse; and because the cooks run
+//! one process PER GEAR (work#1463), the post-ledger-miss path
+//! re-checks the daemon itself for the tag and reuses when another
+//! process already cooked it. After every successful cook a mint-time
+//! eviction caps the `petri-env` population at the newest few images,
+//! so concurrent gears no longer mint one full layer set each and
+//! fill the Docker disk.
 //!
 //! Known v2 residuals (accepted): the build one-shot runs a trivial
 //! `/bin/sh -c 'exit 0'` from the freshly built tag, so an environment
@@ -104,7 +107,10 @@ pub(crate) async fn ensure_environment_image(
 
     // The single-flight seam: the first caller of this tag holds the
     // guard through its build; every concurrent caller blocks here and
-    // proceeds once the image exists.
+    // proceeds once the image exists. Process-LOCAL (work#1463): the
+    // cooks run one process per gear, so the guard and the ledger
+    // below only serialize THIS process's cooks — cross-process
+    // dedup rides the daemon presence probe after the ledger miss.
     let guard = image_flight::guard_for(&tag);
     let _single_flight = guard.lock().await;
     // A tag THIS process already cooked needs no holder, no pack, no
@@ -114,14 +120,30 @@ pub(crate) async fn ensure_environment_image(
         return Ok(tag);
     }
 
+    let holder = create_holder(provider, holder_name)
+        .await
+        .map_err(|error| backend_error(format!("creating the build holder failed: {error}")))?;
+    // Cross-process presence re-check (work#1463): another gear's
+    // process may already have cooked this tag — the daemon is the
+    // shared truth. A hit skips the pack and the build entirely.
+    #[cfg(feature = "env-image-evict")]
+    {
+        let one_shot = holder
+            .one_shot()
+            .ok_or_else(|| backend_error("the holder lost its one-shot capability".to_owned()))?;
+        if cook_path_after_ledger_miss(one_shot, &tag).await == CookPath::Reuse {
+            retire_holder(&holder, &tag).await;
+            return Ok(tag);
+        }
+    }
+    // Feature-off builds (upstream sandbox-driver, no image_present)
+    // and probe failures fall through to the build path.
+
     let context_tar = spawn_blocking(move || pack_context(Path::new(&context)))
         .await
         .map_err(|error| backend_error(format!("the context pack task failed: {error}")))?
         .map_err(|message| backend_error(format!("packing the build context failed: {message}")))?;
 
-    let holder = create_holder(provider, holder_name)
-        .await
-        .map_err(|error| backend_error(format!("creating the build holder failed: {error}")))?;
     let outcome = build_on_holder(&holder, &dockerfile, &context_tar, &tag).await;
     if outcome.is_ok() {
         image_flight::note_built(&tag);
@@ -134,14 +156,83 @@ pub(crate) async fn ensure_environment_image(
     }
     // The holder is machinery: it never outlives the attempt, whatever
     // the attempt's result.
+    retire_holder(&holder, &tag).await;
+    outcome?;
+    Ok(tag)
+}
+
+/// Stops and deletes the holder — machinery that never outlives the
+/// cook attempt, whatever the attempt's result.
+async fn retire_holder(holder: &Arc<dyn Sandbox>, tag: &str) {
     if let Err(problem) = holder.stop().await {
         tracing::warn!(%tag, %problem, "env image build: stopping the holder failed");
     }
     if let Err(problem) = holder.delete().await {
         tracing::warn!(%tag, %problem, "env image build: deleting the holder failed");
     }
-    outcome?;
-    Ok(tag)
+}
+
+/// The path a post-ledger-miss cook takes after the daemon presence
+/// probe (work#1463).
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(feature = "env-image-evict"),
+    allow(
+        dead_code,
+        reason = "driven only through the fork probe; the pins exercise it in tests"
+    )
+)]
+pub(crate) enum CookPath {
+    /// The daemon already holds the tag — reuse it, no build.
+    Reuse,
+    /// Build the image.
+    Build,
+}
+
+/// The cross-process single-flight DECISION (work#1463), pure over the
+/// probe's outcome so the fork-only pins can drive it without a
+/// daemon: after the in-process ledger misses, the daemon is
+/// re-checked for the tag. A presence hit means another process's
+/// cook already minted it — the tag joins the fast-path ledger and
+/// the cook reuses it with no pack and no build. A probe failure
+/// (including providers without the facet) fails OPEN to `Build`: the
+/// worst case is a duplicate build whose layers the daemon dedupes,
+/// never a stuck cook.
+#[cfg_attr(
+    not(feature = "env-image-evict"),
+    allow(
+        dead_code,
+        reason = "driven only through the fork probe; the pins exercise it in tests"
+    )
+)]
+pub(crate) fn cook_path(probe: Result<bool, DriverError>, tag: &str) -> CookPath {
+    match probe {
+        Ok(true) => {
+            tracing::info!(%tag, "env image cook: the daemon already holds the tag — reusing");
+            image_flight::note_built(tag);
+            CookPath::Reuse
+        }
+        Ok(false) => CookPath::Build,
+        Err(problem) => {
+            tracing::warn!(
+                %tag,
+                %problem,
+                "env image cook: daemon presence probe unavailable — building"
+            );
+            CookPath::Build
+        }
+    }
+}
+
+/// Runs the daemon presence probe and maps its outcome through
+/// [`cook_path`]. Gated on the fork feature exactly like the eviction
+/// sweep: upstream sandbox-driver has no `OneShot::image_present`.
+#[cfg(feature = "env-image-evict")]
+async fn cook_path_after_ledger_miss(
+    one_shot: &dyn sandbox_driver::OneShot,
+    tag: &str,
+) -> CookPath {
+    cook_path(one_shot.image_present(tag).await, tag)
 }
 
 /// Caps the daemon's `petri-env` population at the newest

@@ -1235,9 +1235,19 @@ const WORKFLOW_TOML_TOP_LEVEL: &[&str] = &[
 ];
 
 /// The `[workflow]` keys Fabro's settings parser accepts: the bundle's
-/// name, description, graph path and metadata, and `engine`
-/// (`"petri"` or `"legacy"`), which Fabro reads to choose the engine.
-const WORKFLOW_SECTION_KEYS: &[&str] = &["name", "description", "graph", "metadata", "engine"];
+/// name, description, graph path and metadata, `engine` (`"petri"` or
+/// `"legacy"`), which Fabro reads to choose the engine, and
+/// `terminal_cleanup`, the command the Fabro server runs in a run's
+/// sandbox when the run turns terminal (read by the server, by nothing
+/// here).
+const WORKFLOW_SECTION_KEYS: &[&str] = &[
+    "name",
+    "description",
+    "graph",
+    "metadata",
+    "engine",
+    "terminal_cleanup",
+];
 
 /// The `[environments.<id>]` keys Fabro's settings parser accepts
 /// (`EnvironmentLayer` in `fabro-config`). The lowering reads `provider`,
@@ -1390,6 +1400,44 @@ fn rename_hint(key: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frontend::MapFiles;
+
+    /// The gear fleet declares `[workflow] terminal_cleanup` (work#1478,
+    /// work#1509): the command the Fabro server runs in a run's sandbox when
+    /// the run turns terminal, before the container is released. Fabro's
+    /// settings parser accepts the key, so the validator must not refuse it.
+    #[test]
+    fn accepts_the_gear_fleets_terminal_cleanup_declaration() {
+        let files = MapFiles(BTreeMap::from([(
+            "workflow.toml".to_string(),
+            r#"
+_version = 1
+
+[workflow]
+graph = "workflow.fabro"
+terminal_cleanup = "nu .fabro/scripts/run-cleanup.nu"
+"#
+            .to_string(),
+        )]));
+        let inputs = CompileInputs::default();
+        let mut template = Context::new(&inputs);
+        let mut diags = Diagnostics::new();
+        let _settings = read("workflow.fabro", &files, &inputs, &mut template, &mut diags);
+        let refusals: Vec<String> = diags
+            .iter()
+            .filter(|diag| diag.unsupported_feature() == Some("workflow_toml.key"))
+            .map(ToString::to_string)
+            .collect();
+        assert!(
+            refusals.is_empty(),
+            "`[workflow] terminal_cleanup` must validate, refused: {refusals:?}"
+        );
+        assert!(
+            !diags.has_errors(),
+            "unexpected errors: {:?}",
+            diags.iter().collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn sizes_follow_fabro() {

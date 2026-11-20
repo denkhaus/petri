@@ -6,9 +6,12 @@
 //! later caller of the same tag blocks on the guard and then reuses
 //! the built image — through the in-process fast path when this
 //! process cooked the tag, or through the tag-presence `reuse` arm of
-//! the build one-shot otherwise. All gears cook in the same
-//! fabro-server process, so an in-process lock is sufficient; no
-//! cross-process coordination rides this.
+//! the build one-shot otherwise. The guard and the ledger are
+//! PROCESS-LOCAL (work#1463): the cooks run one process per gear, so
+//! they alone never dedupe across gears — the post-ledger-miss path
+//! closes that gap by re-checking the daemon for the tag
+//! (`image_build::cook_path_after_ledger_miss`, work#1463): a hit
+//! reuses without a build, a miss builds.
 //!
 //! The mint-time CEILING is enforced daemon-side (the driver's
 //! `evict_lru_images`, creation-time ordering): that bounds the
