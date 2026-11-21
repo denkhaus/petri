@@ -32,7 +32,8 @@ fn the_gear_fleets_workflow_section_keys_validate() {
         "workflow.toml".to_string(),
         GEAR_FLEET_SECTION.to_string(),
     )]));
-    let text = "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n  start -> exit\n}\n";
+    let text =
+        "digraph T {\n  start [shape=Mdiamond]\n  exit [shape=Msquare]\n  start -> exit\n}\n";
     let lowered = load("w.fabro", text, &files, &CompileInputs::new());
     let refusals: Vec<String> = lowered
         .diagnostics

@@ -1399,8 +1399,9 @@ fn rename_hint(key: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use frontend::MapFiles;
+
+    use super::*;
 
     /// The gear fleet declares `[workflow] terminal_cleanup` (work#1478,
     /// work#1509): the command the Fabro server runs in a run's sandbox when
