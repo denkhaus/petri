@@ -45,6 +45,14 @@ tracing.workspace = true
 testkit.workspace = true
 # The in-process source's shutdown is tested against the real Host provider.
 sandbox-driver-host.workspace = true
+# Fork feature (work#1551): the storm pin drives the environment cook
+# against a real Docker daemon through the built-in Docker provider (the
+# fork's one-shot facets), and counts builds on the daemon's event stream
+# through bollard. Compiles into every test build; runs only when a
+# daemon answers.
+sandbox-driver-docker.workspace = true
+bollard.workspace = true
+futures-util.workspace = true
 # The Daytona battery fetches a preview URL the provider signs for a port.
 reqwest.workspace = true
 

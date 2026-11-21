@@ -86,6 +86,7 @@ impl Executor for NoExecutor {
                 image:             None,
                 snapshot:          None,
                 working_directory: "/".into(),
+                image_cook:        None,
             },
             Arc::new(NoEnv),
             (),

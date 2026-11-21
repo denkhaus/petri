@@ -22,6 +22,15 @@
 mod acquire_tests;
 mod actions;
 mod backend;
+#[cfg_attr(
+    not(feature = "env-image-evict"),
+    allow(
+        dead_code,
+        reason = "the daemon-side cook lock (work#1551); the serialized cook drives it on \
+                  the fork feature, and the fork-only pins exercise it in tests"
+    )
+)]
+mod cook_lock;
 #[cfg(test)]
 mod daytona_tests;
 mod env;
@@ -47,7 +56,7 @@ mod simulated_tests;
 mod snapshots;
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -199,6 +208,12 @@ impl SandboxExecutor {
             None => (SandboxLeaseId::new(u64::from(scope.id.raw())), true),
         };
         let name = self.identity.container_name(lease);
+        // The cook's outcome (work#1551) escapes the acquire closure
+        // here and lands on the acquired sandbox's record below — the
+        // engine-side `scope.acquired` vocabulary carries it to the
+        // run's stream.
+        let cook: Arc<Mutex<Option<ir::ImageCook>>> = Arc::new(Mutex::new(None));
+        let cook_out = cook.clone();
         let acquired = self
             .manager
             .acquire(
@@ -208,11 +223,16 @@ impl SandboxExecutor {
                     standalone,
                 },
                 |labels, provider| async move {
-                    let mut spec = self
+                    let (mut spec, outcome) = self
                         .build_spec(scope, &labels, &name, ctx, &provider)
                         .await?;
                     if !self.simulated {
                         spec.network = self.options.network.clone();
+                    }
+                    if let Some(outcome) = outcome
+                        && let Ok(mut cook) = cook_out.try_lock()
+                    {
+                        *cook = Some(outcome);
                     }
                     Ok(spec)
                 },
@@ -262,7 +282,11 @@ impl SandboxExecutor {
             env_overrides.extend(options.env.clone());
         }
         let workspace = sandbox.working_directory().to_owned();
-        let instance = self.describe(&**sandbox, &workspace).await;
+        let mut instance = self.describe(&**sandbox, &workspace).await;
+        // The cook's outcome (work#1551): a scope whose environment
+        // image this acquisition ensured carries how on its
+        // `scope.acquired` record.
+        instance.image_cook = cook.lock().unwrap_or_else(PoisonError::into_inner).take();
         let host = !self.simulated
             && self.options.backend == SandboxBackend::Host
             && matches!(scope.runtime.target, RuntimeTarget::HostProcess);
@@ -322,9 +346,16 @@ impl SandboxExecutor {
             image:             image.map(SmolStr::new),
             snapshot:          snapshot.map(SmolStr::new),
             working_directory: SmolStr::new(workspace),
+            // The cook's outcome is grafted on by the acquirer; what
+            // the provider describes knows nothing of it.
+            image_cook:        None,
         }
     }
 
+    /// Builds the sandbox spec for `scope` and reports what an
+    /// environment-image cook did along the way (`None` when no cook
+    /// ran): the outcome rides the scope's `scope.acquired` record
+    /// (work#1551 decision 5).
     async fn build_spec(
         &self,
         scope: &ScopeSpec,
@@ -332,7 +363,7 @@ impl SandboxExecutor {
         name: &str,
         ctx: &AcquireContext,
         provider: &Arc<dyn SandboxProvider>,
-    ) -> Result<SandboxSpec, EnvError> {
+    ) -> Result<(SandboxSpec, Option<ir::ImageCook>), EnvError> {
         if self.simulated {
             // A name, a working directory string and the run's labels:
             // nothing the scope declares (its image, services, env or
@@ -341,7 +372,7 @@ impl SandboxExecutor {
                 .name(name)
                 .working_directory(format!("/{SIMULATED_KIND}/{}", scope.workspace_id));
             spec.labels.extend(labels.iter().cloned());
-            return Ok(spec);
+            return Ok((spec, None));
         }
         if self.options.backend == SandboxBackend::Host
             && matches!(scope.runtime.target, RuntimeTarget::HostProcess)
@@ -365,7 +396,7 @@ impl SandboxExecutor {
                     .iter()
                     .map(|(key, value)| (key.to_string(), value.to_string())),
             );
-            return Ok(spec);
+            return Ok((spec, None));
         }
         if self.options.backend != SandboxBackend::Daytona {
             // A build declaration (ADR-0042): ensure the environment
@@ -378,24 +409,24 @@ impl SandboxExecutor {
                 build: Some(build), ..
             } = &scope.runtime.target
             {
-                let built = image_build::ensure_environment_image(
+                let cooked = image_build::ensure_environment_image(
                     provider,
                     &image_build::EnvironmentBuild {
                         dockerfile: build.dockerfile.to_string(),
                         context:    build.context.to_string(),
                     },
-                    &format!("{name}-env-build"),
                 )
                 .await?;
-                tracing::info!(%built, "environment image ensured");
+                tracing::info!(tag = %cooked.tag, "environment image ensured");
                 let mut runner = scope.clone();
                 if let ir::RuntimeTarget::Container { image, build, .. } =
                     &mut runner.runtime.target
                 {
-                    *image = built.into();
+                    *image = cooked.tag.into();
                     *build = None;
                 }
-                return build_spec(&runner, labels, name, ctx);
+                let spec = build_spec(&runner, labels, name, ctx)?;
+                return Ok((spec, cooked.cook));
             }
             if self.options.backend == SandboxBackend::Docker
                 && matches!(scope.runtime.target, RuntimeTarget::HostProcess)
@@ -407,9 +438,9 @@ impl SandboxExecutor {
                     credentials: None,
                     build:       None,
                 };
-                return build_spec(&runner, labels, name, ctx);
+                return Ok((build_spec(&runner, labels, name, ctx)?, None));
             }
-            return build_spec(scope, labels, name, ctx);
+            return Ok((build_spec(scope, labels, name, ctx)?, None));
         }
         let image = self.options.runner_image(&scope.runtime)?;
         let snapshot = RunnerSnapshot::new(
@@ -429,7 +460,7 @@ impl SandboxExecutor {
             )
         })?;
         self.snapshots.ensure(snapshots, &snapshot).await?;
-        Ok(spec)
+        Ok((spec, None))
     }
 }
 

@@ -430,6 +430,7 @@ impl Executor for WorldExecutor {
                 image: None,
                 snapshot: None,
                 working_directory: "/".into(),
+                image_cook: None,
             },
             Arc::new(WorldEnv {
                 world: Arc::clone(&self.world),

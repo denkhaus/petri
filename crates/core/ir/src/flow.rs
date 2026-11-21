@@ -364,6 +364,34 @@ pub struct SandboxInstance {
     /// The directory commands run in by default: the scope's workspace as
     /// the sandbox sees it.
     pub working_directory: SmolStr,
+    /// How the environment image this sandbox runs was ensured, when the
+    /// scope's runtime declared an image build (fork, work#1551): the
+    /// cook's outcome, riding the `scope.acquired` record so the run's
+    /// stream shows whether the image was built, reused, or waited for —
+    /// without shell access to the host. `None` when the scope declared
+    /// no build or the executor cannot observe the cook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_cook:        Option<ImageCook>,
+}
+
+/// The environment cook's outcome for a scope that declared an image
+/// build (fork, work#1551): what ensuring the image did. Every variant
+/// names the tag the scope runs on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageCook {
+    /// This cook acquired the daemon-side cook lock first and built the
+    /// image (the "lock-acquired" outcome).
+    Built { tag: SmolStr },
+    /// The daemon already held the tag; no build ran (the presence probe
+    /// or the process ledger hit).
+    Reused { tag: SmolStr },
+    /// This cook lost the lock race, waited on the winner, and reused
+    /// the tag at its mint.
+    Waited { tag: SmolStr },
+    /// This cook reclaimed a dead winner's lock and built (lock
+    /// liveness, work#1551 decision 3).
+    Reclaimed { tag: SmolStr },
 }
 
 /// Counters reported by a step. Free-form so step kinds can add their own.

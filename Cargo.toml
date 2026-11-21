@@ -90,6 +90,12 @@ sandbox-driver-docker-config = { git = "https://github.com/lithoscomputer/sandbo
 sandbox-driver-daytona-config = { git = "https://github.com/lithoscomputer/sandbox-driver.git", branch = "main" }
 # Tests only: the built-in Host provider, linked the way an embedder links it.
 sandbox-driver-host = { git = "https://github.com/lithoscomputer/sandbox-driver.git", branch = "main" }
+# Tests only (fork, work#1551): the storm pin drives the environment cook
+# against a real daemon through the built-in Docker provider, and reads
+# the daemon's event stream to count the builds that ran.
+sandbox-driver-docker = { git = "https://github.com/lithoscomputer/sandbox-driver.git", branch = "main" }
+bollard = "0.18"
+futures-util = "0.3"
 steps = { package = "petri-steps", path = "crates/core/steps" }
 driver = { package = "petri-driver", path = "crates/core/driver" }
 execution = { package = "petri-execution", path = "crates/core/execution" }
@@ -174,3 +180,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [patch."https://github.com/lithoscomputer/pebble.git"]
 pebble-coding-agent = { git = "https://github.com/denkhaus/pebble", branch = "fabro" }
 pebble-agent = { git = "https://github.com/denkhaus/pebble", branch = "fabro" }
+
+
+
